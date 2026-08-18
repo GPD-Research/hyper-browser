@@ -13,6 +13,9 @@ This repo now includes a working Android project scaffold and a functional dual-
 - Safe transfer handling with duplicate-name resolution and selection clearing after each action
 - Transfer status strip showing the active source, selected count, and target folder
 - Preview/detail pane summarizing the current file or folder metadata before open/copy/move actions
+- Image-first view flow: selecting an image offers Open and View, with View launching an in-app zoomable image browser
+- In-app image gallery behavior: zooming out fully reveals a thumbnail strip of the directory, then another image can be selected without leaving the viewer
+- Non-image files use the default application flow: Open sends the file to the user’s default app, and the OS chooser handles the first-launch app selection flow when no default exists
 - Text-only browsing with no background indexing or thumbnail generation
 - Intent delegation for app-open actions through the Android chooser
 - Devcontainer support to restore the Android SDK automatically on rebuild
@@ -29,4 +32,4 @@ gradle :app:assembleDebug
 
 ## Notes
 
-This slice focuses on the browser shell, SAF transfer model, and transfer UX. The native Rust copy/move engine remains the next integration step for high-performance batch operations and sub-sampled image parsing.
+This slice focuses on the browser shell, SAF transfer model, transfer UX, and image-specific viewing flow. The native Rust copy/move engine remains the next integration step for high-performance batch operations and sub-sampled image parsing.
