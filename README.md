@@ -10,6 +10,8 @@ This repo now includes a working Android project scaffold and a functional dual-
 - Active pane tracking and opposite-pane transfer target selection
 - Direction arrow to flip the transfer vector without changing the selection
 - Copy/move actions that operate against the selected items and target folder
+- Safe transfer handling with duplicate-name resolution and selection clearing after each action
+- Transfer status strip showing the active source, selected count, and target folder
 - Text-only browsing with no background indexing or thumbnail generation
 - Intent delegation for app-open actions through the Android chooser
 - Devcontainer support to restore the Android SDK automatically on rebuild
@@ -26,4 +28,4 @@ gradle :app:assembleDebug
 
 ## Notes
 
-This slice focuses on the browser shell and SAF transfer model. The native Rust copy/move engine remains the next integration step for high-performance batch operations and sub-sampled image parsing.
+This slice focuses on the browser shell, SAF transfer model, and transfer UX. The native Rust copy/move engine remains the next integration step for high-performance batch operations and sub-sampled image parsing.

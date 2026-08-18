@@ -104,11 +104,25 @@ private fun HyperBrowserApp() {
                     onFlip = { targetPane = if (targetPane == Pane.LEFT) Pane.RIGHT else Pane.LEFT },
                     onCopy = {
                         val targetDir = targetState.current ?: targetState.root ?: return@ActionBar
-                        performTransfer(activity, activeState, targetDir, true)
+                        val transferred = performTransfer(activity, activeState, targetDir, true)
+                        if (transferred > 0) {
+                            if (activePane == Pane.LEFT) {
+                                leftPane = leftPane.copy(selected = emptySet())
+                            } else {
+                                rightPane = rightPane.copy(selected = emptySet())
+                            }
+                        }
                     },
                     onMove = {
                         val targetDir = targetState.current ?: targetState.root ?: return@ActionBar
-                        performTransfer(activity, activeState, targetDir, false)
+                        val transferred = performTransfer(activity, activeState, targetDir, false)
+                        if (transferred > 0) {
+                            if (activePane == Pane.LEFT) {
+                                leftPane = leftPane.copy(selected = emptySet())
+                            } else {
+                                rightPane = rightPane.copy(selected = emptySet())
+                            }
+                        }
                     },
                     onOpen = {
                         selectedFile?.let { uri ->
@@ -122,6 +136,14 @@ private fun HyperBrowserApp() {
                             )
                         }
                     },
+                )
+
+                TransferStatusBar(
+                    sourceTitle = if (activePane == Pane.LEFT) "Left" else "Right",
+                    sourcePath = activeState.current?.let { resolveDisplayPath(activity, it) } ?: "No folder selected",
+                    targetTitle = if (targetPane == Pane.LEFT) "Left" else "Right",
+                    targetPath = targetState.current?.let { resolveDisplayPath(activity, it) } ?: "No folder selected",
+                    selectedCount = activeState.selected.size,
                 )
 
                 Row(Modifier.fillMaxSize()) {
@@ -166,12 +188,16 @@ private fun performTransfer(
     sourceState: BrowserPaneState,
     targetUri: Uri,
     copyMode: Boolean,
-) {
-    val targetDoc = DocumentFile.fromTreeUri(activity, targetUri) ?: return
+): Int {
+    val targetDoc = DocumentFile.fromTreeUri(activity, targetUri) ?: return 0
+    var transferred = 0
     sourceState.selected.forEach { uri ->
         val srcDoc = DocumentFile.fromSingleUri(activity, uri) ?: return@forEach
-        transferDocument(activity.contentResolver, srcDoc, targetDoc, copyMode)
+        if (transferDocument(activity.contentResolver, srcDoc, targetDoc, copyMode)) {
+            transferred += 1
+        }
     }
+    return transferred
 }
 
 private fun transferDocument(
@@ -179,30 +205,61 @@ private fun transferDocument(
     source: DocumentFile,
     targetDir: DocumentFile,
     copyMode: Boolean,
-) {
+): Boolean {
     if (source.isDirectory) {
-        val targetName = source.name ?: "folder"
-        val destination = targetDir.findFile(targetName) ?: targetDir.createDirectory(targetName) ?: return
-        source.listFiles().forEach { child -> transferDocument(resolver, child, destination, copyMode) }
-        if (!copyMode) {
+        val targetName = nextAvailableName(targetDir, source.name ?: "folder")
+        val destination = targetDir.findFile(targetName) ?: targetDir.createDirectory(targetName) ?: return false
+        var copied = true
+        source.listFiles().forEach { child ->
+            if (!transferDocument(resolver, child, destination, copyMode)) {
+                copied = false
+            }
+        }
+        if (!copyMode && copied) {
             source.delete()
         }
-        return
+        return copied
     }
 
-    val targetName = source.name ?: "file"
-    val destination = targetDir.findFile(targetName) ?: targetDir.createFile("application/octet-stream", targetName) ?: return
+    val targetName = nextAvailableName(targetDir, source.name ?: "file")
+    val destination = targetDir.findFile(targetName) ?: targetDir.createFile("application/octet-stream", targetName) ?: return false
     resolver.openInputStream(source.uri)?.use { input ->
-        resolver.openOutputStream(destination.uri)?.use { output -> copyStream(input, output) }
-    }
+        resolver.openOutputStream(destination.uri)?.use { output ->
+            copyStream(input, output)
+        }
+    } ?: return false
     if (!copyMode) {
         source.delete()
+    }
+    return true
+}
+
+private fun nextAvailableName(targetDir: DocumentFile, preferredName: String): String {
+    if (targetDir.findFile(preferredName) == null) {
+        return preferredName
+    }
+
+    val dotIndex = preferredName.lastIndexOf('.')
+    val base = if (dotIndex > 0) preferredName.substring(0, dotIndex) else preferredName
+    val extension = if (dotIndex > 0) preferredName.substring(dotIndex) else ""
+    var counter = 1
+    while (true) {
+        val candidate = "$base ($counter)$extension"
+        if (targetDir.findFile(candidate) == null) {
+            return candidate
+        }
+        counter += 1
     }
 }
 
 private fun copyStream(input: InputStream, output: OutputStream) {
     input.copyTo(output)
     output.flush()
+}
+
+private fun resolveDisplayPath(context: ComponentActivity, uri: Uri): String {
+    val doc = DocumentFile.fromTreeUri(context, uri) ?: return uri.lastPathSegment ?: "Unknown"
+    return doc.name ?: uri.lastPathSegment ?: "Unknown"
 }
 
 @Composable
@@ -238,6 +295,35 @@ private fun ActionBar(
                 Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = "Open with another app")
             }
         }
+    }
+}
+
+@Composable
+private fun TransferStatusBar(
+    sourceTitle: String,
+    sourcePath: String,
+    targetTitle: String,
+    targetPath: String,
+    selectedCount: Int,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Text(
+            text = "$sourceTitle: $sourcePath",
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            style = MaterialTheme.typography.labelSmall,
+        )
+        Text(
+            text = "${selectedCount} selected · $targetTitle: $targetPath",
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            style = MaterialTheme.typography.labelSmall,
+        )
     }
 }
 
