@@ -148,7 +148,7 @@ private fun HyperBrowserApp() {
                     targetPath = targetState.current?.let { resolveDisplayPath(activity, it) } ?: "No folder selected",
                     selectedCount = activeState.selected.size,
                 )
-                SelectionDetailsPanel(info = selectedInfo)
+                PreviewDetailPane(info = selectedInfo)
 
                 Row(Modifier.fillMaxSize()) {
                     DirectoryPane(
@@ -403,34 +403,45 @@ private fun TransferStatusBar(
 }
 
 @Composable
-private fun SelectionDetailsPanel(info: SelectionInfo) {
+private fun PreviewDetailPane(info: SelectionInfo) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 8.dp, vertical = 4.dp),
     ) {
         Text(
-            text = info.title,
-            style = MaterialTheme.typography.titleSmall,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
+            text = "Preview",
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.primary,
         )
-        Text(
-            text = "${info.kind} · ${info.sizeLabel}",
-            style = MaterialTheme.typography.bodyMedium,
-        )
-        Text(
-            text = info.details,
-            style = MaterialTheme.typography.bodySmall,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Text(
-            text = info.path,
-            style = MaterialTheme.typography.labelSmall,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-        )
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 4.dp),
+        ) {
+            Text(
+                text = info.title,
+                style = MaterialTheme.typography.titleSmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = "${info.kind} · ${info.sizeLabel}",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Text(
+                text = info.details,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = info.path,
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
     }
 }
 
