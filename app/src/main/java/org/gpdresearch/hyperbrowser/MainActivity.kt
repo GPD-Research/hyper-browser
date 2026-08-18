@@ -89,6 +89,9 @@ private fun HyperBrowserApp() {
     val activeState = if (activePane == Pane.LEFT) leftPane else rightPane
     val targetState = if (targetPane == Pane.LEFT) leftPane else rightPane
     val selectedFile = activeState.selected.singleOrNull()
+    val selectedInfo = remember(activeState.selected, activity) {
+        buildSelectionInfo(activity, activeState.selected)
+    }
 
     MaterialTheme {
         Scaffold { contentPadding ->
@@ -145,6 +148,7 @@ private fun HyperBrowserApp() {
                     targetPath = targetState.current?.let { resolveDisplayPath(activity, it) } ?: "No folder selected",
                     selectedCount = activeState.selected.size,
                 )
+                SelectionDetailsPanel(info = selectedInfo)
 
                 Row(Modifier.fillMaxSize()) {
                     DirectoryPane(
@@ -262,6 +266,77 @@ private fun resolveDisplayPath(context: ComponentActivity, uri: Uri): String {
     return doc.name ?: uri.lastPathSegment ?: "Unknown"
 }
 
+private data class SelectionInfo(
+    val title: String,
+    val kind: String,
+    val sizeLabel: String,
+    val path: String,
+    val details: String,
+)
+
+private fun buildSelectionInfo(activity: ComponentActivity, uris: Set<Uri>): SelectionInfo {
+    if (uris.isEmpty()) {
+        return SelectionInfo(
+            title = "No item selected",
+            kind = "Idle",
+            sizeLabel = "—",
+            path = "Choose a file or folder to inspect it",
+            details = "Ready",
+        )
+    }
+
+    if (uris.size == 1) {
+        val uri = uris.first()
+        val doc = DocumentFile.fromSingleUri(activity, uri) ?: return SelectionInfo(
+            title = uri.lastPathSegment ?: "Unknown",
+            kind = "Document",
+            sizeLabel = "Unknown size",
+            path = uri.toString(),
+            details = "Not available",
+        )
+
+        val isDir = doc.isDirectory
+        val sizeLabel = if (isDir) {
+            val count = doc.listFiles().size
+            "$count items"
+        } else {
+            formatBytes(doc.length())
+        }
+
+        return SelectionInfo(
+            title = doc.name ?: uri.lastPathSegment ?: "Unknown",
+            kind = if (isDir) "Folder" else "File",
+            sizeLabel = sizeLabel,
+            path = doc.uri.toString(),
+            details = if (isDir) "Directory" else doc.type ?: "Document",
+        )
+    }
+
+    val names = uris.take(3).mapNotNull { uri ->
+        DocumentFile.fromSingleUri(activity, uri)?.name ?: uri.lastPathSegment
+    }
+
+    return SelectionInfo(
+        title = "${uris.size} items selected",
+        kind = "Multi-select",
+        sizeLabel = "${uris.size} objects",
+        path = names.joinToString(", ") { it },
+        details = if (names.isEmpty()) "Selection ready" else "Preview: ${names.joinToString(", ")}",
+    )
+}
+
+private fun formatBytes(size: Long): String {
+    if (size <= 0L) return "0 B"
+    val units = arrayOf("B", "KB", "MB", "GB", "TB")
+    var value = size.toDouble()
+    var unitIndex = 0
+    while (value >= 1024 && unitIndex < units.lastIndex) {
+        value /= 1024.0
+        unitIndex += 1
+    }
+    return String.format("%.1f %s", value, units[unitIndex])
+}
+
 @Composable
 private fun ActionBar(
     directionIsRight: Boolean,
@@ -323,6 +398,38 @@ private fun TransferStatusBar(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             style = MaterialTheme.typography.labelSmall,
+        )
+    }
+}
+
+@Composable
+private fun SelectionDetailsPanel(info: SelectionInfo) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+    ) {
+        Text(
+            text = info.title,
+            style = MaterialTheme.typography.titleSmall,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            text = "${info.kind} · ${info.sizeLabel}",
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        Text(
+            text = info.details,
+            style = MaterialTheme.typography.bodySmall,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            text = info.path,
+            style = MaterialTheme.typography.labelSmall,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
         )
     }
 }

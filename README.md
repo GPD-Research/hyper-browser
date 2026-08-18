@@ -12,6 +12,7 @@ This repo now includes a working Android project scaffold and a functional dual-
 - Copy/move actions that operate against the selected items and target folder
 - Safe transfer handling with duplicate-name resolution and selection clearing after each action
 - Transfer status strip showing the active source, selected count, and target folder
+- Selection detail panel summarizing the current file or folder metadata before open/copy/move actions
 - Text-only browsing with no background indexing or thumbnail generation
 - Intent delegation for app-open actions through the Android chooser
 - Devcontainer support to restore the Android SDK automatically on rebuild
