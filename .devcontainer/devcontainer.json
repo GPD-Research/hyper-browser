@@ -1,0 +1,5 @@
+{
+  "name": "hyper-browser",
+  "image": "mcr.microsoft.com/devcontainers/universal:2",
+  "postCreateCommand": "bash -lc '\nset -e\nmkdir -p \"$HOME/android-sdk\"\nif [ ! -d \"$HOME/android-sdk/platforms/android-35\" ]; then\n  cd /tmp\n  wget -q -O cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip\n  unzip -q -o cmdline-tools.zip -d \"$HOME/android-sdk\"\n  mkdir -p \"$HOME/android-sdk/cmdline-tools/latest\"\n  if [ -d \"$HOME/android-sdk/cmdline-tools\" ]; then\n    for item in \"$HOME/android-sdk/cmdline-tools\"/*; do\n      if [ -e \"$item\" ]; then mv \"$item\" \"$HOME/android-sdk/cmdline-tools/latest/\"; fi\n    done\n  fi\n  yes | \"$HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager\" --sdk_root=\"$HOME/android-sdk\" --licenses\n  \"$HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager\" --sdk_root=\"$HOME/android-sdk\" \"platform-tools\" \"platforms;android-35\" \"build-tools;35.0.0\"\nfi\necho \"sdk.dir=$HOME/android-sdk\" > /workspaces/hyper-browser/local.properties\nexport ANDROID_HOME=\"$HOME/android-sdk\"\nexport ANDROID_SDK_ROOT=\"$HOME/android-sdk\"\n'"
+}
