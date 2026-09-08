@@ -42,8 +42,16 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Divider
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.produceState
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -270,6 +278,14 @@ private fun HyperBrowserApp() {
         }
     }
 
+    fun setPaneRoot(uri: Uri, pane: Pane) {
+        if (pane == Pane.LEFT) {
+            leftPane = leftPane.copy(root = uri, expanded = emptySet(), selected = emptySet())
+        } else {
+            rightPane = rightPane.copy(root = uri, expanded = emptySet(), selected = emptySet())
+        }
+    }
+
     fun savePaneDefaults() {
         prefs.edit().apply {
             putString("left_root", leftPane.root?.toString())
@@ -400,7 +416,8 @@ private fun HyperBrowserApp() {
                             onSelectionChange = { uri, _ -> handleSelection(uri, Pane.LEFT) },
                             isImageFile = { isImageFile(it) },
                             onOpenInGallery = { galleryUri = it },
-                            onOpenWithChooser = { openFileWithChooser(activity, it) }
+                            onOpenWithChooser = { openFileWithChooser(activity, it) },
+                            onSetAsRoot = { setPaneRoot(it, Pane.LEFT) }
                         )
 
                         DirectoryPane(
@@ -417,7 +434,8 @@ private fun HyperBrowserApp() {
                             onSelectionChange = { uri, _ -> handleSelection(uri, Pane.RIGHT) },
                             isImageFile = { isImageFile(it) },
                             onOpenInGallery = { galleryUri = it },
-                            onOpenWithChooser = { openFileWithChooser(activity, it) }
+                            onOpenWithChooser = { openFileWithChooser(activity, it) },
+                            onSetAsRoot = { setPaneRoot(it, Pane.RIGHT) }
                         )
                     }
                 }
@@ -1387,7 +1405,8 @@ private fun DirectoryPane(
     onSelectionChange: (Uri, Boolean) -> Unit,
     isImageFile: (Uri) -> Boolean,
     onOpenInGallery: (Uri) -> Unit,
-    onOpenWithChooser: (Uri) -> Unit
+    onOpenWithChooser: (Uri) -> Unit,
+    onSetAsRoot: (Uri) -> Unit
 ) {
     val context = LocalContext.current
     val rootUri = state.root
@@ -1446,28 +1465,61 @@ private fun DirectoryPane(
         )
 
         LazyColumn(Modifier.fillMaxSize()) {
-            val rootDoc = getDocumentFile(context, rootUri)
-            if (rootDoc != null) {
-                renderTreeNodes(
-                    context = context,
-                    parent = rootDoc,
-                    expanded = state.expanded,
-                    selected = state.selected,
-                    parentSelected = rootUri in state.selected,
-                    depth = 0,
-                    onToggleExpanded = onToggleExpanded,
-                    onOpenFile = onOpenFile,
-                    onSelectionChange = onSelectionChange,
-                    isImageFile = isImageFile,
-                    onOpenInGallery = onOpenInGallery,
-                    onOpenWithChooser = onOpenWithChooser
-                )
+            item {
+                val rootDoc = getDocumentFile(context, rootUri)
+                if (rootDoc != null) {
+                    TreeRoot(
+                        context = context,
+                        root = rootDoc,
+                        state = state,
+                        onToggleExpanded = onToggleExpanded,
+                        onOpenFile = onOpenFile,
+                        onSelectionChange = onSelectionChange,
+                        isImageFile = isImageFile,
+                        onOpenInGallery = onOpenInGallery,
+                        onOpenWithChooser = onOpenWithChooser,
+                        onSetAsRoot = onSetAsRoot
+                    )
+                }
             }
         }
     }
 }
 
-private fun LazyListScope.renderTreeNodes(
+@Composable
+private fun TreeRoot(
+    context: Context,
+    root: DocumentFile,
+    state: BrowserPaneState,
+    onToggleExpanded: (Uri) -> Unit,
+    onOpenFile: (Uri, Boolean) -> Unit,
+    onSelectionChange: (Uri, Boolean) -> Unit,
+    isImageFile: (Uri) -> Boolean,
+    onOpenInGallery: (Uri) -> Unit,
+    onOpenWithChooser: (Uri) -> Unit,
+    onSetAsRoot: (Uri) -> Unit
+) {
+    Column {
+        RenderTreeNodes(
+            context = context,
+            parent = root,
+            expanded = state.expanded,
+            selected = state.selected,
+            parentSelected = root.uri in state.selected,
+            depth = 0,
+            onToggleExpanded = onToggleExpanded,
+            onOpenFile = onOpenFile,
+            onSelectionChange = onSelectionChange,
+            isImageFile = isImageFile,
+            onOpenInGallery = onOpenInGallery,
+            onOpenWithChooser = onOpenWithChooser,
+            onSetAsRoot = onSetAsRoot
+        )
+    }
+}
+
+@Composable
+private fun RenderTreeNodes(
     context: Context,
     parent: DocumentFile,
     expanded: Set<Uri>,
@@ -1479,18 +1531,36 @@ private fun LazyListScope.renderTreeNodes(
     onSelectionChange: (Uri, Boolean) -> Unit,
     isImageFile: (Uri) -> Boolean,
     onOpenInGallery: (Uri) -> Unit,
-    onOpenWithChooser: (Uri) -> Unit
+    onOpenWithChooser: (Uri) -> Unit,
+    onSetAsRoot: (Uri) -> Unit
 ) {
-    val files = parent.listFiles().sortedWith(
-        compareByDescending<DocumentFile> { it.isDirectory }.thenBy { it.name ?: "" },
-    )
+    // Load files asynchronously to prevent UI hang on cloud storage
+    val filesState = produceState<List<DocumentFile>?>(initialValue = null, parent.uri) {
+        value = withContext(Dispatchers.IO) {
+            try {
+                parent.listFiles().sortedWith(
+                    compareByDescending<DocumentFile> { it.isDirectory }.thenBy { it.name ?: "" }
+                )
+            } catch (_: Exception) {
+                emptyList()
+            }
+        }
+    }
 
-    files.forEach { file ->
-        val isExplicitlySelected = file.uri in selected
-        val isEffectivelySelected = parentSelected || isExplicitlySelected
-        val isExpanded = file.uri in expanded
+    val files = filesState.value
 
-        item(key = file.uri.toString()) {
+    if (files == null) {
+        Row(modifier = Modifier.padding(start = (depth * 12 + 16).dp).padding(vertical = 4.dp)) {
+            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+            Spacer(Modifier.width(8.dp))
+            Text("Loading...", style = MaterialTheme.typography.labelSmall)
+        }
+    } else {
+        files.forEach { file ->
+            val isExplicitlySelected = file.uri in selected
+            val isEffectivelySelected = parentSelected || isExplicitlySelected
+            val isExpanded = file.uri in expanded
+
             FileTreeRow(
                 file = file,
                 depth = depth,
@@ -1503,25 +1573,27 @@ private fun LazyListScope.renderTreeNodes(
                 },
                 isImageFile = isImageFile,
                 onOpenInGallery = onOpenInGallery,
-                onOpenWithChooser = onOpenWithChooser
+                onOpenWithChooser = onOpenWithChooser,
+                onSetAsRoot = onSetAsRoot
             )
-        }
 
-        if (file.isDirectory && isExpanded) {
-            renderTreeNodes(
-                context = context,
-                parent = file,
-                expanded = expanded,
-                selected = selected,
-                parentSelected = isEffectivelySelected,
-                depth = depth + 1,
-                onToggleExpanded = onToggleExpanded,
-                onOpenFile = onOpenFile,
-                onSelectionChange = onSelectionChange,
-                isImageFile = isImageFile,
-                onOpenInGallery = onOpenInGallery,
-                onOpenWithChooser = onOpenWithChooser
-            )
+            if (file.isDirectory && isExpanded) {
+                RenderTreeNodes(
+                    context = context,
+                    parent = file,
+                    expanded = expanded,
+                    selected = selected,
+                    parentSelected = isEffectivelySelected,
+                    depth = depth + 1,
+                    onToggleExpanded = onToggleExpanded,
+                    onOpenFile = onOpenFile,
+                    onSelectionChange = onSelectionChange,
+                    isImageFile = isImageFile,
+                    onOpenInGallery = onOpenInGallery,
+                    onOpenWithChooser = onOpenWithChooser,
+                    onSetAsRoot = onSetAsRoot
+                )
+            }
         }
     }
 }
@@ -1538,7 +1610,8 @@ private fun FileTreeRow(
     onSelect: () -> Unit,
     isImageFile: (Uri) -> Boolean,
     onOpenInGallery: (Uri) -> Unit,
-    onOpenWithChooser: (Uri) -> Unit
+    onOpenWithChooser: (Uri) -> Unit,
+    onSetAsRoot: (Uri) -> Unit
 ) {
     var showMenu by remember { mutableStateOf(false) }
     val isImage = !file.isDirectory && isImageFile(file.uri)
@@ -1594,7 +1667,7 @@ private fun FileTreeRow(
                             else onOpenFile()
                         },
                         onLongClick = {
-                            if (!file.isDirectory) onOpenWithChooser(file.uri)
+                            showMenu = true
                         }
                     ),
                 style = MaterialTheme.typography.bodyMedium,
@@ -1607,14 +1680,26 @@ private fun FileTreeRow(
                 expanded = showMenu,
                 onDismissRequest = { showMenu = false }
             ) {
-                DropdownMenuItem(
-                    text = { Text("Open in Gallery") },
-                    onClick = {
-                        onOpenInGallery(file.uri)
-                        showMenu = false
-                    },
-                    leadingIcon = { Icon(Icons.Filled.PhotoLibrary, null) }
-                )
+                if (file.isDirectory) {
+                    DropdownMenuItem(
+                        text = { Text("Set as Pane Root") },
+                        onClick = {
+                            onSetAsRoot(file.uri)
+                            showMenu = false
+                        },
+                        leadingIcon = { Icon(Icons.Filled.FolderOpen, null) }
+                    )
+                }
+                if (isImage) {
+                    DropdownMenuItem(
+                        text = { Text("Open in Gallery") },
+                        onClick = {
+                            onOpenInGallery(file.uri)
+                            showMenu = false
+                        },
+                        leadingIcon = { Icon(Icons.Filled.PhotoLibrary, null) }
+                    )
+                }
                 DropdownMenuItem(
                     text = { Text("Open with App") },
                     onClick = {
