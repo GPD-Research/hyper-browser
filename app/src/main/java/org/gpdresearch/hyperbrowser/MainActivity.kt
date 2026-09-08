@@ -87,6 +87,8 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -97,6 +99,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
@@ -116,6 +119,7 @@ import java.io.OutputStream
 private enum class Pane { LEFT, RIGHT }
 private enum class TransferMode { COPY, MOVE }
 private enum class GalleryMode { SINGLE, THUMBNAILS }
+private enum class AppTheme { LIGHT, INVERTED, MATRIX }
 private enum class LayoutMode {
     PHONE,
     TABLET_BALANCED,
@@ -173,6 +177,10 @@ private fun HyperBrowserApp() {
     var showLeftPicker by remember { mutableStateOf(false) }
     var showRightPicker by remember { mutableStateOf(false) }
     var showCreateFolderDialog by remember { mutableStateOf(false) }
+    var appTheme by remember { 
+        val themeName = prefs.getString("app_theme", AppTheme.LIGHT.name)
+        mutableStateOf(AppTheme.valueOf(themeName ?: AppTheme.LIGHT.name))
+    }
 
     val sourcePane = activePane
     val destinationPane = if (activePane == Pane.LEFT) Pane.RIGHT else Pane.LEFT
@@ -233,29 +241,16 @@ private fun HyperBrowserApp() {
         }
     }
 
-    fun handleSelection(uri: Uri, isDirectory: Boolean, parentUri: Uri?, targetPane: Pane) {
+    fun handleSelection(uri: Uri, targetPane: Pane) {
         activePane = targetPane
         val paneState = if (targetPane == Pane.LEFT) leftPane else rightPane
         val isSelected = uri in paneState.selected
         var newSelection = paneState.selected
 
-        if (isDirectory) {
-            val dirDoc = getDocumentFile(activity, uri)
-            val allDescendants = if (dirDoc != null) getRecursiveUris(dirDoc) else emptySet<Uri>()
-            if (isSelected) {
-                newSelection = newSelection - uri - allDescendants
-            } else {
-                newSelection = newSelection + uri + allDescendants
-            }
+        if (isSelected) {
+            newSelection = newSelection - uri
         } else {
-            if (isSelected) {
-                newSelection = newSelection - uri
-            } else {
-                newSelection = newSelection + uri
-                if (parentUri != null) {
-                    newSelection = newSelection - parentUri
-                }
-            }
+            newSelection = newSelection + uri
         }
 
         if (targetPane == Pane.LEFT) {
@@ -271,6 +266,11 @@ private fun HyperBrowserApp() {
             putString("right_root", rightPane.root?.toString())
             apply()
         }
+    }
+
+    fun updateTheme(newTheme: AppTheme) {
+        appTheme = newTheme
+        prefs.edit().putString("app_theme", newTheme.name).apply()
     }
 
     fun createFolder(name: String) {
@@ -292,23 +292,36 @@ private fun HyperBrowserApp() {
         showCreateFolderDialog = false
     }
 
-    MaterialTheme {
+    val matrixGreen = Color(0xFF00FF41)
+    val colorScheme = when (appTheme) {
+        AppTheme.LIGHT -> lightColorScheme()
+        AppTheme.INVERTED -> darkColorScheme(
+            background = Color.Black,
+            surface = Color.Black,
+            onBackground = Color.White,
+            onSurface = Color.White,
+            primary = Color.White,
+            onPrimary = Color.Black
+        )
+        AppTheme.MATRIX -> darkColorScheme(
+            background = Color.Black,
+            surface = Color.Black,
+            onBackground = matrixGreen,
+            onSurface = matrixGreen,
+            primary = matrixGreen,
+            onPrimary = Color.Black,
+            secondary = matrixGreen,
+            onSecondary = Color.Black
+        )
+    }
+
+    MaterialTheme(colorScheme = colorScheme) {
         Scaffold { contentPadding ->
             Column(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(contentPadding),
             ) {
-                if (galleryUri == null) {
-                    PreviewDetailPane(
-                        info = selectionInfo,
-                        selectedFile = selectedFile,
-                        isImage = isImageSelected,
-                        onOpen = { selectedFile?.let { openFileWithDefaultApp(activity, it) } },
-                        onView = { selectedFile?.let { if (isImageSelected) galleryUri = it } },
-                    )
-                }
-
                 if (galleryUri != null) {
                     ImageViewerScreen(
                         activity = activity,
@@ -371,7 +384,7 @@ private fun HyperBrowserApp() {
                                 leftPane = leftPane.copy(expanded = if (uri in leftPane.expanded) leftPane.expanded - uri else leftPane.expanded + uri)
                             },
                             onOpenFile = { uri, isDir -> handleFileClick(uri, isDir) },
-                            onSelectionChange = { uri, isDir, parentUri -> handleSelection(uri, isDir, parentUri, Pane.LEFT) },
+                            onSelectionChange = { uri, _ -> handleSelection(uri, Pane.LEFT) },
                         )
 
                         DirectoryPane(
@@ -385,7 +398,7 @@ private fun HyperBrowserApp() {
                                 rightPane = rightPane.copy(expanded = if (uri in rightPane.expanded) rightPane.expanded - uri else rightPane.expanded + uri)
                             },
                             onOpenFile = { uri, isDir -> handleFileClick(uri, isDir) },
-                            onSelectionChange = { uri, isDir, parentUri -> handleSelection(uri, isDir, parentUri, Pane.RIGHT) },
+                            onSelectionChange = { uri, _ -> handleSelection(uri, Pane.RIGHT) },
                         )
                     }
                 }
@@ -423,6 +436,8 @@ private fun HyperBrowserApp() {
                 layoutMode = mode
                 showLayoutSettings = false
             },
+            currentTheme = appTheme,
+            onThemeSelect = { updateTheme(it) },
             onSaveDefaults = {
                 savePaneDefaults()
                 showLayoutSettings = false
@@ -749,6 +764,8 @@ private fun CommandButton(label: String, icon: ImageVector, onClick: () -> Unit)
 private fun LayoutSettingsDialog(
     selectedMode: LayoutMode,
     onSelect: (LayoutMode) -> Unit,
+    currentTheme: AppTheme,
+    onThemeSelect: (AppTheme) -> Unit,
     onSaveDefaults: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -769,6 +786,20 @@ private fun LayoutSettingsDialog(
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         Text(if (mode == selectedMode) "$label (selected)" else label)
+                    }
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+                Text("App Theme", style = MaterialTheme.typography.labelLarge)
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    AppTheme.entries.forEach { theme ->
+                        Button(
+                            onClick = { onThemeSelect(theme) },
+                            modifier = Modifier.weight(1f),
+                            contentPadding = PaddingValues(4.dp)
+                        ) {
+                            val label = theme.name.lowercase().replaceFirstChar { it.uppercase() }
+                            Text(if (theme == currentTheme) "$label*" else label, fontSize = 10.sp, maxLines = 1)
+                        }
                     }
                 }
                 Spacer(modifier = Modifier.height(16.dp))
@@ -1024,7 +1055,16 @@ private fun ImageViewerScreen(
     }
 
     val currentDoc = images.firstOrNull { it.uri == currentUri }
-    val currentBitmap = currentDoc?.let { remember(it.uri, activity) { loadBitmap(activity, it.uri) } }
+    val displayMetrics = activity.resources.displayMetrics
+    val screenWidth = displayMetrics.widthPixels
+    val screenHeight = displayMetrics.heightPixels
+    
+    val currentBitmap = currentDoc?.let { 
+        remember(it.uri, activity) { 
+            // Load full image capped at screen resolution to prevent "Canvas: trying to draw too large bitmap" crash
+            loadBitmap(activity, it.uri, screenWidth, screenHeight) 
+        } 
+    }
 
     LaunchedEffect(galleryMode, scale) {
         if (galleryMode == GalleryMode.SINGLE && scale <= 0.75f) {
@@ -1137,12 +1177,41 @@ private fun ImageViewerScreen(
                     ) {
                         DropdownMenuItem(
                             text = { Text("Open in Editor") },
-                            onClick = { /* Implement editor intent */ showActionMenu = false },
+                            onClick = { 
+                                val shareUri = if (currentUri.scheme == "file") {
+                                    FileProvider.getUriForFile(activity, "${activity.packageName}.fileprovider", File(currentUri.path!!))
+                                } else {
+                                    currentUri
+                                }
+                                val editIntent = Intent(Intent.ACTION_EDIT).apply {
+                                    setDataAndType(shareUri, resolveMimeType(activity.contentResolver, currentUri))
+                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                                }
+                                try {
+                                    activity.startActivity(Intent.createChooser(editIntent, "Edit Image"))
+                                } catch (e: Exception) {
+                                    // Fallback if no editor found
+                                }
+                                showActionMenu = false 
+                            },
                             leadingIcon = { Icon(Icons.Filled.Edit, null) }
                         )
                         DropdownMenuItem(
-                            text = { Text("Print") },
-                            onClick = { /* Implement print logic */ showActionMenu = false },
+                            text = { Text("Print / Share") },
+                            onClick = { 
+                                val shareUri = if (currentUri.scheme == "file") {
+                                    FileProvider.getUriForFile(activity, "${activity.packageName}.fileprovider", File(currentUri.path!!))
+                                } else {
+                                    currentUri
+                                }
+                                val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                    type = resolveMimeType(activity.contentResolver, currentUri)
+                                    putExtra(Intent.EXTRA_STREAM, shareUri)
+                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                }
+                                activity.startActivity(Intent.createChooser(shareIntent, "Print or Share Image"))
+                                showActionMenu = false 
+                            },
                             leadingIcon = { Icon(Icons.Filled.Print, null) }
                         )
                         DropdownMenuItem(
@@ -1235,16 +1304,19 @@ private fun loadBitmap(activity: ComponentActivity, uri: Uri, width: Int = 0, he
         opts
     } ?: return null
 
-    val targetWidth = if (width > 0) width else bounds.outWidth
-    val targetHeight = if (height > 0) height else bounds.outHeight
-    val sample = computeInSampleSize(bounds.outWidth, bounds.outHeight, targetWidth, targetHeight)
+    // If width/height are 0, we still want to cap at screen size to prevent crashes with massive files
+    val displayMetrics = activity.resources.displayMetrics
+    val maxW = if (width > 0) width else displayMetrics.widthPixels
+    val maxH = if (height > 0) height else displayMetrics.heightPixels
+
+    val sample = computeInSampleSize(bounds.outWidth, bounds.outHeight, maxW, maxH)
 
     return activity.contentResolver.openInputStream(uri)?.use { stream ->
         val opts = BitmapFactory.Options().apply {
             inJustDecodeBounds = false
             inSampleSize = sample
-            // For high quality thumbnails as requested (when zoomed in) or full screen (width=0)
-            inPreferredConfig = if (width > 300 || width == 0) Bitmap.Config.ARGB_8888 else Bitmap.Config.RGB_565
+            // Use RGB_565 (2 bytes/pixel) for smaller thumbnails to save 50% memory
+            inPreferredConfig = if (maxW > 400) Bitmap.Config.ARGB_8888 else Bitmap.Config.RGB_565
         }
         BitmapFactory.decodeStream(stream, null, opts)?.asImageBitmap()
     }
@@ -1273,7 +1345,7 @@ private fun DirectoryPane(
     onChooseRoot: () -> Unit,
     onToggleExpanded: (Uri) -> Unit,
     onOpenFile: (Uri, Boolean) -> Unit,
-    onSelectionChange: (Uri, Boolean, Uri?) -> Unit,
+    onSelectionChange: (Uri, Boolean) -> Unit,
 ) {
     val context = LocalContext.current
     val rootUri = state.root
@@ -1339,11 +1411,11 @@ private fun DirectoryPane(
                     parent = rootDoc,
                     expanded = state.expanded,
                     selected = state.selected,
+                    parentSelected = rootUri in state.selected,
                     depth = 0,
                     onToggleExpanded = onToggleExpanded,
                     onOpenFile = onOpenFile,
                     onSelectionChange = onSelectionChange,
-                    activeSelected = state.selected
                 )
             }
         }
@@ -1355,30 +1427,31 @@ private fun LazyListScope.renderTreeNodes(
     parent: DocumentFile,
     expanded: Set<Uri>,
     selected: Set<Uri>,
+    parentSelected: Boolean,
     depth: Int,
     onToggleExpanded: (Uri) -> Unit,
     onOpenFile: (Uri, Boolean) -> Unit,
-    onSelectionChange: (Uri, Boolean, Uri?) -> Unit,
-    activeSelected: Set<Uri>
+    onSelectionChange: (Uri, Boolean) -> Unit,
 ) {
     val files = parent.listFiles().sortedWith(
         compareByDescending<DocumentFile> { it.isDirectory }.thenBy { it.name ?: "" },
     )
 
     files.forEach { file ->
+        val isExplicitlySelected = file.uri in selected
+        val isEffectivelySelected = parentSelected || isExplicitlySelected
         val isExpanded = file.uri in expanded
-        val isSelected = file.uri in selected
 
         item(key = file.uri.toString()) {
             FileTreeRow(
                 file = file,
                 depth = depth,
                 isExpanded = isExpanded,
-                isSelected = isSelected,
+                isSelected = isEffectivelySelected,
                 onToggleExpanded = { onToggleExpanded(file.uri) },
                 onOpenFile = { onOpenFile(file.uri, file.isDirectory) },
                 onSelect = {
-                    onSelectionChange(file.uri, file.isDirectory, parent.uri)
+                    onSelectionChange(file.uri, file.isDirectory)
                 }
             )
         }
@@ -1389,11 +1462,11 @@ private fun LazyListScope.renderTreeNodes(
                 parent = file,
                 expanded = expanded,
                 selected = selected,
+                parentSelected = isEffectivelySelected,
                 depth = depth + 1,
                 onToggleExpanded = onToggleExpanded,
                 onOpenFile = onOpenFile,
                 onSelectionChange = onSelectionChange,
-                activeSelected = activeSelected
             )
         }
     }
