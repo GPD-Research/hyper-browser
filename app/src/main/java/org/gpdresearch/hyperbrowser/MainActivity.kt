@@ -973,9 +973,6 @@ private fun FolderPickerDialog(
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current as ComponentActivity
-    var rootUri by remember { mutableStateOf<Uri?>(null) }
-    var currentUri by remember { mutableStateOf<Uri?>(null) }
-    var selectedUri by remember { mutableStateOf<Uri?>(null) }
 
     val hasAllFilesAccess = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
         Environment.isExternalStorageManager()
@@ -987,9 +984,7 @@ private fun FolderPickerDialog(
         uri?.let {
             val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
             context.contentResolver.takePersistableUriPermission(it, flags)
-            rootUri = it
-            currentUri = it
-            selectedUri = it
+            onFolderSelected(it)
         }
     }
 
@@ -998,123 +993,58 @@ private fun FolderPickerDialog(
         title = { Text("Select Storage Location") },
         text = {
             Column(modifier = Modifier.fillMaxWidth()) {
-                if (rootUri == null) {
-                    Text("Choose where to start browsing.", style = MaterialTheme.typography.bodyMedium)
-                    Spacer(modifier = Modifier.size(16.dp))
-                    
-                    Text("Standard Locations", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
-                    Spacer(modifier = Modifier.size(8.dp))
-                    
-                    if (hasAllFilesAccess) {
-                        Button(
-                            onClick = {
-                                val root = Environment.getExternalStorageDirectory()
-                                val uri = Uri.fromFile(root)
-                                rootUri = uri
-                                currentUri = uri
-                                selectedUri = uri
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Icon(Icons.Filled.FolderOpen, null, Modifier.size(18.dp))
-                            Spacer(Modifier.width(8.dp))
-                            Text("Internal Storage (Device Root)")
-                        }
-                    } else {
-                        Text("All Files Access is required for direct browsing.", style = MaterialTheme.typography.bodySmall)
-                        Button(
-                            onClick = {
-                                @Suppress("InlinedApi")
-                                val intent = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
-                                context.startActivity(intent)
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text("Grant All Files Access")
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.size(16.dp))
-                    Text("External & Cloud", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
-                    Spacer(modifier = Modifier.size(8.dp))
-                    
-                    OutlinedButton(
-                        onClick = { pickerLauncher.launch(null) },
+                Text("Choose where to start browsing.", style = MaterialTheme.typography.bodyMedium)
+                Spacer(modifier = Modifier.size(16.dp))
+                
+                Text("Standard Locations", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                Spacer(modifier = Modifier.size(8.dp))
+                
+                if (hasAllFilesAccess) {
+                    Button(
+                        onClick = {
+                            val root = Environment.getExternalStorageDirectory()
+                            onFolderSelected(Uri.fromFile(root))
+                        },
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Icon(Icons.Filled.PhotoLibrary, null, Modifier.size(18.dp))
+                        Icon(Icons.Filled.FolderOpen, null, Modifier.size(18.dp))
                         Spacer(Modifier.width(8.dp))
-                        Text("Cloud, SD Card, or USB")
+                        Text("Internal Storage (Device Root)")
                     }
-                    Text(
-                        "Use this to pick Google Drive folders or SD Card roots.",
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.padding(top = 4.dp)
-                    )
                 } else {
-                    val currentDoc = getDocumentFile(context, currentUri!!)
-                    val folders = currentDoc?.listFiles()?.filter { it.isDirectory } ?: emptyList()
-
-                    Text(
-                        text = "Browsing: ${resolveDisplayPath(context, currentUri!!)}",
-                        style = MaterialTheme.typography.bodySmall,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Spacer(modifier = Modifier.size(8.dp))
-
-                    LazyColumn(modifier = Modifier.height(300.dp)) {
-                        if (currentUri != rootUri) {
-                            item {
-                                TextButton(
-                                    onClick = { currentUri = currentDoc?.parentFile?.uri ?: rootUri },
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Text(".. [Up to parent]")
-                                }
-                            }
-                        }
-                        items(folders) { folder ->
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { currentUri = folder.uri }
-                                    .padding(vertical = 4.dp)
-                            ) {
-                                RadioButton(
-                                    selected = selectedUri == folder.uri,
-                                    onClick = { selectedUri = folder.uri }
-                                )
-                                Text(
-                                    text = folder.name ?: "Folder",
-                                    modifier = Modifier.padding(start = 8.dp),
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                        }
-                        if (folders.isEmpty()) {
-                            item {
-                                Text(
-                                    "No subfolders here",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    modifier = Modifier.padding(16.dp)
-                                )
-                            }
-                        }
+                    Text("All Files Access is required for direct browsing.", style = MaterialTheme.typography.bodySmall)
+                    Button(
+                        onClick = {
+                            @Suppress("InlinedApi")
+                            val intent = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                            context.startActivity(intent)
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Grant All Files Access")
                     }
                 }
+
+                Spacer(modifier = Modifier.size(16.dp))
+                Text("External & Cloud", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                Spacer(modifier = Modifier.size(8.dp))
+                
+                OutlinedButton(
+                    onClick = { pickerLauncher.launch(null) },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Filled.PhotoLibrary, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Cloud, SD Card, or USB")
+                }
+                Text(
+                    "Use this to pick Google Drive folders or SD Card roots.",
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
             }
         },
-        confirmButton = {
-            Button(
-                enabled = selectedUri != null,
-                onClick = { selectedUri?.let { onFolderSelected(it) } }
-            ) {
-                Text("Select")
-            }
-        },
+        confirmButton = {},
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("Cancel") }
         }
