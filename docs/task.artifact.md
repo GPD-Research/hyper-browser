@@ -1,0 +1,8 @@
+- [x] Update `BrowserPaneState` to track expansion and persist preferences
+- [x] Implement `FileTreeNode` recursive Composable for the tree view
+- [x] Refactor `DirectoryPane` to use the new tree view instead of oval buttons
+- [x] Add "Save Current View as Default" to the Settings dialog
+- [x] Verify Image Gallery with dummy images and fix `FileUriExposedException`
+- [x] Move transfer operations to side menu and enlarge tree area
+- [x] Add Create Folder and Open Gallery to the side menu
+- [x] Narrow side menu and refine tree item spacing
