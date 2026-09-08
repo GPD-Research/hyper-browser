@@ -1012,6 +1012,12 @@ private fun FolderPickerDialog(
         text = {
             Column(modifier = Modifier.fillMaxWidth()) {
                 Text("Choose where to start browsing.", style = MaterialTheme.typography.bodyMedium)
+                Spacer(modifier = Modifier.size(8.dp))
+                Text(
+                    "Note: Android limits access to absolute cloud/system roots. If a folder says 'Can't use', please select a subfolder (e.g. 'My Drive').",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.secondary
+                )
                 Spacer(modifier = Modifier.size(16.dp))
                 
                 Text("Standard Locations", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
