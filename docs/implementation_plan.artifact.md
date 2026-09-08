@@ -1,40 +1,36 @@
-# UI Overhaul: Recursive File Tree & Preferences
+# Storage Expansion: Cloud & SD Card Integration
 
-The goal is to replace the "oval button" navigation with a traditional, recursive file tree view where folders expand and collapse in place. We will also address recent crashes and add a settings mechanism to persist default startup paths.
+The goal is to simplify storage selection, provide clear paths for SD Card and Google Drive integration, and ensure cross-storage file operations work reliably.
 
 ## User Review Required
 
-> [!IMPORTANT]
-> The navigation model is changing from "drilling into folders" to "expanding nodes in a tree". This will allow seeing multiple directory levels simultaneously.
+> [!NOTE]
+> We will leverage Android's built-in "Storage Access Framework" (SAF) for Cloud and SD Card support to avoid bulky third-party SDKs, but we will hide the technical terminology from the user.
 
 ## Proposed Changes
 
-### 1. Stability & Fixes
-- **FileProvider Integration**: (Already started) Finish wiring `FileProvider` to fix `FileUriExposedException` when opening files from the `/sdcard` root via direct `file://` URIs.
-- **Robustness**: Ensure `getDocumentFile` and other file operations gracefully handle permissions and missing files to prevent the reported crashes.
+### 1. Folder Picker Redesign
+- **Simplified Terminology**: Replace "SAF mode" with user-friendly labels like "Cloud, SD Card, or USB".
+- **Structured Selection**: Organize the picker into two primary sections:
+    - **Quick Access**: "Internal Storage (Device Root)".
+    - **Advanced/External**: "Cloud & SD Card (Drive, SD, etc.)".
+- **Enhanced UI**: Use icons and better grouping in the `FolderPickerDialog`.
 
-### 2. File Tree UI
-- **Recursive Tree View**: Implement a `FileTreeItem` component that renders folders and files with proper indentation.
-- **State Management**: Update `BrowserPaneState` to track `expandedFolders` (a set of Uris) so that expansion state is preserved during scrolling.
-- **Visual Style**: Remove the large oval buttons and replace them with a compact, tree-like structure using `KeyboardArrowRight` and `KeyboardArrowDown` icons.
+### 2. Google Drive & Cloud Support
+- **Seamless Integration**: Since the app already uses `DocumentFile`, selecting a Google Drive folder through the new "Cloud" option will allow the app to browse, copy, and move files to/from the cloud just like local storage.
+- **Root Management**: Ensure that when a Cloud root is selected, it is persisted correctly in preferences for the next launch.
 
-### 3. Preferences & Settings
-- **Persistence**: Use `SharedPreferences` to store the "Default Root" and "Default Current Folder" for both the Left and Right panes.
-- **Settings Dialog**: Add an option in the Settings menu to "Set Current View as Default", so the app starts exactly where the user left off.
-- **Auto-Load**: Update the app initialization to load these saved paths on startup.
+### 3. Image Editor Fixes
+- **Action Intent Refinement**: Update `ACTION_EDIT` logic to be more permissive and handle cases where some editors might require `ACTION_SEND` with specific extra flags.
+- **MIME Type Broadening**: (Already improved) Continue to verify that RAW and other specialized image formats are correctly identified to ensure the "editing not supported" error is resolved.
 
-### 4. Testing & Gallery
-- **Dummy Data**: Use the generated screenshots in `/Pictures/HyperBrowserTest` to verify the Image Gallery mode and ensure it functions correctly with direct file access.
+### 4. Cross-Storage Performance
+- **Buffer Optimization**: Ensure `copyStream` uses an appropriately sized buffer for large file transfers (e.g., high-res RAW photos) between the device and cloud storage.
 
 ## Verification Plan
 
-### Automated Tests
-- Run `gradle build` to ensure no regression in compilation.
-
 ### Manual Verification
-- Launch the app and grant "All Files Access".
-- Navigate to the device root.
-- Expand several folders (e.g., `Android`, `DCIM`, `Pictures`) and verify they show their contents inline with indentation.
-- Collapse a folder and verify it hides its children.
-- Open the `Pictures/HyperBrowserTest` folder, double-click an image, and verify it launches the gallery.
-- Save the current view as default in Settings, restart the app, and verify it restores the tree state.
+- **SD Card Access**: Click "Cloud & SD Card" in the picker, select the SD Card root, and verify the tree displays SD card contents.
+- **Google Drive Access**: Click "Cloud & SD Card", select a Google Drive folder, and verify browsing/copying works.
+- **Cloud-to-Local Transfer**: Select a file in a Drive-rooted pane and copy it to an Internal-rooted pane.
+- **Image Editing**: Open a JPG or PNG from the gallery and select "Open in Editor". Verify that installed photo editors (e.g., Google Photos, Snapseed) open the file successfully.
