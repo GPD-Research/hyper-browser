@@ -21,6 +21,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.gestures.detectTransformGestures
@@ -177,6 +179,10 @@ private fun HyperBrowserApp() {
     var showLeftPicker by remember { mutableStateOf(false) }
     var showRightPicker by remember { mutableStateOf(false) }
     var showCreateFolderDialog by remember { mutableStateOf(false) }
+    var customExtensions by remember {
+        val extStr = prefs.getString("custom_extensions", "")
+        mutableStateOf(extStr?.split(",")?.filter { it.isNotBlank() }?.toSet() ?: emptySet())
+    }
     var appTheme by remember { 
         val themeName = prefs.getString("app_theme", AppTheme.LIGHT.name)
         mutableStateOf(AppTheme.valueOf(themeName ?: AppTheme.LIGHT.name))
@@ -222,6 +228,13 @@ private fun HyperBrowserApp() {
         }
     }
 
+    fun isImageFile(uri: Uri): Boolean {
+        val mime = resolveMimeType(activity.contentResolver, uri)
+        if (mime.startsWith("image/")) return true
+        val ext = uri.toString().substringAfterLast('.', "").lowercase()
+        return ext in customExtensions
+    }
+
     fun handleFileClick(uri: Uri, isDirectory: Boolean) {
         if (isDirectory) {
             val paneState = if (activePane == Pane.LEFT) leftPane else rightPane
@@ -232,10 +245,7 @@ private fun HyperBrowserApp() {
                 rightPane = rightPane.copy(expanded = newExpanded)
             }
         } else {
-            val mime = resolveMimeType(activity.contentResolver, uri)
-            if (mime.startsWith("image/")) {
-                galleryUri = uri
-            } else {
+            if (!isImageFile(uri)) {
                 openFileWithDefaultApp(activity, uri)
             }
         }
@@ -271,6 +281,11 @@ private fun HyperBrowserApp() {
     fun updateTheme(newTheme: AppTheme) {
         appTheme = newTheme
         prefs.edit().putString("app_theme", newTheme.name).apply()
+    }
+
+    fun updateCustomExtensions(extensions: Set<String>) {
+        customExtensions = extensions
+        prefs.edit().putString("custom_extensions", extensions.joinToString(",")).apply()
     }
 
     fun createFolder(name: String) {
@@ -356,12 +371,10 @@ private fun HyperBrowserApp() {
                             },
                             onCreateFolder = { showCreateFolderDialog = true },
                             onOpenGallery = {
-                                val picturesDir = File(Environment.getExternalStorageDirectory(), "Pictures")
-                                if (picturesDir.exists()) {
-                                    galleryUri = Uri.fromFile(picturesDir)
-                                } else {
-                                    galleryUri = sourceState.root
-                                }
+                                val selectedDir = sourceState.selected.firstOrNull { 
+                                    getDocumentFile(activity, it)?.isDirectory == true 
+                                } ?: sourceState.root
+                                galleryUri = selectedDir
                             },
                             onSelectMulti = {
                                 if (activePane == Pane.LEFT) {
@@ -385,6 +398,9 @@ private fun HyperBrowserApp() {
                             },
                             onOpenFile = { uri, isDir -> handleFileClick(uri, isDir) },
                             onSelectionChange = { uri, _ -> handleSelection(uri, Pane.LEFT) },
+                            isImageFile = { isImageFile(it) },
+                            onOpenInGallery = { galleryUri = it },
+                            onOpenWithChooser = { openFileWithChooser(activity, it) }
                         )
 
                         DirectoryPane(
@@ -399,6 +415,9 @@ private fun HyperBrowserApp() {
                             },
                             onOpenFile = { uri, isDir -> handleFileClick(uri, isDir) },
                             onSelectionChange = { uri, _ -> handleSelection(uri, Pane.RIGHT) },
+                            isImageFile = { isImageFile(it) },
+                            onOpenInGallery = { galleryUri = it },
+                            onOpenWithChooser = { openFileWithChooser(activity, it) }
                         )
                     }
                 }
@@ -438,6 +457,8 @@ private fun HyperBrowserApp() {
             },
             currentTheme = appTheme,
             onThemeSelect = { updateTheme(it) },
+            customExtensions = customExtensions,
+            onUpdateExtensions = { updateCustomExtensions(it) },
             onSaveDefaults = {
                 savePaneDefaults()
                 showLayoutSettings = false
@@ -485,6 +506,19 @@ private fun openFileWithDefaultApp(activity: ComponentActivity, uri: Uri) {
             null,
         ),
     )
+}
+
+private fun openFileWithChooser(activity: ComponentActivity, uri: Uri) {
+    val shareUri = if (uri.scheme == "file") {
+        FileProvider.getUriForFile(activity, "${activity.packageName}.fileprovider", File(uri.path!!))
+    } else {
+        uri
+    }
+    val intent = Intent(Intent.ACTION_VIEW).apply {
+        setDataAndType(shareUri, resolveMimeType(activity.contentResolver, uri))
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    activity.startActivity(Intent.createChooser(intent, "Open with..."))
 }
 
 private fun executeTransfer(activity: ComponentActivity, request: TransferRequest) {
@@ -578,15 +612,29 @@ private fun nextAvailableName(targetDir: DocumentFile, preferredName: String): S
 }
 
 private fun copyStream(input: InputStream, output: OutputStream) {
-    input.copyTo(output)
+    val buffer = ByteArray(64 * 1024) // 64KB buffer for efficient large file transfers
+    var bytesRead: Int
+    while (input.read(buffer).also { bytesRead = it } != -1) {
+        output.write(buffer, 0, bytesRead)
+    }
     output.flush()
 }
 
 private fun resolveMimeType(resolver: ContentResolver, uri: Uri): String {
-    return resolver.getType(uri) ?: when (uri.toString().substringAfterLast('.', "").lowercase()) {
-        "jpg", "jpeg", "png", "gif", "bmp", "webp" -> "image/bitmap"
+    val type = resolver.getType(uri)
+    if (type != null) return type
+    
+    val ext = uri.toString().substringAfterLast('.', "").lowercase()
+    return when (ext) {
+        "jpg", "jpeg" -> "image/jpeg"
+        "png" -> "image/png"
+        "gif" -> "image/gif"
+        "bmp" -> "image/x-ms-bmp"
+        "webp" -> "image/webp"
+        "svg" -> "image/svg+xml"
         "pdf" -> "application/pdf"
         "txt" -> "text/plain"
+        "cr2", "nef", "arw", "dng", "orf", "raf" -> "image/x-adobe-dng" // Generic RAW
         else -> "application/octet-stream"
     }
 }
@@ -766,14 +814,17 @@ private fun LayoutSettingsDialog(
     onSelect: (LayoutMode) -> Unit,
     currentTheme: AppTheme,
     onThemeSelect: (AppTheme) -> Unit,
+    customExtensions: Set<String>,
+    onUpdateExtensions: (Set<String>) -> Unit,
     onSaveDefaults: () -> Unit,
     onDismiss: () -> Unit,
 ) {
+    var newExt by remember { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Settings") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Layout Mode", style = MaterialTheme.typography.labelLarge)
                 LayoutMode.entries.forEach { mode ->
                     val label = when (mode) {
@@ -800,6 +851,31 @@ private fun LayoutSettingsDialog(
                             val label = theme.name.lowercase().replaceFirstChar { it.uppercase() }
                             Text(if (theme == currentTheme) "$label*" else label, fontSize = 10.sp, maxLines = 1)
                         }
+                    }
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+                Text("Custom Image Extensions", style = MaterialTheme.typography.labelLarge)
+                Text("Current: ${customExtensions.joinToString(", ")}", style = MaterialTheme.typography.bodySmall)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = newExt,
+                        onValueChange = { newExt = it.lowercase().trim() },
+                        label = { Text("Add extension (e.g. cr2)") },
+                        modifier = Modifier.weight(1f),
+                        singleLine = true
+                    )
+                    IconButton(onClick = {
+                        if (newExt.isNotBlank()) {
+                            onUpdateExtensions(customExtensions + newExt)
+                            newExt = ""
+                        }
+                    }) {
+                        Icon(Icons.Filled.Add, "Add")
+                    }
+                }
+                if (customExtensions.isNotEmpty()) {
+                    TextButton(onClick = { onUpdateExtensions(emptySet()) }) {
+                        Text("Clear All Custom Extensions")
                     }
                 }
                 Spacer(modifier = Modifier.height(16.dp))
@@ -919,29 +995,17 @@ private fun FolderPickerDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Select Default Folder") },
+        title = { Text("Select Storage Location") },
         text = {
             Column(modifier = Modifier.fillMaxWidth()) {
                 if (rootUri == null) {
-                    Text("Choose a starting location.")
-                    Spacer(modifier = Modifier.size(12.dp))
-                    Button(onClick = { pickerLauncher.launch(null) }, modifier = Modifier.fillMaxWidth()) {
-                        Text("Select Folder (via SAF)")
-                    }
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !hasAllFilesAccess) {
-                        Spacer(modifier = Modifier.size(8.dp))
-                        Button(
-                            onClick = {
-                                val intent = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
-                                context.startActivity(intent)
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text("Grant All Files Access")
-                        }
-                    }
+                    Text("Choose where to start browsing.", style = MaterialTheme.typography.bodyMedium)
+                    Spacer(modifier = Modifier.size(16.dp))
+                    
+                    Text("Standard Locations", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                    Spacer(modifier = Modifier.size(8.dp))
+                    
                     if (hasAllFilesAccess) {
-                        Spacer(modifier = Modifier.size(8.dp))
                         Button(
                             onClick = {
                                 val root = Environment.getExternalStorageDirectory()
@@ -952,9 +1016,41 @@ private fun FolderPickerDialog(
                             },
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            Text("Use Device Root (/sdcard)")
+                            Icon(Icons.Filled.FolderOpen, null, Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("Internal Storage (Device Root)")
+                        }
+                    } else {
+                        Text("All Files Access is required for direct browsing.", style = MaterialTheme.typography.bodySmall)
+                        Button(
+                            onClick = {
+                                @Suppress("InlinedApi")
+                                val intent = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                                context.startActivity(intent)
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Grant All Files Access")
                         }
                     }
+
+                    Spacer(modifier = Modifier.size(16.dp))
+                    Text("External & Cloud", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                    Spacer(modifier = Modifier.size(8.dp))
+                    
+                    OutlinedButton(
+                        onClick = { pickerLauncher.launch(null) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Filled.PhotoLibrary, null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Cloud, SD Card, or USB")
+                    }
+                    Text(
+                        "Use this to pick Google Drive folders or SD Card roots.",
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
                 } else {
                     val currentDoc = getDocumentFile(context, currentUri!!)
                     val folders = currentDoc?.listFiles()?.filter { it.isDirectory } ?: emptyList()
@@ -986,9 +1082,9 @@ private fun FolderPickerDialog(
                                     .clickable { currentUri = folder.uri }
                                     .padding(vertical = 4.dp)
                             ) {
-                                Checkbox(
-                                    checked = selectedUri == folder.uri,
-                                    onCheckedChange = { if (it) selectedUri = folder.uri }
+                                RadioButton(
+                                    selected = selectedUri == folder.uri,
+                                    onClick = { selectedUri = folder.uri }
                                 )
                                 Text(
                                     text = folder.name ?: "Folder",
@@ -1042,14 +1138,16 @@ private fun ImageViewerScreen(
     var currentUri by remember(startingUri) { 
         mutableStateOf(if (isDir) (images.firstOrNull()?.uri ?: startingUri) else startingUri) 
     }
-    var galleryMode by remember { mutableStateOf(if (isDir) GalleryMode.THUMBNAILS else GalleryMode.SINGLE) }
-    var scale by remember { mutableFloatStateOf(1f) }
-    var offset by remember { mutableStateOf(Offset.Zero) }
-    var showMenu by remember { mutableStateOf(false) }
-    var showActionMenu by remember { mutableStateOf(false) }
+    var galleryMode by remember(startingUri) { 
+        mutableStateOf(if (isDir) GalleryMode.THUMBNAILS else GalleryMode.SINGLE) 
+    }
+    var scale by remember(startingUri) { mutableFloatStateOf(1f) }
+    var offset by remember(startingUri) { mutableStateOf(Offset.Zero) }
+    var showMenu by remember(startingUri) { mutableStateOf(false) }
+    var showActionMenu by remember(startingUri) { mutableStateOf(false) }
 
     // Gallery Zoom State
-    var gridZoom by remember { mutableFloatStateOf(3f) } 
+    var gridZoom by remember(startingUri) { mutableFloatStateOf(3f) } 
     val transformState = rememberTransformableState { zoomChange, _, _ ->
         gridZoom = (gridZoom / zoomChange).coerceIn(1f, 10f)
     }
@@ -1178,19 +1276,29 @@ private fun ImageViewerScreen(
                         DropdownMenuItem(
                             text = { Text("Open in Editor") },
                             onClick = { 
+                                val mimeType = resolveMimeType(activity.contentResolver, currentUri)
                                 val shareUri = if (currentUri.scheme == "file") {
                                     FileProvider.getUriForFile(activity, "${activity.packageName}.fileprovider", File(currentUri.path!!))
                                 } else {
                                     currentUri
                                 }
+                                // Use ACTION_SEND or ACTION_EDIT. Some apps prefer SEND for "sharing" to editor.
+                                // But for editing in place, ACTION_EDIT is standard.
                                 val editIntent = Intent(Intent.ACTION_EDIT).apply {
-                                    setDataAndType(shareUri, resolveMimeType(activity.contentResolver, currentUri))
+                                    setDataAndType(shareUri, mimeType)
                                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
                                 }
                                 try {
                                     activity.startActivity(Intent.createChooser(editIntent, "Edit Image"))
-                                } catch (e: Exception) {
-                                    // Fallback if no editor found
+                                } catch (_: Exception) {
+                                    // Fallback: try ACTION_VIEW with write permission
+                                    val viewIntent = Intent(Intent.ACTION_VIEW).apply {
+                                        setDataAndType(shareUri, mimeType)
+                                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                                    }
+                                    try {
+                                        activity.startActivity(Intent.createChooser(viewIntent, "Open with..."))
+                                    } catch (_: Exception) {}
                                 }
                                 showActionMenu = false 
                             },
@@ -1199,20 +1307,21 @@ private fun ImageViewerScreen(
                         DropdownMenuItem(
                             text = { Text("Print / Share") },
                             onClick = { 
+                                val mimeType = resolveMimeType(activity.contentResolver, currentUri)
                                 val shareUri = if (currentUri.scheme == "file") {
                                     FileProvider.getUriForFile(activity, "${activity.packageName}.fileprovider", File(currentUri.path!!))
                                 } else {
                                     currentUri
                                 }
                                 val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                                    type = resolveMimeType(activity.contentResolver, currentUri)
+                                    type = mimeType
                                     putExtra(Intent.EXTRA_STREAM, shareUri)
                                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                                 }
                                 activity.startActivity(Intent.createChooser(shareIntent, "Print or Share Image"))
                                 showActionMenu = false 
                             },
-                            leadingIcon = { Icon(Icons.Filled.Print, null) }
+                            leadingIcon = { Icon(Icons.Filled.PhotoLibrary, null) } // Use PhotoLibrary icon for share/import
                         )
                         DropdownMenuItem(
                             text = { Text("Close") },
@@ -1346,6 +1455,9 @@ private fun DirectoryPane(
     onToggleExpanded: (Uri) -> Unit,
     onOpenFile: (Uri, Boolean) -> Unit,
     onSelectionChange: (Uri, Boolean) -> Unit,
+    isImageFile: (Uri) -> Boolean,
+    onOpenInGallery: (Uri) -> Unit,
+    onOpenWithChooser: (Uri) -> Unit
 ) {
     val context = LocalContext.current
     val rootUri = state.root
@@ -1416,6 +1528,9 @@ private fun DirectoryPane(
                     onToggleExpanded = onToggleExpanded,
                     onOpenFile = onOpenFile,
                     onSelectionChange = onSelectionChange,
+                    isImageFile = isImageFile,
+                    onOpenInGallery = onOpenInGallery,
+                    onOpenWithChooser = onOpenWithChooser
                 )
             }
         }
@@ -1432,6 +1547,9 @@ private fun LazyListScope.renderTreeNodes(
     onToggleExpanded: (Uri) -> Unit,
     onOpenFile: (Uri, Boolean) -> Unit,
     onSelectionChange: (Uri, Boolean) -> Unit,
+    isImageFile: (Uri) -> Boolean,
+    onOpenInGallery: (Uri) -> Unit,
+    onOpenWithChooser: (Uri) -> Unit
 ) {
     val files = parent.listFiles().sortedWith(
         compareByDescending<DocumentFile> { it.isDirectory }.thenBy { it.name ?: "" },
@@ -1452,7 +1570,10 @@ private fun LazyListScope.renderTreeNodes(
                 onOpenFile = { onOpenFile(file.uri, file.isDirectory) },
                 onSelect = {
                     onSelectionChange(file.uri, file.isDirectory)
-                }
+                },
+                isImageFile = isImageFile,
+                onOpenInGallery = onOpenInGallery,
+                onOpenWithChooser = onOpenWithChooser
             )
         }
 
@@ -1467,6 +1588,9 @@ private fun LazyListScope.renderTreeNodes(
                 onToggleExpanded = onToggleExpanded,
                 onOpenFile = onOpenFile,
                 onSelectionChange = onSelectionChange,
+                isImageFile = isImageFile,
+                onOpenInGallery = onOpenInGallery,
+                onOpenWithChooser = onOpenWithChooser
             )
         }
     }
@@ -1482,7 +1606,13 @@ private fun FileTreeRow(
     onToggleExpanded: () -> Unit,
     onOpenFile: () -> Unit,
     onSelect: () -> Unit,
+    isImageFile: (Uri) -> Boolean,
+    onOpenInGallery: (Uri) -> Unit,
+    onOpenWithChooser: (Uri) -> Unit
 ) {
+    var showMenu by remember { mutableStateOf(false) }
+    val isImage = !file.isDirectory && isImageFile(file.uri)
+
     val icon = if (file.isDirectory) {
         if (isExpanded) Icons.Filled.KeyboardArrowDown else Icons.AutoMirrored.Filled.KeyboardArrowRight
     } else {
@@ -1493,7 +1623,6 @@ private fun FileTreeRow(
         modifier = Modifier
             .fillMaxWidth()
             .padding(start = (depth * 12).dp)
-            .clickable(onClick = onSelect)
             .background(if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface)
             .padding(vertical = 2.dp, horizontal = 4.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -1522,16 +1651,49 @@ private fun FileTreeRow(
             )
         }
 
-        Text(
-            text = file.name ?: "Unnamed",
-            modifier = Modifier.padding(start = 8.dp).weight(1f).combinedClickable(
-                onClick = onSelect,
-                onDoubleClick = onOpenFile
-            ),
-            style = MaterialTheme.typography.bodyMedium,
-            color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
+        Box(modifier = Modifier.weight(1f)) {
+            Text(
+                text = file.name ?: "Unnamed",
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 8.dp)
+                    .combinedClickable(
+                        onClick = {
+                            if (file.isDirectory) onToggleExpanded()
+                            else if (isImage) showMenu = true
+                            else onOpenFile()
+                        },
+                        onLongClick = {
+                            if (!file.isDirectory) onOpenWithChooser(file.uri)
+                        }
+                    ),
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+
+            DropdownMenu(
+                expanded = showMenu,
+                onDismissRequest = { showMenu = false }
+            ) {
+                DropdownMenuItem(
+                    text = { Text("Open in Gallery") },
+                    onClick = {
+                        onOpenInGallery(file.uri)
+                        showMenu = false
+                    },
+                    leadingIcon = { Icon(Icons.Filled.PhotoLibrary, null) }
+                )
+                DropdownMenuItem(
+                    text = { Text("Open with App") },
+                    onClick = {
+                        onOpenWithChooser(file.uri)
+                        showMenu = false
+                    },
+                    leadingIcon = { Icon(Icons.Filled.Edit, null) }
+                )
+            }
+        }
     }
 }
