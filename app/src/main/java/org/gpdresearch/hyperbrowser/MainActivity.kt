@@ -5,6 +5,7 @@ import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
@@ -13,6 +14,7 @@ import android.os.Environment
 import android.os.storage.StorageManager
 import android.provider.DocumentsContract
 import android.provider.Settings
+import android.util.LruCache
 import android.webkit.MimeTypeMap
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -24,6 +26,9 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -38,6 +43,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -65,6 +71,8 @@ import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.ZoomIn
+import androidx.compose.material.icons.filled.ZoomOut
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
@@ -94,7 +102,10 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -112,7 +123,19 @@ import java.io.InputStream
 private enum class Pane { LEFT, RIGHT }
 private enum class TransferDirection { LEFT_TO_RIGHT, RIGHT_TO_LEFT }
 private enum class TransferMode { COPY, MOVE }
-private enum class GalleryMode { SINGLE, THUMBNAILS }
+
+/**
+ * Gallery detail levels. Only [SINGLE] decodes the file at its native resolution; the grids trade
+ * detail for scroll smoothness.
+ */
+private enum class GalleryStage(val columns: Int, val thumbnailPx: Int, val lowQuality: Boolean) {
+    GRID_SMALL(columns = 4, thumbnailPx = 192, lowQuality = true),
+    GRID_MEDIUM(columns = 2, thumbnailPx = 640, lowQuality = false),
+    SINGLE(columns = 1, thumbnailPx = 0, lowQuality = false),
+}
+
+private const val MAX_SINGLE_ZOOM = 24f
+
 private enum class LayoutMode {
     PHONE,
     TABLET_BALANCED,
@@ -143,6 +166,32 @@ private data class TransferRequest(
     val wholeDirectory: Boolean,
     val mode: TransferMode,
 )
+
+private data class FolderTransferPrompt(
+    val request: TransferRequest,
+    val sourceName: String,
+    val targetName: String,
+    val offerDeleteSource: Boolean,
+)
+
+private data class FilesIntoFolderPrompt(
+    val request: TransferRequest,
+    val itemCount: Int,
+    val targetName: String,
+)
+
+private sealed interface TransferPlan {
+    /** The selection is valid, so the operation only stages the clipboard. */
+    object Staged : TransferPlan
+
+    /** The arrow points a folder at a file selection, which cannot be a destination. */
+    object ReverseSuggested : TransferPlan
+
+    data class FolderIntoFolder(val prompt: FolderTransferPrompt) : TransferPlan
+
+    /** Files are selected on both sides, so the destination folder has to be inferred. */
+    data class FilesIntoFolder(val prompt: FilesIntoFolderPrompt) : TransferPlan
+}
 
 private data class SelectionInfo(
     val title: String,
@@ -181,6 +230,9 @@ private fun HyperBrowserApp() {
     var transferDirection by remember { mutableStateOf(TransferDirection.LEFT_TO_RIGHT) }
     var layoutMode by remember { mutableStateOf(LayoutMode.PHONE) }
     var pendingRequest by remember { mutableStateOf<TransferRequest?>(null) }
+    var pendingFolderTransfer by remember { mutableStateOf<FolderTransferPrompt?>(null) }
+    var pendingFilesTransfer by remember { mutableStateOf<FilesIntoFolderPrompt?>(null) }
+    var reversePrompt by remember { mutableStateOf<TransferMode?>(null) }
     var pendingDelete by remember { mutableStateOf<Set<Uri>?>(null) }
     var galleryUri by remember { mutableStateOf<Uri?>(null) }
     var galleryDirectory by remember { mutableStateOf<Uri?>(null) }
@@ -208,11 +260,13 @@ private fun HyperBrowserApp() {
     val selectionInfo by produceState(initialValue = idleSelectionInfo, selected, activity) {
         value = if (selected.isEmpty()) idleSelectionInfo else withContext(Dispatchers.IO) { buildSelectionInfo(activity, selected) }
     }
-    val sourceLabel by produceState(initialValue = "source", sourceState.current) {
-        value = sourceState.current?.let { uri -> withContext(Dispatchers.IO) { resolveDisplayPath(activity, uri) } } ?: "source"
+    val leftLabel by produceState(initialValue = "Choose left root", leftPane.current, leftPane.root) {
+        val uri = leftPane.current ?: leftPane.root
+        value = uri?.let { withContext(Dispatchers.IO) { resolveDisplayPath(activity, it) } } ?: "Choose left root"
     }
-    val destinationLabel by produceState(initialValue = "destination", destinationState.current) {
-        value = destinationState.current?.let { uri -> withContext(Dispatchers.IO) { resolveDisplayPath(activity, uri) } } ?: "destination"
+    val rightLabel by produceState(initialValue = "Choose right root", rightPane.current, rightPane.root) {
+        val uri = rightPane.current ?: rightPane.root
+        value = uri?.let { withContext(Dispatchers.IO) { resolveDisplayPath(activity, it) } } ?: "Choose right root"
     }
 
     fun refreshPanesAfterWrite() {
@@ -227,9 +281,20 @@ private fun HyperBrowserApp() {
         }
     }
 
-    fun copyToClipboard(mode: TransferMode) {
-        val sourceDir = sourceState.current ?: sourceState.root ?: return
-        clipboard = ClipboardEntry(sourceDir = sourceDir, items = sourceState.selected, mode = mode)
+    fun stageClipboard(mode: TransferMode, source: BrowserPaneState) {
+        val sourceDir = source.current ?: source.root ?: return
+        clipboard = ClipboardEntry(sourceDir = sourceDir, items = source.selected, mode = mode)
+    }
+
+    fun startOperation(mode: TransferMode, source: BrowserPaneState, target: BrowserPaneState) {
+        scope.launch {
+            when (val plan = withContext(Dispatchers.IO) { planTransfer(activity, source, target, mode) }) {
+                TransferPlan.Staged -> stageClipboard(mode, source)
+                TransferPlan.ReverseSuggested -> reversePrompt = mode
+                is TransferPlan.FolderIntoFolder -> pendingFolderTransfer = plan.prompt
+                is TransferPlan.FilesIntoFolder -> pendingFilesTransfer = plan.prompt
+            }
+        }
     }
 
     fun pasteClipboard() {
@@ -253,13 +318,20 @@ private fun HyperBrowserApp() {
         galleryUri = uri
     }
 
-    fun handleFileDoubleTap(uri: Uri, directory: Uri?) {
+    fun openWith(uri: Uri) {
+        scope.launch {
+            val mime = withContext(Dispatchers.IO) { resolveMimeType(activity.contentResolver, uri) }
+            openFileWithChooser(activity, uri, mime)
+        }
+    }
+
+    fun openFileTarget(uri: Uri, directory: Uri?) {
         scope.launch {
             val mime = withContext(Dispatchers.IO) { resolveMimeType(activity.contentResolver, uri) }
             if (mime.startsWith("image/")) {
                 openGallery(uri, directory)
             } else {
-                openFileWithDefaultApp(activity, uri)
+                openFileWithChooser(activity, uri, mime)
             }
         }
     }
@@ -302,8 +374,8 @@ private fun HyperBrowserApp() {
                     },
                     onChooseLeftRoot = { showLeftPicker = true },
                     onChooseRightRoot = { showRightPicker = true },
-                    sourceLabel = sourceLabel,
-                    destinationLabel = destinationLabel,
+                    leftLabel = leftLabel,
+                    rightLabel = rightLabel,
                 )
 
                 if (galleryUri != null) {
@@ -322,9 +394,9 @@ private fun HyperBrowserApp() {
                             CommandStrip(
                                 layoutMode = layoutMode,
                                 pasteEnabled = clipboard != null,
-                                onCopy = { copyToClipboard(TransferMode.COPY) },
+                                onCopy = { startOperation(TransferMode.COPY, sourceState, destinationState) },
                                 onPaste = { pasteClipboard() },
-                                onMove = { copyToClipboard(TransferMode.MOVE) },
+                                onMove = { startOperation(TransferMode.MOVE, sourceState, destinationState) },
                                 onDelete = {
                                     val items = sourceState.selected.ifEmpty { setOfNotNull(sourceState.current) }
                                     if (items.isNotEmpty()) {
@@ -347,9 +419,9 @@ private fun HyperBrowserApp() {
                                 isActive = activePane == Pane.LEFT,
                                 modifier = Modifier.weight(if (layoutMode == LayoutMode.TABLET_WIDE) 1.6f else if (layoutMode == LayoutMode.TABLET_BALANCED) 1.2f else 1f),
                                 onActivate = { activePane = Pane.LEFT },
-                                onChooseRoot = { showLeftPicker = true },
                                 onNavigate = { directory -> leftPane = leftPane.copy(current = directory, selected = emptySet()) },
-                                onOpenFile = { uri -> handleFileDoubleTap(uri, leftPane.current ?: leftPane.root) },
+                                onOpenFile = { uri -> openFileTarget(uri, leftPane.current ?: leftPane.root) },
+                                onOpenWith = { uri -> openWith(uri) },
                                 onMoveUp = {
                                     val parent = leftPane.current?.let { parentDirectoryUri(activity, it) }
                                     if (parent != null) {
@@ -357,7 +429,6 @@ private fun HyperBrowserApp() {
                                     }
                                 },
                                 onSelectionChange = { selectedSet -> leftPane = leftPane.copy(selected = selectedSet) },
-                                onImageLongPress = { uri -> openGallery(uri, leftPane.current ?: leftPane.root) },
                                 showHiddenFiles = fileDisplayOptions.showHiddenFiles,
                                 showTrashFiles = fileDisplayOptions.showTrashFiles,
                             )
@@ -368,9 +439,9 @@ private fun HyperBrowserApp() {
                                 isActive = activePane == Pane.RIGHT,
                                 modifier = Modifier.weight(if (layoutMode == LayoutMode.TABLET_WIDE) 1.6f else if (layoutMode == LayoutMode.TABLET_BALANCED) 1.2f else 1f),
                                 onActivate = { activePane = Pane.RIGHT },
-                                onChooseRoot = { showRightPicker = true },
                                 onNavigate = { directory -> rightPane = rightPane.copy(current = directory, selected = emptySet()) },
-                                onOpenFile = { uri -> handleFileDoubleTap(uri, rightPane.current ?: rightPane.root) },
+                                onOpenFile = { uri -> openFileTarget(uri, rightPane.current ?: rightPane.root) },
+                                onOpenWith = { uri -> openWith(uri) },
                                 onMoveUp = {
                                     val parent = rightPane.current?.let { parentDirectoryUri(activity, it) }
                                     if (parent != null) {
@@ -378,7 +449,6 @@ private fun HyperBrowserApp() {
                                     }
                                 },
                                 onSelectionChange = { selectedSet -> rightPane = rightPane.copy(selected = selectedSet) },
-                                onImageLongPress = { uri -> openGallery(uri, rightPane.current ?: rightPane.root) },
                                 showHiddenFiles = fileDisplayOptions.showHiddenFiles,
                                 showTrashFiles = fileDisplayOptions.showTrashFiles,
                             )
@@ -417,6 +487,40 @@ private fun HyperBrowserApp() {
             onDismiss = { pendingRequest = null },
             onConfirm = { request ->
                 pendingRequest = null
+                runTransfer(request)
+            },
+        )
+    }
+
+    if (reversePrompt != null) {
+        ReverseFlowDialog(
+            onDismiss = { reversePrompt = null },
+            onReverse = {
+                val mode = reversePrompt!!
+                reversePrompt = null
+                transferDirection = if (transferDirection == TransferDirection.LEFT_TO_RIGHT) TransferDirection.RIGHT_TO_LEFT else TransferDirection.LEFT_TO_RIGHT
+                startOperation(mode, destinationState, sourceState)
+            },
+        )
+    }
+
+    if (pendingFolderTransfer != null) {
+        ConfirmFolderTransferDialog(
+            prompt = pendingFolderTransfer!!,
+            onDismiss = { pendingFolderTransfer = null },
+            onConfirm = { request ->
+                pendingFolderTransfer = null
+                runTransfer(request)
+            },
+        )
+    }
+
+    if (pendingFilesTransfer != null) {
+        ConfirmFilesIntoFolderDialog(
+            prompt = pendingFilesTransfer!!,
+            onDismiss = { pendingFilesTransfer = null },
+            onConfirm = { request ->
+                pendingFilesTransfer = null
                 runTransfer(request)
             },
         )
@@ -527,6 +631,85 @@ private fun openFileWithDefaultApp(activity: ComponentActivity, uri: Uri) {
             null,
         ),
     )
+}
+
+/** A typed chooser so the "Open with" list actually matches the document. */
+private fun openFileWithChooser(activity: ComponentActivity, uri: Uri, mimeType: String?) {
+    val view = Intent(Intent.ACTION_VIEW).apply {
+        setDataAndType(uri, mimeType?.takeIf { it.isNotBlank() } ?: "*/*")
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    runCatching { activity.startActivity(Intent.createChooser(view, "Open with")) }
+        .onFailure { openFileWithDefaultApp(activity, uri) }
+}
+
+private fun planTransfer(
+    activity: ComponentActivity,
+    source: BrowserPaneState,
+    target: BrowserPaneState,
+    mode: TransferMode,
+): TransferPlan {
+    val sourceDocs = source.selected.mapNotNull { getDocumentFile(activity, it) }
+    val targetDocs = target.selected.mapNotNull { getDocumentFile(activity, it) }
+    val sourceFolders = sourceDocs.filter { it.isDirectory }
+    val targetFolders = targetDocs.filter { it.isDirectory }
+
+    // A folder can only land inside another folder, never inside the selected files.
+    if (sourceFolders.isNotEmpty() && targetDocs.any { !it.isDirectory }) {
+        return TransferPlan.ReverseSuggested
+    }
+
+    if (sourceDocs.isNotEmpty() && sourceFolders.isEmpty() && targetDocs.isNotEmpty() && targetFolders.isEmpty()) {
+        val targetDir = target.current ?: target.root
+        val sourceDir = source.current ?: source.root
+        if (targetDir != null && sourceDir != null) {
+            val targetFolder = getDocumentFile(activity, targetDir)
+            return TransferPlan.FilesIntoFolder(
+                FilesIntoFolderPrompt(
+                    request = TransferRequest(
+                        sourceDir = sourceDir,
+                        targetDir = targetDir,
+                        selected = sourceDocs.map { it.uri }.toSet(),
+                        wholeDirectory = false,
+                        mode = mode,
+                    ),
+                    itemCount = sourceDocs.size,
+                    targetName = targetFolder?.name ?: resolveDisplayPath(activity, targetDir),
+                ),
+            )
+        }
+    }
+
+    if (sourceDocs.size == 1 && sourceFolders.size == 1 && targetDocs.size == 1 && targetFolders.size == 1) {
+        val sourceFolder = sourceFolders.first()
+        val targetFolder = targetFolders.first()
+        return TransferPlan.FolderIntoFolder(
+            FolderTransferPrompt(
+                request = TransferRequest(
+                    sourceDir = sourceFolder.uri,
+                    targetDir = targetFolder.uri,
+                    selected = emptySet(),
+                    wholeDirectory = true,
+                    mode = mode,
+                ),
+                sourceName = sourceFolder.name ?: resolveDisplayPath(activity, sourceFolder.uri),
+                targetName = targetFolder.name ?: resolveDisplayPath(activity, targetFolder.uri),
+                offerDeleteSource = mode == TransferMode.MOVE && isRemoteOrRemovableUri(sourceFolder.uri),
+            ),
+        )
+    }
+
+    return TransferPlan.Staged
+}
+
+// Cloud providers and removable volumes make a "move" destructive in ways the user should opt into.
+private fun isRemoteOrRemovableUri(uri: Uri): Boolean {
+    if (uri.scheme != ContentResolver.SCHEME_CONTENT) return false
+    if (uri.authority != "com.android.externalstorage.documents") return true
+    val documentId = runCatching { DocumentsContract.getDocumentId(uri) }.getOrNull()
+        ?: runCatching { DocumentsContract.getTreeDocumentId(uri) }.getOrNull()
+        ?: return false
+    return !documentId.startsWith("primary:")
 }
 
 private fun executeTransfer(activity: ComponentActivity, request: TransferRequest) {
@@ -817,8 +1000,8 @@ private fun MinimalTransferMenu(
     onReverse: () -> Unit,
     onChooseLeftRoot: () -> Unit,
     onChooseRightRoot: () -> Unit,
-    sourceLabel: String,
-    destinationLabel: String,
+    leftLabel: String,
+    rightLabel: String,
 ) {
     Column(modifier = Modifier.padding(vertical = 2.dp)) {
         Row(
@@ -830,7 +1013,7 @@ private fun MinimalTransferMenu(
         ) {
             AssistChip(
                 onClick = onChooseLeftRoot,
-                label = { Text("Left root", fontSize = 10.sp) },
+                label = { Text(leftLabel, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                 leadingIcon = { Icon(Icons.Filled.FolderOpen, contentDescription = null, Modifier.size(14.dp)) },
                 modifier = Modifier.weight(1f),
             )
@@ -848,23 +1031,10 @@ private fun MinimalTransferMenu(
 
             AssistChip(
                 onClick = onChooseRightRoot,
-                label = { Text("Right root", fontSize = 10.sp) },
+                label = { Text(rightLabel, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                 leadingIcon = { Icon(Icons.Filled.FolderOpen, contentDescription = null, Modifier.size(14.dp)) },
                 modifier = Modifier.weight(1f),
             )
-        }
-
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 2.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text("From:", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary, fontSize = 9.sp)
-            Text(sourceLabel, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, fontSize = 10.sp, modifier = Modifier.weight(1f))
-            Text("To:", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary, fontSize = 9.sp)
-            Text(destinationLabel, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, fontSize = 10.sp, modifier = Modifier.weight(1f), textAlign = TextAlign.End)
         }
     }
 }
@@ -1269,6 +1439,96 @@ private fun ConfirmTransferDialog(
     )
 }
 
+@Composable
+private fun ReverseFlowDialog(
+    onDismiss: () -> Unit,
+    onReverse: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Illogical operation: Reverse flow?") },
+        text = {
+            Text("A folder cannot be transferred into the selected file(s). Reverse the arrow so the selected file(s) move into the folder instead.")
+        },
+        confirmButton = {
+            TextButton(onClick = onReverse) { Text("Reverse flow") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
+}
+
+@Composable
+private fun ConfirmFolderTransferDialog(
+    prompt: FolderTransferPrompt,
+    onDismiss: () -> Unit,
+    onConfirm: (TransferRequest) -> Unit,
+) {
+    var deleteSource by remember(prompt) { mutableStateOf(false) }
+    val verb = if (prompt.request.mode == TransferMode.MOVE) "Move" else "Copy"
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Confirm folder transfer") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("$verb ${prompt.sourceName} into ${prompt.targetName}?")
+                if (prompt.offerDeleteSource) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(checked = deleteSource, onCheckedChange = { deleteSource = it })
+                        Text("Delete source directory")
+                    }
+                    Text(
+                        "The source is on a cloud or external volume. Leave this unchecked to copy the folder and keep the original.",
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    val mode = if (prompt.offerDeleteSource && !deleteSource) TransferMode.COPY else prompt.request.mode
+                    onConfirm(prompt.request.copy(mode = mode))
+                },
+            ) {
+                Text("Confirm")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
+}
+
+@Composable
+private fun ConfirmFilesIntoFolderDialog(
+    prompt: FilesIntoFolderPrompt,
+    onDismiss: () -> Unit,
+    onConfirm: (TransferRequest) -> Unit,
+) {
+    val verb = if (prompt.request.mode == TransferMode.MOVE) "Move" else "Copy"
+    val items = if (prompt.itemCount == 1) "1 item" else "${prompt.itemCount} items"
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Illogical operation") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Files are selected on both sides, and a file cannot be a destination.")
+                Text("$verb $items into ${prompt.targetName}, the folder holding the destination selection?")
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(prompt.request) }) { Text(verb) }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ImageViewerScreen(
@@ -1278,7 +1538,7 @@ private fun ImageViewerScreen(
     onClose: () -> Unit,
 ) {
     var currentUri by remember(startingUri) { mutableStateOf(startingUri) }
-    var galleryMode by remember { mutableStateOf(GalleryMode.SINGLE) }
+    var stage by remember { mutableStateOf(GalleryStage.SINGLE) }
     var scale by remember { mutableFloatStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
     var showMenu by remember { mutableStateOf(false) }
@@ -1296,15 +1556,42 @@ private fun ImageViewerScreen(
     }
 
     val currentDoc = images.firstOrNull { it.uri == currentUri }
-    val currentBitmap by produceState<ImageBitmap?>(initialValue = null, currentUri) {
-        value = withContext(Dispatchers.IO) { loadBitmap(activity, currentUri) }
+    // The single view intentionally decodes the file at native resolution, with no downsampling.
+    val currentBitmap by produceState<ImageBitmap?>(initialValue = null, currentUri, stage) {
+        value = if (stage == GalleryStage.SINGLE) {
+            withContext(Dispatchers.IO) { loadBitmap(activity, currentUri) }
+        } else {
+            null
+        }
     }
 
-    LaunchedEffect(galleryMode, scale) {
-        if (galleryMode == GalleryMode.SINGLE && scale <= 0.75f) {
-            galleryMode = GalleryMode.THUMBNAILS
-            scale = 1f
-            offset = Offset.Zero
+    fun resetTransform() {
+        scale = 1f
+        offset = Offset.Zero
+    }
+
+    fun zoomIn() {
+        when (stage) {
+            GalleryStage.GRID_SMALL -> stage = GalleryStage.GRID_MEDIUM
+            GalleryStage.GRID_MEDIUM -> {
+                stage = GalleryStage.SINGLE
+                resetTransform()
+            }
+            GalleryStage.SINGLE -> scale = (scale * 2f).coerceAtMost(MAX_SINGLE_ZOOM)
+        }
+    }
+
+    fun zoomOut() {
+        when (stage) {
+            GalleryStage.SINGLE -> if (scale > 1.05f) {
+                scale = (scale / 2f).coerceAtLeast(1f)
+                offset = Offset.Zero
+            } else {
+                stage = GalleryStage.GRID_MEDIUM
+                resetTransform()
+            }
+            GalleryStage.GRID_MEDIUM -> stage = GalleryStage.GRID_SMALL
+            GalleryStage.GRID_SMALL -> Unit
         }
     }
 
@@ -1338,10 +1625,15 @@ private fun ImageViewerScreen(
                         Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = "Next image")
                     }
                 }
+                IconButton(onClick = { zoomOut() }) {
+                    Icon(Icons.Filled.ZoomOut, contentDescription = "Zoom out")
+                }
+                IconButton(onClick = { zoomIn() }) {
+                    Icon(Icons.Filled.ZoomIn, contentDescription = "Zoom in")
+                }
                 IconButton(onClick = {
-                    galleryMode = if (galleryMode == GalleryMode.SINGLE) GalleryMode.THUMBNAILS else GalleryMode.SINGLE
-                    scale = 1f
-                    offset = Offset.Zero
+                    stage = if (stage == GalleryStage.SINGLE) GalleryStage.GRID_SMALL else GalleryStage.SINGLE
+                    resetTransform()
                 }) {
                     Icon(Icons.Filled.Image, contentDescription = "Toggle gallery view")
                 }
@@ -1357,7 +1649,7 @@ private fun ImageViewerScreen(
             contentAlignment = Alignment.Center,
         ) {
             val singleBitmap = currentBitmap
-            if (galleryMode == GalleryMode.SINGLE && singleBitmap != null) {
+            if (stage == GalleryStage.SINGLE && singleBitmap != null) {
                 Image(
                     bitmap = singleBitmap,
                     contentDescription = "Zoomable image",
@@ -1365,14 +1657,14 @@ private fun ImageViewerScreen(
                         .fillMaxSize()
                         .pointerInput(Unit) {
                             detectTransformGestures { _, pan, zoom, _ ->
-                                scale = (scale * zoom).coerceIn(0.25f, 6f)
-                                offset += pan
-                            }
-                        }
-                        .pointerInput(Unit) {
-                            detectDragGestures { _, dragAmount ->
-                                if (scale > 1f) {
-                                    offset += dragAmount
+                                val next = scale * zoom
+                                if (next < 0.85f) {
+                                    stage = GalleryStage.GRID_MEDIUM
+                                    scale = 1f
+                                    offset = Offset.Zero
+                                } else {
+                                    scale = next.coerceIn(1f, MAX_SINGLE_ZOOM)
+                                    if (scale > 1f) offset += pan
                                 }
                             }
                         }
@@ -1389,16 +1681,27 @@ private fun ImageViewerScreen(
                 )
             }
 
-            if (galleryMode == GalleryMode.THUMBNAILS) {
+            if (stage != GalleryStage.SINGLE) {
                 LazyVerticalGrid(
-                    columns = GridCells.Fixed(3),
-                    modifier = Modifier.fillMaxSize(),
+                    columns = GridCells.Fixed(stage.columns),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .pointerInput(stage) {
+                            detectPinchSteps { step -> if (step > 0) zoomIn() else zoomOut() }
+                        },
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    items(images) { file ->
-                        val thumb by produceState<ImageBitmap?>(initialValue = null, file.uri) {
-                            value = withContext(Dispatchers.IO) { loadBitmap(activity, file.uri, 120, 120) }
+                    items(images, key = { it.uri }) { file ->
+                        val sizePx = stage.thumbnailPx
+                        val lowQuality = stage.lowQuality
+                        val thumb by produceState(ThumbnailCache.get(file.uri, sizePx), file.uri, sizePx) {
+                            if (value == null) {
+                                value = withContext(Dispatchers.IO) {
+                                    loadBitmap(activity, file.uri, sizePx, sizePx, lowQuality)
+                                        ?.also { ThumbnailCache.put(file.uri, sizePx, it) }
+                                }
+                            }
                         }
                         val thumbnail = thumb
                         Column(
@@ -1406,19 +1709,24 @@ private fun ImageViewerScreen(
                             modifier = Modifier
                                 .clickable {
                                     currentUri = file.uri
-                                    galleryMode = GalleryMode.SINGLE
-                                    scale = 1f
-                                    offset = Offset.Zero
+                                    stage = GalleryStage.SINGLE
+                                    resetTransform()
                                 },
                         ) {
                             Box(
                                 modifier = Modifier
-                                    .size(110.dp)
+                                    .fillMaxWidth()
+                                    .aspectRatio(1f)
                                     .background(MaterialTheme.colorScheme.surfaceVariant),
                                 contentAlignment = Alignment.Center,
                             ) {
                                 if (thumbnail != null) {
-                                    Image(bitmap = thumbnail, contentDescription = file.name ?: "Thumbnail", modifier = Modifier.fillMaxSize())
+                                    Image(
+                                        bitmap = thumbnail,
+                                        contentDescription = file.name ?: "Thumbnail",
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier.fillMaxSize(),
+                                    )
                                 } else {
                                     Icon(Icons.Filled.Image, contentDescription = null)
                                 }
@@ -1444,7 +1752,7 @@ private fun ImageViewerScreen(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Button(onClick = onClose) { Text("Back to file browser") }
-                    Button(onClick = { galleryMode = GalleryMode.THUMBNAILS; showMenu = false }) { Text("Show thumbnails") }
+                    Button(onClick = { stage = GalleryStage.GRID_SMALL; resetTransform(); showMenu = false }) { Text("Show thumbnails") }
                 }
             }
 
@@ -1495,7 +1803,13 @@ private fun ImageViewerScreen(
     }
 }
 
-private fun loadBitmap(activity: ComponentActivity, uri: Uri, width: Int = 0, height: Int = 0): ImageBitmap? {
+private fun loadBitmap(
+    activity: ComponentActivity,
+    uri: Uri,
+    width: Int = 0,
+    height: Int = 0,
+    lowQuality: Boolean = false,
+): ImageBitmap? {
     val resolver = activity.contentResolver
     val exportType = if (isVirtualDocument(resolver, uri)) exportMimeType(resolver, uri) else null
     return openDocumentStream(resolver, uri, exportType)?.use { input ->
@@ -1509,9 +1823,49 @@ private fun loadBitmap(activity: ComponentActivity, uri: Uri, width: Int = 0, he
             val opts = BitmapFactory.Options().apply {
                 inJustDecodeBounds = false
                 inSampleSize = sample
+                if (lowQuality) inPreferredConfig = Bitmap.Config.RGB_565
             }
             BitmapFactory.decodeStream(stream, null, opts)?.asImageBitmap()
         }
+    }
+}
+
+/** Keeps decoded grid thumbnails around so scrolling back over them costs nothing. */
+private object ThumbnailCache {
+    private val cache = object : LruCache<String, ImageBitmap>(
+        (Runtime.getRuntime().maxMemory() / 1024 / 6).toInt().coerceAtLeast(4 * 1024),
+    ) {
+        override fun sizeOf(key: String, value: ImageBitmap): Int = (value.width * value.height * 4) / 1024
+    }
+
+    fun get(uri: Uri, sizePx: Int): ImageBitmap? = cache.get("$uri@$sizePx")
+
+    fun put(uri: Uri, sizePx: Int, bitmap: ImageBitmap) {
+        cache.put("$uri@$sizePx", bitmap)
+    }
+}
+
+/**
+ * Reports pinch gestures without swallowing single-finger drags, so a lazy grid keeps scrolling.
+ * [onStep] receives +1 to zoom in a stage and -1 to zoom out.
+ */
+private suspend fun PointerInputScope.detectPinchSteps(onStep: (Int) -> Unit) {
+    awaitEachGesture {
+        awaitFirstDown(requireUnconsumed = false)
+        var zoom = 1f
+        do {
+            val event = awaitPointerEvent()
+            if (event.changes.count { it.pressed } < 2) continue
+            zoom *= event.calculateZoom()
+            if (zoom > 1.4f) {
+                onStep(1)
+                zoom = 1f
+            } else if (zoom < 0.72f) {
+                onStep(-1)
+                zoom = 1f
+            }
+            event.changes.forEach { if (it.positionChanged()) it.consume() }
+        } while (event.changes.any { it.pressed })
     }
 }
 
@@ -1535,12 +1889,11 @@ private fun DirectoryPane(
     isActive: Boolean,
     modifier: Modifier = Modifier,
     onActivate: () -> Unit,
-    onChooseRoot: () -> Unit,
     onNavigate: (Uri) -> Unit,
     onOpenFile: (Uri) -> Unit,
+    onOpenWith: (Uri) -> Unit,
     onMoveUp: () -> Unit,
     onSelectionChange: (Set<Uri>) -> Unit,
-    onImageLongPress: (Uri) -> Unit,
     showHiddenFiles: Boolean,
     showTrashFiles: Boolean,
 ) {
@@ -1572,11 +1925,6 @@ private fun DirectoryPane(
                 title,
                 style = MaterialTheme.typography.titleSmall,
                 color = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
-            )
-            AssistChip(
-                onClick = onChooseRoot,
-                label = { Text(if (state.root == null) "Choose root" else "Change root") },
-                leadingIcon = { Icon(Icons.Filled.FolderOpen, contentDescription = null, Modifier.size(18.dp)) },
             )
             if (state.root != null && currentUri != null && currentUri != state.root) {
                 AssistChip(onClick = onMoveUp, label = { Text("Up") })
@@ -1643,12 +1991,7 @@ private fun DirectoryPane(
                                 },
                                 onLongClick = {
                                     onActivate()
-                                    if (!file.isDirectory) {
-                                        onSelectionChange(setOf(file.uri))
-                                        if (resolveMimeType((context as? ComponentActivity)?.contentResolver ?: return@combinedClickable, file.uri).startsWith("image/")) {
-                                            onImageLongPress(file.uri)
-                                        }
-                                    }
+                                    onSelectionChange(setOf(file.uri))
                                 },
                             )
                             .padding(horizontal = 12.dp, vertical = 12.dp),
@@ -1662,7 +2005,18 @@ private fun DirectoryPane(
                             )
                             Text(
                                 text = file.name ?: "Unnamed",
-                                modifier = Modifier.padding(start = 10.dp),
+                                modifier = Modifier
+                                    .padding(start = 10.dp)
+                                    .combinedClickable(
+                                        onClick = {
+                                            onActivate()
+                                            if (file.isDirectory) onNavigate(file.uri) else onOpenFile(file.uri)
+                                        },
+                                        onLongClick = {
+                                            onActivate()
+                                            if (file.isDirectory) onNavigate(file.uri) else onOpenWith(file.uri)
+                                        },
+                                    ),
                                 color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
