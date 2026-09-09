@@ -6,7 +6,7 @@
     <application
         android:allowBackup="false"
         android:label="Hyper Browser"
-        android:theme="@style/Theme.HyperBrowser">
+        android:theme="@style/Theme.Hacker">
         <activity
             android:name=".MainActivity"
             android:exported="true">

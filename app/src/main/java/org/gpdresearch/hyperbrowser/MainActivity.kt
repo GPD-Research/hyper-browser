@@ -1,15 +1,10 @@
 package org.gpdresearch.hyperbrowser
 
 import android.content.ContentResolver
-import android.content.Context
 import android.content.Intent
-import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
-import android.os.Environment
-import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -21,8 +16,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.gestures.detectTransformGestures
@@ -31,40 +24,18 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyListScope
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Divider
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.produceState
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.foundation.gestures.rememberTransformableState
-import androidx.compose.foundation.gestures.transformable
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Remove
-import androidx.compose.material.icons.filled.Print
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -73,73 +44,75 @@ import androidx.compose.material.icons.automirrored.filled.DriveFileMove
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.ContentPaste
-import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Deselect
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
-import androidx.compose.material3.RadioButton
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import androidx.core.content.FileProvider
+import kotlin.math.roundToInt
 import androidx.documentfile.provider.DocumentFile
-import java.io.File
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.InputStream
 import java.io.OutputStream
 
 private enum class Pane { LEFT, RIGHT }
+private enum class TransferDirection { LEFT_TO_RIGHT, RIGHT_TO_LEFT }
 private enum class TransferMode { COPY, MOVE }
 private enum class GalleryMode { SINGLE, THUMBNAILS }
-private enum class AppTheme { LIGHT, INVERTED, MATRIX }
 private enum class LayoutMode {
     PHONE,
     TABLET_BALANCED,
     TABLET_WIDE,
 }
 
+private data class FileDisplayOptions(
+    val showHiddenFiles: Boolean = false,
+    val showTrashFiles: Boolean = false,
+)
+
 private data class BrowserPaneState(
     val root: Uri? = null,
+    val current: Uri? = null,
     val selected: Set<Uri> = emptySet(),
-    val expanded: Set<Uri> = emptySet(),
+    val refreshKey: Int = 0,
+)
+
+private data class DirectoryListing(
+    val name: String?,
+    val files: List<DocumentFile>,
 )
 
 private data class TransferRequest(
@@ -169,46 +142,64 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun HyperBrowserApp() {
     val activity = LocalContext.current as? ComponentActivity ?: return
-    val prefs = remember { activity.getSharedPreferences("hyper_browser_prefs", Context.MODE_PRIVATE) }
 
-    fun loadInitialState(paneKey: String): BrowserPaneState {
-        val rootStr = prefs.getString("${paneKey}_root", null)
-        val rootUri = rootStr?.let { Uri.parse(it) }
-        return BrowserPaneState(root = rootUri)
-    }
-
-    var leftPane by remember { mutableStateOf(loadInitialState("left")) }
-    var rightPane by remember { mutableStateOf(loadInitialState("right")) }
+    var leftPane by remember { mutableStateOf(BrowserPaneState()) }
+    var rightPane by remember { mutableStateOf(BrowserPaneState()) }
     var activePane by remember { mutableStateOf(Pane.LEFT) }
+    var transferDirection by remember { mutableStateOf(TransferDirection.LEFT_TO_RIGHT) }
     var layoutMode by remember { mutableStateOf(LayoutMode.PHONE) }
     var pendingRequest by remember { mutableStateOf<TransferRequest?>(null) }
+    var pendingDelete by remember { mutableStateOf<Set<Uri>?>(null) }
     var galleryUri by remember { mutableStateOf<Uri?>(null) }
     var showLayoutSettings by remember { mutableStateOf(false) }
-    var showLeftPicker by remember { mutableStateOf(false) }
-    var showRightPicker by remember { mutableStateOf(false) }
-    var showCreateFolderDialog by remember { mutableStateOf(false) }
-    var customExtensions by remember {
-        val extStr = prefs.getString("custom_extensions", "")
-        mutableStateOf(extStr?.split(",")?.filter { it.isNotBlank() }?.toSet() ?: emptySet())
-    }
-    var appTheme by remember { 
-        val themeName = prefs.getString("app_theme", AppTheme.LIGHT.name)
-        mutableStateOf(AppTheme.valueOf(themeName ?: AppTheme.LIGHT.name))
-    }
+    var fileDisplayOptions by remember { mutableStateOf(FileDisplayOptions()) }
+    var selectionPreviewVisible by remember { mutableStateOf(true) }
+    var selectionPreviewOffset by remember { mutableStateOf(Offset.Zero) }
 
-    val sourcePane = activePane
-    val destinationPane = if (activePane == Pane.LEFT) Pane.RIGHT else Pane.LEFT
+    val sourcePane = if (transferDirection == TransferDirection.LEFT_TO_RIGHT) Pane.LEFT else Pane.RIGHT
+    val destinationPane = if (sourcePane == Pane.LEFT) Pane.RIGHT else Pane.LEFT
     val sourceState = if (sourcePane == Pane.LEFT) leftPane else rightPane
     val destinationState = if (destinationPane == Pane.LEFT) leftPane else rightPane
     val selected = sourceState.selected
     val selectedFile = selected.singleOrNull()
     val selectedMimeType = selectedFile?.let { resolveMimeType(activity.contentResolver, it) } ?: ""
     val isImageSelected = selectedMimeType.startsWith("image/")
-    val selectionInfo = remember(selected, activity) { buildSelectionInfo(activity, selected) }
+    val idleSelectionInfo = remember { buildSelectionInfo(activity, emptySet()) }
+    val selectionInfo by produceState(initialValue = idleSelectionInfo, selected, activity) {
+        value = if (selected.isEmpty()) idleSelectionInfo else withContext(Dispatchers.IO) { buildSelectionInfo(activity, selected) }
+    }
+    val sourceLabel by produceState(initialValue = "source", sourceState.current) {
+        value = sourceState.current?.let { uri -> withContext(Dispatchers.IO) { resolveDisplayPath(activity, uri) } } ?: "source"
+    }
+    val destinationLabel by produceState(initialValue = "destination", destinationState.current) {
+        value = destinationState.current?.let { uri -> withContext(Dispatchers.IO) { resolveDisplayPath(activity, uri) } } ?: "destination"
+    }
+
+    // Persistable grants can throw on providers (e.g. some Google Drive setups) that
+    // don't return a persistable-capable Uri; fall back to a session-only grant instead
+    // of crashing so the folder can still be selected.
+    fun takeUriPermissionSafely(uri: Uri) {
+        val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+        try {
+            activity.contentResolver.takePersistableUriPermission(uri, flags)
+        } catch (_: SecurityException) {
+        }
+    }
+
+    val leftPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        uri ?: return@rememberLauncherForActivityResult
+        takeUriPermissionSafely(uri)
+        leftPane = BrowserPaneState(root = uri, current = uri, selected = emptySet())
+    }
+    val rightPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        uri ?: return@rememberLauncherForActivityResult
+        takeUriPermissionSafely(uri)
+        rightPane = BrowserPaneState(root = uri, current = uri, selected = emptySet())
+    }
 
     fun enqueueTransfer(mode: TransferMode, selectedItems: Set<Uri> = sourceState.selected) {
-        val sourceDir = sourceState.root ?: return
-        val targetDir = destinationState.root ?: return
+        val sourceDir = sourceState.current ?: sourceState.root ?: return
+        val targetDir = destinationState.current ?: destinationState.root ?: return
         pendingRequest = TransferRequest(
             sourceDir = sourceDir,
             targetDir = targetDir,
@@ -219,8 +210,8 @@ private fun HyperBrowserApp() {
     }
 
     fun executeTransferNow(mode: TransferMode, selectedItems: Set<Uri> = sourceState.selected) {
-        val sourceDir = sourceState.root ?: return
-        val targetDir = destinationState.root ?: return
+        val sourceDir = sourceState.current ?: sourceState.root ?: return
+        val targetDir = destinationState.current ?: destinationState.root ?: return
         val request = TransferRequest(
             sourceDir = sourceDir,
             targetDir = targetDir,
@@ -229,130 +220,51 @@ private fun HyperBrowserApp() {
             mode = mode,
         )
         executeTransfer(activity, request)
-        if (sourcePane == Pane.LEFT) {
-            leftPane = leftPane.copy(selected = emptySet())
-        } else {
-            rightPane = rightPane.copy(selected = emptySet())
-        }
+        leftPane = leftPane.copy(refreshKey = leftPane.refreshKey + 1, selected = if (sourcePane == Pane.LEFT) emptySet() else leftPane.selected)
+        rightPane = rightPane.copy(refreshKey = rightPane.refreshKey + 1, selected = if (sourcePane == Pane.RIGHT) emptySet() else rightPane.selected)
     }
 
-    fun isImageFile(uri: Uri): Boolean {
+    fun handleFileDoubleTap(uri: Uri) {
         val mime = resolveMimeType(activity.contentResolver, uri)
-        if (mime.startsWith("image/")) return true
-        val ext = uri.toString().substringAfterLast('.', "").lowercase()
-        return ext in customExtensions
-    }
-
-    fun handleFileClick(uri: Uri, isDirectory: Boolean) {
-        if (isDirectory) {
-            val paneState = if (activePane == Pane.LEFT) leftPane else rightPane
-            val newExpanded = if (uri in paneState.expanded) paneState.expanded - uri else paneState.expanded + uri
-            if (activePane == Pane.LEFT) {
-                leftPane = leftPane.copy(expanded = newExpanded)
-            } else {
-                rightPane = rightPane.copy(expanded = newExpanded)
-            }
+        if (mime.startsWith("image/")) {
+            galleryUri = uri
         } else {
-            if (!isImageFile(uri)) {
-                openFileWithDefaultApp(activity, uri)
-            }
+            openFileWithDefaultApp(activity, uri)
         }
     }
 
-    fun handleSelection(uri: Uri, targetPane: Pane) {
-        activePane = targetPane
-        val paneState = if (targetPane == Pane.LEFT) leftPane else rightPane
-        val isSelected = uri in paneState.selected
-        var newSelection = paneState.selected
-
-        if (isSelected) {
-            newSelection = newSelection - uri
-        } else {
-            newSelection = newSelection + uri
-        }
-
-        if (targetPane == Pane.LEFT) {
-            leftPane = leftPane.copy(selected = newSelection)
-        } else {
-            rightPane = rightPane.copy(selected = newSelection)
-        }
-    }
-
-    fun setPaneRoot(uri: Uri, pane: Pane) {
-        if (pane == Pane.LEFT) {
-            leftPane = leftPane.copy(root = uri, expanded = emptySet(), selected = emptySet())
-        } else {
-            rightPane = rightPane.copy(root = uri, expanded = emptySet(), selected = emptySet())
-        }
-    }
-
-    fun savePaneDefaults() {
-        prefs.edit().apply {
-            putString("left_root", leftPane.root?.toString())
-            putString("right_root", rightPane.root?.toString())
-            apply()
-        }
-    }
-
-    fun updateTheme(newTheme: AppTheme) {
-        appTheme = newTheme
-        prefs.edit().putString("app_theme", newTheme.name).apply()
-    }
-
-    fun updateCustomExtensions(extensions: Set<String>) {
-        customExtensions = extensions
-        prefs.edit().putString("custom_extensions", extensions.joinToString(",")).apply()
-    }
-
-    fun createFolder(name: String) {
-        val targetUri = sourceState.selected.firstOrNull { 
-            getDocumentFile(activity, it)?.isDirectory == true 
-        } ?: sourceState.root ?: return
-        
-        val parentDoc = getDocumentFile(activity, targetUri)
-        if (parentDoc != null && parentDoc.isDirectory) {
-            val newDir = parentDoc.createDirectory(name)
-            if (newDir != null) {
-                if (activePane == Pane.LEFT) {
-                    leftPane = leftPane.copy(expanded = leftPane.expanded + targetUri)
-                } else {
-                    rightPane = rightPane.copy(expanded = rightPane.expanded + targetUri)
-                }
-            }
-        }
-        showCreateFolderDialog = false
-    }
-
-    val matrixGreen = Color(0xFF00FF41)
-    val colorScheme = when (appTheme) {
-        AppTheme.LIGHT -> lightColorScheme()
-        AppTheme.INVERTED -> darkColorScheme(
-            background = Color.Black,
-            surface = Color.Black,
-            onBackground = Color.White,
-            onSurface = Color.White,
-            primary = Color.White,
-            onPrimary = Color.Black
-        )
-        AppTheme.MATRIX -> darkColorScheme(
-            background = Color.Black,
-            surface = Color.Black,
-            onBackground = matrixGreen,
-            onSurface = matrixGreen,
-            primary = matrixGreen,
-            onPrimary = Color.Black,
-            secondary = matrixGreen,
-            onSecondary = Color.Black
-        )
-    }
-
-    MaterialTheme(colorScheme = colorScheme) {
+    MaterialTheme {
         Scaffold { contentPadding ->
-            Column(
+            Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(contentPadding),
             ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize(),
+            ) {
+                MinimalTransferMenu(
+                    direction = transferDirection,
+                    onReverse = {
+                        transferDirection = if (transferDirection == TransferDirection.LEFT_TO_RIGHT) TransferDirection.RIGHT_TO_LEFT else TransferDirection.LEFT_TO_RIGHT
+                    },
+                    onCopy = { executeTransferNow(TransferMode.COPY) },
+                    onMove = { enqueueTransfer(TransferMode.MOVE) },
+                    onChooseLeftRoot = { leftPicker.launch(null) },
+                    onChooseRightRoot = { rightPicker.launch(null) },
+                    sourceLabel = sourceLabel,
+                    destinationLabel = destinationLabel,
+                )
+
+                PreviewDetailPane(
+                    info = selectionInfo,
+                    selectedFile = selectedFile,
+                    isImage = isImageSelected,
+                    onOpen = { selectedFile?.let { openFileWithDefaultApp(activity, it) } },
+                    onView = { selectedFile?.let { if (isImageSelected) galleryUri = it } },
+                )
+
                 if (galleryUri != null) {
                     ImageViewerScreen(
                         activity = activity,
@@ -366,79 +278,89 @@ private fun HyperBrowserApp() {
                     ) {
                         CommandStrip(
                             layoutMode = layoutMode,
-                            onCopy = {
-                                val items = sourceState.selected.ifEmpty { setOfNotNull(sourceState.root) }
-                                if (items.isNotEmpty()) {
-                                    executeTransferNow(TransferMode.COPY, items)
-                                }
-                            },
+                            onCopy = { executeTransferNow(TransferMode.COPY) },
                             onPaste = {},
                             onMove = {
-                                val items = sourceState.selected.ifEmpty { setOfNotNull(sourceState.root) }
+                                val items = sourceState.selected.ifEmpty { setOfNotNull(sourceState.current) }
                                 if (items.isNotEmpty()) {
                                     enqueueTransfer(TransferMode.MOVE, items)
                                 }
                             },
                             onDelete = {
-                                val items = sourceState.selected.ifEmpty { setOfNotNull(sourceState.root) }
+                                val items = sourceState.selected.ifEmpty { setOfNotNull(sourceState.current) }
                                 if (items.isNotEmpty()) {
-                                    enqueueTransfer(TransferMode.MOVE, items) // Using MOVE for delete flow currently
+                                    pendingDelete = items
                                 }
                             },
-                            onCreateFolder = { showCreateFolderDialog = true },
-                            onOpenGallery = {
-                                val selectedDir = sourceState.selected.firstOrNull { 
-                                    getDocumentFile(activity, it)?.isDirectory == true 
-                                } ?: sourceState.root
-                                galleryUri = selectedDir
-                            },
-                            onSelectMulti = {
-                                if (activePane == Pane.LEFT) {
-                                    leftPane = leftPane.copy(selected = emptySet())
-                                } else {
-                                    rightPane = rightPane.copy(selected = emptySet())
+                            onGallery = {
+                                val image = selectedFile?.takeIf { isImageSelected }
+                                if (image != null) {
+                                    galleryUri = image
                                 }
                             },
+                            onSelectMulti = { activePane = sourcePane },
                             onOpenSettings = { showLayoutSettings = true },
                         )
 
                         DirectoryPane(
-                            title = "Left",
+                            title = "",
                             state = leftPane,
                             isActive = activePane == Pane.LEFT,
                             modifier = Modifier.weight(if (layoutMode == LayoutMode.TABLET_WIDE) 1.6f else if (layoutMode == LayoutMode.TABLET_BALANCED) 1.2f else 1f),
                             onActivate = { activePane = Pane.LEFT },
-                            onChooseRoot = { showLeftPicker = true },
-                            onToggleExpanded = { uri ->
-                                leftPane = leftPane.copy(expanded = if (uri in leftPane.expanded) leftPane.expanded - uri else leftPane.expanded + uri)
+                            onChooseRoot = { leftPicker.launch(null) },
+                            onNavigate = { directory -> leftPane = leftPane.copy(current = directory, selected = emptySet()) },
+                            onOpenFile = { uri -> handleFileDoubleTap(uri) },
+                            onMoveUp = {
+                                val currentDoc = leftPane.current?.let { DocumentFile.fromTreeUri(activity, it) }
+                                val parent = currentDoc?.parentFile
+                                if (parent != null) {
+                                    leftPane = leftPane.copy(current = parent.uri, selected = emptySet())
+                                }
                             },
-                            onOpenFile = { uri, isDir -> handleFileClick(uri, isDir) },
-                            onSelectionChange = { uri, _ -> handleSelection(uri, Pane.LEFT) },
-                            isImageFile = { isImageFile(it) },
-                            onOpenInGallery = { galleryUri = it },
-                            onOpenWithChooser = { openFileWithChooser(activity, it) },
-                            onSetAsRoot = { setPaneRoot(it, Pane.LEFT) }
+                            onSelectionChange = { selectedSet -> leftPane = leftPane.copy(selected = selectedSet) },
+                            onImageLongPress = { uri -> galleryUri = uri },
+                            showHiddenFiles = fileDisplayOptions.showHiddenFiles,
+                            showTrashFiles = fileDisplayOptions.showTrashFiles,
                         )
 
                         DirectoryPane(
-                            title = "Right",
+                            title = "",
                             state = rightPane,
                             isActive = activePane == Pane.RIGHT,
                             modifier = Modifier.weight(if (layoutMode == LayoutMode.TABLET_WIDE) 1.6f else if (layoutMode == LayoutMode.TABLET_BALANCED) 1.2f else 1f),
                             onActivate = { activePane = Pane.RIGHT },
-                            onChooseRoot = { showRightPicker = true },
-                            onToggleExpanded = { uri ->
-                                rightPane = rightPane.copy(expanded = if (uri in rightPane.expanded) rightPane.expanded - uri else rightPane.expanded + uri)
+                            onChooseRoot = { rightPicker.launch(null) },
+                            onNavigate = { directory -> rightPane = rightPane.copy(current = directory, selected = emptySet()) },
+                            onOpenFile = { uri -> handleFileDoubleTap(uri) },
+                            onMoveUp = {
+                                val currentDoc = rightPane.current?.let { DocumentFile.fromTreeUri(activity, it) }
+                                val parent = currentDoc?.parentFile
+                                if (parent != null) {
+                                    rightPane = rightPane.copy(current = parent.uri, selected = emptySet())
+                                }
                             },
-                            onOpenFile = { uri, isDir -> handleFileClick(uri, isDir) },
-                            onSelectionChange = { uri, _ -> handleSelection(uri, Pane.RIGHT) },
-                            isImageFile = { isImageFile(it) },
-                            onOpenInGallery = { galleryUri = it },
-                            onOpenWithChooser = { openFileWithChooser(activity, it) },
-                            onSetAsRoot = { setPaneRoot(it, Pane.RIGHT) }
+                            onSelectionChange = { selectedSet -> rightPane = rightPane.copy(selected = selectedSet) },
+                            onImageLongPress = { uri -> galleryUri = uri },
+                            showHiddenFiles = fileDisplayOptions.showHiddenFiles,
+                            showTrashFiles = fileDisplayOptions.showTrashFiles,
                         )
                     }
                 }
+            }
+
+            if (selectedFile != null && isImageSelected && galleryUri == null && selectionPreviewVisible) {
+                SelectionThumbnail(
+                    activity = activity,
+                    uri = selectedFile,
+                    offset = selectionPreviewOffset,
+                    onOffsetChange = { selectionPreviewOffset = it },
+                    onClose = { selectionPreviewVisible = false },
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(12.dp),
+                )
+            }
             }
         }
     }
@@ -450,99 +372,56 @@ private fun HyperBrowserApp() {
             onConfirm = { request ->
                 executeTransfer(activity, request)
                 pendingRequest = null
-                if (sourcePane == Pane.LEFT) {
-                    leftPane = leftPane.copy(selected = emptySet())
-                } else {
-                    rightPane = rightPane.copy(selected = emptySet())
-                }
+                leftPane = leftPane.copy(refreshKey = leftPane.refreshKey + 1, selected = if (sourcePane == Pane.LEFT) emptySet() else leftPane.selected)
+                rightPane = rightPane.copy(refreshKey = rightPane.refreshKey + 1, selected = if (sourcePane == Pane.RIGHT) emptySet() else rightPane.selected)
             },
         )
     }
 
-    if (showCreateFolderDialog) {
-        CreateFolderDialog(
-            onConfirm = { name -> createFolder(name) },
-            onDismiss = { showCreateFolderDialog = false }
+    if (pendingDelete != null) {
+        ConfirmDeleteDialog(
+            count = pendingDelete!!.size,
+            onDismiss = { pendingDelete = null },
+            onConfirm = {
+                deleteItems(activity, pendingDelete!!)
+                pendingDelete = null
+                leftPane = leftPane.copy(refreshKey = leftPane.refreshKey + 1, selected = if (sourcePane == Pane.LEFT) emptySet() else leftPane.selected)
+                rightPane = rightPane.copy(refreshKey = rightPane.refreshKey + 1, selected = if (sourcePane == Pane.RIGHT) emptySet() else rightPane.selected)
+            },
         )
     }
 
     if (showLayoutSettings) {
         LayoutSettingsDialog(
             selectedMode = layoutMode,
+            showHiddenFiles = fileDisplayOptions.showHiddenFiles,
+            showTrashFiles = fileDisplayOptions.showTrashFiles,
             onSelect = { mode ->
                 layoutMode = mode
                 showLayoutSettings = false
             },
-            currentTheme = appTheme,
-            onThemeSelect = { updateTheme(it) },
-            customExtensions = customExtensions,
-            onUpdateExtensions = { updateCustomExtensions(it) },
-            onSaveDefaults = {
-                savePaneDefaults()
-                showLayoutSettings = false
-            },
+            onToggleHiddenFiles = { fileDisplayOptions = fileDisplayOptions.copy(showHiddenFiles = it) },
+            onToggleTrashFiles = { fileDisplayOptions = fileDisplayOptions.copy(showTrashFiles = it) },
             onDismiss = { showLayoutSettings = false },
-        )
-    }
-
-    if (showLeftPicker) {
-        FolderPickerDialog(
-            onFolderSelected = { uri ->
-                leftPane = BrowserPaneState(root = uri, selected = emptySet(), expanded = emptySet())
-                showLeftPicker = false
-            },
-            onDismiss = { showLeftPicker = false }
-        )
-    }
-
-    if (showRightPicker) {
-        FolderPickerDialog(
-            onFolderSelected = { uri ->
-                rightPane = BrowserPaneState(root = uri, selected = emptySet(), expanded = emptySet())
-                showRightPicker = false
-            },
-            onDismiss = { showRightPicker = false }
         )
     }
 }
 
 private fun openFileWithDefaultApp(activity: ComponentActivity, uri: Uri) {
-    val shareUri = if (uri.scheme == "file") {
-        uri.path?.let { FileProvider.getUriForFile(activity, "${activity.packageName}.fileprovider", File(it)) } ?: uri
-    } else {
-        uri
-    }
     activity.startActivity(
         Intent.createChooser(
-            Intent(Intent.ACTION_VIEW, shareUri).apply {
+            Intent(Intent.ACTION_VIEW, uri).apply {
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                if (uri.scheme == "file") {
-                    // For direct file access, some apps might need the MIME type explicitly
-                    setDataAndType(shareUri, resolveMimeType(activity.contentResolver, uri))
-                }
             },
             null,
         ),
     )
 }
 
-private fun openFileWithChooser(activity: ComponentActivity, uri: Uri) {
-    val shareUri = if (uri.scheme == "file") {
-        FileProvider.getUriForFile(activity, "${activity.packageName}.fileprovider", File(uri.path!!))
-    } else {
-        uri
-    }
-    val intent = Intent(Intent.ACTION_VIEW).apply {
-        setDataAndType(shareUri, resolveMimeType(activity.contentResolver, uri))
-        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-    }
-    activity.startActivity(Intent.createChooser(intent, "Open with..."))
-}
-
 private fun executeTransfer(activity: ComponentActivity, request: TransferRequest) {
     if (request.wholeDirectory) {
-        val sourceDoc = getDocumentFile(activity, request.sourceDir) ?: return
-        val targetDoc = getDocumentFile(activity, request.targetDir) ?: return
+        val sourceDoc = DocumentFile.fromTreeUri(activity, request.sourceDir) ?: return
+        val targetDoc = DocumentFile.fromTreeUri(activity, request.targetDir) ?: return
         when (request.mode) {
             TransferMode.COPY -> copyTree(activity.contentResolver, sourceDoc, targetDoc)
             TransferMode.MOVE -> moveTree(activity.contentResolver, sourceDoc, targetDoc)
@@ -550,13 +429,19 @@ private fun executeTransfer(activity: ComponentActivity, request: TransferReques
         return
     }
 
-    val targetDoc = getDocumentFile(activity, request.targetDir) ?: return
+    val targetDoc = DocumentFile.fromTreeUri(activity, request.targetDir) ?: return
     request.selected.forEach { uri ->
-        val sourceDoc = getDocumentFile(activity, uri) ?: return@forEach
+        val sourceDoc = DocumentFile.fromSingleUri(activity, uri) ?: return@forEach
         when (request.mode) {
             TransferMode.COPY -> transferDocument(activity.contentResolver, sourceDoc, targetDoc, true)
             TransferMode.MOVE -> transferDocument(activity.contentResolver, sourceDoc, targetDoc, false)
         }
+    }
+}
+
+private fun deleteItems(activity: ComponentActivity, uris: Set<Uri>) {
+    uris.forEach { uri ->
+        DocumentFile.fromSingleUri(activity, uri)?.delete()
     }
 }
 
@@ -630,64 +515,43 @@ private fun nextAvailableName(targetDir: DocumentFile, preferredName: String): S
 }
 
 private fun copyStream(input: InputStream, output: OutputStream) {
-    val buffer = ByteArray(64 * 1024) // 64KB buffer for efficient large file transfers
-    var bytesRead: Int
-    while (input.read(buffer).also { bytesRead = it } != -1) {
-        output.write(buffer, 0, bytesRead)
-    }
+    input.copyTo(output)
     output.flush()
 }
 
 private fun resolveMimeType(resolver: ContentResolver, uri: Uri): String {
-    val type = resolver.getType(uri)
-    if (type != null) return type
-    
-    val ext = uri.toString().substringAfterLast('.', "").lowercase()
-    return when (ext) {
-        "jpg", "jpeg" -> "image/jpeg"
-        "png" -> "image/png"
-        "gif" -> "image/gif"
-        "bmp" -> "image/x-ms-bmp"
-        "webp" -> "image/webp"
-        "svg" -> "image/svg+xml"
+    return resolver.getType(uri) ?: when (uri.toString().substringAfterLast('.', "").lowercase()) {
+        "jpg", "jpeg", "png", "gif", "bmp", "webp" -> "image/bitmap"
         "pdf" -> "application/pdf"
         "txt" -> "text/plain"
-        "cr2", "nef", "arw", "dng", "orf", "raf" -> "image/x-adobe-dng" // Generic RAW
         else -> "application/octet-stream"
     }
 }
 
-private fun resolveDisplayPath(context: Context, uri: Uri): String {
-    val doc = getDocumentFile(context, uri)
+private fun resolveDisplayPath(context: ComponentActivity, uri: Uri): String {
+    val doc = DocumentFile.fromTreeUri(context, uri)
     return doc?.name ?: uri.lastPathSegment ?: "unknown"
 }
 
-private fun getDocumentFile(context: Context, uri: Uri): DocumentFile? {
-    return if (uri.scheme == "content") {
-        if (uri.toString().contains("tree")) {
-            DocumentFile.fromTreeUri(context, uri)
-        } else {
-            DocumentFile.fromSingleUri(context, uri)
-        }
-    } else if (uri.scheme == "file") {
-        uri.path?.let { DocumentFile.fromFile(File(it)) }
-    } else {
-        null
-    }
-}
-
-private fun getRecursiveUris(parent: DocumentFile): Set<Uri> {
-    val uris = mutableSetOf<Uri>()
-    parent.listFiles().forEach { file ->
-        uris.add(file.uri)
-        if (file.isDirectory) {
-            uris.addAll(getRecursiveUris(file))
-        }
-    }
-    return uris
-}
-
 private fun isImageMimeType(value: String): Boolean = value.startsWith("image/")
+
+private fun isHiddenPathSegment(name: String?): Boolean {
+    return name?.startsWith(".") == true || name?.startsWith("$") == true
+}
+
+private fun isTrashRelatedPath(name: String?): Boolean {
+    val lower = name?.lowercase() ?: return false
+    return lower.contains("trash") || lower.contains("recycle") || lower.contains("deleted") || lower.contains("recentlydeleted")
+}
+
+private fun shouldDisplayDocument(doc: DocumentFile, showHiddenFiles: Boolean, showTrashFiles: Boolean): Boolean {
+    val name = doc.name ?: return true
+    val hidden = isHiddenPathSegment(name)
+    val trash = isTrashRelatedPath(name)
+    if (hidden && !showHiddenFiles) return false
+    if (trash && !showTrashFiles) return false
+    return true
+}
 
 private fun buildSelectionInfo(activity: ComponentActivity, uris: Set<Uri>): SelectionInfo {
     if (uris.isEmpty()) {
@@ -701,7 +565,7 @@ private fun buildSelectionInfo(activity: ComponentActivity, uris: Set<Uri>): Sel
     }
     if (uris.size == 1) {
         val uri = uris.first()
-        val doc = getDocumentFile(activity, uri)
+        val doc = DocumentFile.fromSingleUri(activity, uri)
         if (doc == null) {
             return SelectionInfo(
                 title = uri.lastPathSegment ?: "Unknown",
@@ -720,7 +584,7 @@ private fun buildSelectionInfo(activity: ComponentActivity, uris: Set<Uri>): Sel
             details = if (isDir) "Directory" else (doc.type ?: "Document"),
         )
     }
-    val names = uris.take(3).mapNotNull { uri -> getDocumentFile(activity, uri)?.name ?: uri.lastPathSegment }
+    val names = uris.take(3).mapNotNull { uri -> DocumentFile.fromSingleUri(activity, uri)?.name ?: uri.lastPathSegment }
     return SelectionInfo(
         title = "${uris.size} items selected",
         kind = "Multi-select",
@@ -740,6 +604,81 @@ private fun formatBytes(size: Long): String {
         index += 1
     }
     return String.format("%.1f %s", value, units[index])
+}
+
+@Composable
+private fun MinimalTransferMenu(
+    direction: TransferDirection,
+    onReverse: () -> Unit,
+    onCopy: () -> Unit,
+    onMove: () -> Unit,
+    onChooseLeftRoot: () -> Unit,
+    onChooseRightRoot: () -> Unit,
+    sourceLabel: String,
+    destinationLabel: String,
+) {
+    Column(modifier = Modifier.padding(vertical = 4.dp)) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            AssistChip(
+                onClick = onChooseLeftRoot,
+                label = { Text("Top level") },
+                leadingIcon = { Icon(Icons.Filled.FolderOpen, contentDescription = null, Modifier.size(18.dp)) },
+                modifier = Modifier.weight(1f),
+            )
+
+            IconButton(
+                onClick = onReverse,
+                modifier = Modifier.size(48.dp),
+            ) {
+                Icon(
+                    imageVector = if (direction == TransferDirection.LEFT_TO_RIGHT) Icons.AutoMirrored.Filled.ArrowForward else Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "Reverse transfer direction",
+                    modifier = Modifier.size(24.dp),
+                )
+            }
+
+            AssistChip(
+                onClick = onChooseRightRoot,
+                label = { Text("Top level") },
+                leadingIcon = { Icon(Icons.Filled.FolderOpen, contentDescription = null, Modifier.size(18.dp)) },
+                modifier = Modifier.weight(1f),
+            )
+        }
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(horizontalAlignment = Alignment.Start, modifier = Modifier.weight(1f)) {
+                Text("From", style = MaterialTheme.typography.labelSmall)
+                Text(sourceLabel, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+
+            Column(horizontalAlignment = Alignment.End, modifier = Modifier.weight(1f)) {
+                Text("To", style = MaterialTheme.typography.labelSmall)
+                Text(destinationLabel, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            OutlinedButton(onClick = onCopy, modifier = Modifier.weight(1f)) { Text("Copy files") }
+            OutlinedButton(onClick = onMove, modifier = Modifier.weight(1f)) { Text("Move files") }
+        }
+    }
 }
 
 @Composable
@@ -779,15 +718,14 @@ private fun CommandStrip(
     onPaste: () -> Unit,
     onMove: () -> Unit,
     onDelete: () -> Unit,
-    onCreateFolder: () -> Unit,
-    onOpenGallery: () -> Unit,
+    onGallery: () -> Unit,
     onSelectMulti: () -> Unit,
     onOpenSettings: () -> Unit,
 ) {
     val stripWidth = when (layoutMode) {
-        LayoutMode.PHONE -> 64.dp
-        LayoutMode.TABLET_BALANCED -> 72.dp
-        LayoutMode.TABLET_WIDE -> 80.dp
+        LayoutMode.PHONE -> 104.dp
+        LayoutMode.TABLET_BALANCED -> 112.dp
+        LayoutMode.TABLET_WIDE -> 120.dp
     }
 
     Column(
@@ -799,51 +737,101 @@ private fun CommandStrip(
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         CommandButton(label = "Copy", icon = Icons.Filled.ContentCopy, onClick = onCopy)
-        CommandButton(label = "Paste", icon = Icons.Filled.ContentPaste, onClick = onPaste)
+        CommandButton(label = "Paste", icon = Icons.Filled.MoreVert, onClick = onPaste)
         CommandButton(label = "Move", icon = Icons.AutoMirrored.Filled.DriveFileMove, onClick = onMove)
         CommandButton(label = "Delete", icon = Icons.Filled.Delete, onClick = onDelete)
-        CommandButton(label = "New Folder", icon = Icons.Filled.CreateNewFolder, onClick = onCreateFolder)
-        CommandButton(label = "Gallery", icon = Icons.Filled.PhotoLibrary, onClick = onOpenGallery)
-        CommandButton(label = "Clear", icon = Icons.Filled.Deselect, onClick = {
-            onSelectMulti() 
-        })
-        CommandButton(label = "Settings", icon = Icons.Filled.Settings, onClick = onOpenSettings)
+        CommandButton(label = "Gallery", icon = Icons.Filled.Image, onClick = onGallery)
+        CommandButton(label = "Multi", icon = Icons.Filled.SelectAll, onClick = onSelectMulti)
+        CommandButton(label = "Settings", icon = Icons.Filled.Settings, onClick = onOpenSettings, showLabel = false)
     }
 }
 
 @Composable
-private fun CommandButton(label: String, icon: ImageVector, onClick: () -> Unit) {
+private fun CommandButton(label: String, icon: ImageVector, onClick: () -> Unit, showLabel: Boolean = true) {
     Column(
         modifier = Modifier
             .clickable(onClick = onClick)
-            .padding(4.dp)
-            .size(width = 56.dp, height = 56.dp),
+            .padding(6.dp)
+            .size(width = 88.dp, height = 76.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        Icon(icon, contentDescription = label, modifier = Modifier.size(20.dp))
-        Text(label, style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp), maxLines = 1)
+        Icon(icon, contentDescription = label, modifier = Modifier.size(24.dp))
+        if (showLabel) {
+            Text(
+                label,
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(top = 2.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun SelectionThumbnail(
+    activity: ComponentActivity,
+    uri: Uri,
+    offset: Offset,
+    onOffsetChange: (Offset) -> Unit,
+    onClose: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val bitmap by produceState<ImageBitmap?>(initialValue = null, uri) {
+        value = withContext(Dispatchers.IO) { loadBitmap(activity, uri, 160, 160) }
+    }
+    var currentOffset by remember(offset) { mutableStateOf(offset) }
+
+    Box(
+        modifier = modifier
+            .offset { IntOffset(currentOffset.x.roundToInt(), currentOffset.y.roundToInt()) }
+            .size(96.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .pointerInput(Unit) {
+                detectDragGestures { _, dragAmount ->
+                    currentOffset += dragAmount
+                    onOffsetChange(currentOffset)
+                }
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        if (bitmap != null) {
+            Image(
+                bitmap = bitmap!!,
+                contentDescription = "Selected image thumbnail",
+                modifier = Modifier.fillMaxSize(),
+            )
+        } else {
+            Icon(Icons.Filled.Image, contentDescription = null)
+        }
+
+        IconButton(
+            onClick = onClose,
+            modifier = Modifier.align(Alignment.TopEnd),
+        ) {
+            Icon(Icons.Filled.Close, contentDescription = "Close preview")
+        }
     }
 }
 
 @Composable
 private fun LayoutSettingsDialog(
     selectedMode: LayoutMode,
+    showHiddenFiles: Boolean,
+    showTrashFiles: Boolean,
     onSelect: (LayoutMode) -> Unit,
-    currentTheme: AppTheme,
-    onThemeSelect: (AppTheme) -> Unit,
-    customExtensions: Set<String>,
-    onUpdateExtensions: (Set<String>) -> Unit,
-    onSaveDefaults: () -> Unit,
+    onToggleHiddenFiles: (Boolean) -> Unit,
+    onToggleTrashFiles: (Boolean) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    var newExt by remember { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Settings") },
+        title = { Text("Layout settings") },
         text = {
-            Column(modifier = Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Layout Mode", style = MaterialTheme.typography.labelLarge)
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 LayoutMode.entries.forEach { mode ->
                     val label = when (mode) {
                         LayoutMode.PHONE -> "Phone layout"
@@ -857,58 +845,40 @@ private fun LayoutSettingsDialog(
                         Text(if (mode == selectedMode) "$label (selected)" else label)
                     }
                 }
-                Spacer(modifier = Modifier.height(16.dp))
-                Text("App Theme", style = MaterialTheme.typography.labelLarge)
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    AppTheme.entries.forEach { theme ->
-                        Button(
-                            onClick = { onThemeSelect(theme) },
-                            modifier = Modifier.weight(1f),
-                            contentPadding = PaddingValues(4.dp)
-                        ) {
-                            val label = theme.name.lowercase().replaceFirstChar { it.uppercase() }
-                            Text(if (theme == currentTheme) "$label*" else label, fontSize = 10.sp, maxLines = 1)
-                        }
-                    }
-                }
-                Spacer(modifier = Modifier.height(16.dp))
-                Text("Custom Image Extensions", style = MaterialTheme.typography.labelLarge)
-                Text("Current: ${customExtensions.joinToString(", ")}", style = MaterialTheme.typography.bodySmall)
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedTextField(
-                        value = newExt,
-                        onValueChange = { newExt = it.lowercase().trim() },
-                        label = { Text("Add extension (e.g. cr2)") },
-                        modifier = Modifier.weight(1f),
-                        singleLine = true
-                    )
-                    IconButton(onClick = {
-                        if (newExt.isNotBlank()) {
-                            onUpdateExtensions(customExtensions + newExt)
-                            newExt = ""
-                        }
-                    }) {
-                        Icon(Icons.Filled.Add, "Add")
-                    }
-                }
-                if (customExtensions.isNotEmpty()) {
-                    TextButton(onClick = { onUpdateExtensions(emptySet()) }) {
-                        Text("Clear All Custom Extensions")
-                    }
-                }
-                Spacer(modifier = Modifier.height(16.dp))
+
+                Text("File display", style = MaterialTheme.typography.labelLarge)
                 Button(
-                    onClick = onSaveDefaults,
+                    onClick = { onToggleHiddenFiles(!showHiddenFiles) },
                     modifier = Modifier.fillMaxWidth(),
-                    contentPadding = PaddingValues(12.dp)
                 ) {
-                    Text("Save Current Folders as Default")
+                    Text(if (showHiddenFiles) "Hide hidden files" else "Show hidden files")
+                }
+                Button(
+                    onClick = { onToggleTrashFiles(!showTrashFiles) },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(if (showTrashFiles) "Hide trash-related files" else "Show trash-related files")
                 }
             }
         },
         confirmButton = {
             TextButton(onClick = onDismiss) { Text("Close") }
         },
+    )
+}
+
+@Composable
+private fun ConfirmDeleteDialog(
+    count: Int,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Delete") },
+        text = { Text(if (count == 1) "Delete this item permanently?" else "Delete $count items permanently?") },
+        confirmButton = { TextButton(onClick = onConfirm) { Text("Delete") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
 
@@ -956,167 +926,28 @@ private fun ConfirmTransferDialog(
     )
 }
 
-@Composable
-private fun CreateFolderDialog(
-    onConfirm: (String) -> Unit,
-    onDismiss: () -> Unit
-) {
-    var name by remember { mutableStateOf("") }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Create New Folder") },
-        text = {
-            OutlinedTextField(
-                value = name,
-                onValueChange = { name = it },
-                label = { Text("Folder Name") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth()
-            )
-        },
-        confirmButton = {
-            Button(onClick = { onConfirm(name) }, enabled = name.isNotBlank()) {
-                Text("Create")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
-        }
-    )
-}
-
-@Composable
-private fun FolderPickerDialog(
-    onFolderSelected: (Uri) -> Unit,
-    onDismiss: () -> Unit
-) {
-    val context = LocalContext.current as ComponentActivity
-
-    val hasAllFilesAccess = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-        Environment.isExternalStorageManager()
-    } else {
-        true
-    }
-
-    val pickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        uri?.let {
-            val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-            context.contentResolver.takePersistableUriPermission(it, flags)
-            onFolderSelected(it)
-        }
-    }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Select Storage Location") },
-        text = {
-            Column(modifier = Modifier.fillMaxWidth()) {
-                Text("Choose where to start browsing.", style = MaterialTheme.typography.bodyMedium)
-                Spacer(modifier = Modifier.size(8.dp))
-                Text(
-                    "Note: Android limits access to absolute cloud/system roots. If a folder says 'Can't use', please select a subfolder (e.g. 'My Drive').",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.secondary
-                )
-                Spacer(modifier = Modifier.size(16.dp))
-                
-                Text("Standard Locations", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
-                Spacer(modifier = Modifier.size(8.dp))
-                
-                if (hasAllFilesAccess) {
-                    Button(
-                        onClick = {
-                            val root = Environment.getExternalStorageDirectory()
-                            onFolderSelected(Uri.fromFile(root))
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Icon(Icons.Filled.FolderOpen, null, Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("Internal Storage (Device Root)")
-                    }
-                } else {
-                    Text("All Files Access is required for direct browsing.", style = MaterialTheme.typography.bodySmall)
-                    Button(
-                        onClick = {
-                            @Suppress("InlinedApi")
-                            val intent = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
-                            context.startActivity(intent)
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("Grant All Files Access")
-                    }
-                }
-
-                Spacer(modifier = Modifier.size(16.dp))
-                Text("External & Cloud", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
-                Spacer(modifier = Modifier.size(8.dp))
-                
-                OutlinedButton(
-                    onClick = { pickerLauncher.launch(null) },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Icon(Icons.Filled.PhotoLibrary, null, Modifier.size(18.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text("Cloud, SD Card, or USB")
-                }
-                Text(
-                    "Use this to pick Google Drive folders or SD Card roots.",
-                    style = MaterialTheme.typography.labelSmall,
-                    modifier = Modifier.padding(top = 4.dp)
-                )
-            }
-        },
-        confirmButton = {},
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
-        }
-    )
-}
-
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ImageViewerScreen(
     activity: ComponentActivity,
     startingUri: Uri,
     onClose: () -> Unit,
 ) {
-    val currentFile = getDocumentFile(activity, startingUri)
-    val isDir = currentFile?.isDirectory == true
-    val parentDir = if (isDir) startingUri else (currentFile?.parentFile?.uri ?: startingUri)
-    val directoryDoc = getDocumentFile(activity, parentDir)
+    val parentDir = DocumentFile.fromSingleUri(activity, startingUri)?.parentFile?.uri ?: startingUri
+    val directoryDoc = DocumentFile.fromTreeUri(activity, parentDir) ?: DocumentFile.fromSingleUri(activity, parentDir)
     val images = directoryDoc?.listFiles()?.filter { file ->
         file.isFile && isImageMimeType(resolveMimeType(activity.contentResolver, file.uri))
     } ?: emptyList()
 
-    var currentUri by remember(startingUri) { 
-        mutableStateOf(if (isDir) (images.firstOrNull()?.uri ?: startingUri) else startingUri) 
-    }
-    var galleryMode by remember(startingUri) { 
-        mutableStateOf(if (isDir) GalleryMode.THUMBNAILS else GalleryMode.SINGLE) 
-    }
-    var scale by remember(startingUri) { mutableFloatStateOf(1f) }
-    var offset by remember(startingUri) { mutableStateOf(Offset.Zero) }
-    var showMenu by remember(startingUri) { mutableStateOf(false) }
-    var showActionMenu by remember(startingUri) { mutableStateOf(false) }
-
-    // Gallery Zoom State
-    var gridZoom by remember(startingUri) { mutableFloatStateOf(3f) } 
-    val transformState = rememberTransformableState { zoomChange, _, _ ->
-        gridZoom = (gridZoom / zoomChange).coerceIn(1f, 10f)
-    }
+    var currentUri by remember(startingUri) { mutableStateOf(startingUri) }
+    var galleryMode by remember { mutableStateOf(GalleryMode.SINGLE) }
+    var scale by remember { mutableFloatStateOf(1f) }
+    var offset by remember { mutableStateOf(Offset.Zero) }
+    var showMenu by remember { mutableStateOf(false) }
+    var imageActionUri by remember { mutableStateOf<Uri?>(null) }
 
     val currentDoc = images.firstOrNull { it.uri == currentUri }
-    val displayMetrics = activity.resources.displayMetrics
-    val screenWidth = displayMetrics.widthPixels
-    val screenHeight = displayMetrics.heightPixels
-    
-    val currentBitmap = currentDoc?.let { 
-        remember(it.uri, activity) { 
-            // Load full image capped at screen resolution to prevent "Canvas: trying to draw too large bitmap" crash
-            loadBitmap(activity, it.uri, screenWidth, screenHeight) 
-        } 
-    }
+    val currentBitmap = currentDoc?.let { remember(it.uri, activity) { loadBitmap(activity, it.uri) } }
 
     LaunchedEffect(galleryMode, scale) {
         if (galleryMode == GalleryMode.SINGLE && scale <= 0.75f) {
@@ -1126,7 +957,7 @@ private fun ImageViewerScreen(
         }
     }
 
-    Column(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+    Column(modifier = Modifier.fillMaxSize()) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1134,27 +965,9 @@ private fun ImageViewerScreen(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(currentDoc?.name ?: "Image viewer", maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            Text(currentDoc?.name ?: "Image viewer", maxLines = 1, overflow = TextOverflow.Ellipsis)
             Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = {
-                    if (galleryMode == GalleryMode.SINGLE) {
-                        scale = (scale / 1.2f).coerceAtLeast(1f)
-                    } else {
-                        gridZoom = (gridZoom + 1f).coerceAtMost(10f)
-                    }
-                }) {
-                    Icon(Icons.Filled.Remove, contentDescription = "Zoom out")
-                }
-                IconButton(onClick = {
-                    if (galleryMode == GalleryMode.SINGLE) {
-                        scale = (scale * 1.2f).coerceAtMost(6f)
-                    } else {
-                        gridZoom = (gridZoom - 1f).coerceAtLeast(1f)
-                    }
-                }) {
-                    Icon(Icons.Filled.Add, contentDescription = "Zoom in")
-                }
-                if (images.size > 1 && galleryMode == GalleryMode.SINGLE) {
+                if (images.size > 1) {
                     IconButton(onClick = {
                         val index = images.indexOfFirst { it.uri == currentUri }
                         val nextIndex = if (index <= 0) images.lastIndex else index - 1
@@ -1179,7 +992,7 @@ private fun ImageViewerScreen(
                     scale = 1f
                     offset = Offset.Zero
                 }) {
-                    Icon(if (galleryMode == GalleryMode.SINGLE) Icons.Filled.PhotoLibrary else Icons.Filled.Image, contentDescription = "Toggle gallery view")
+                    Icon(Icons.Filled.Image, contentDescription = "Toggle gallery view")
                 }
                 IconButton(onClick = onClose) { Icon(Icons.Filled.Close, contentDescription = "Close gallery") }
             }
@@ -1193,115 +1006,46 @@ private fun ImageViewerScreen(
             contentAlignment = Alignment.Center,
         ) {
             if (galleryMode == GalleryMode.SINGLE && currentBitmap != null) {
-                Box {
-                    Image(
-                        bitmap = currentBitmap,
-                        contentDescription = "Full image",
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .pointerInput(Unit) {
-                                detectTransformGestures { _, pan, zoom, _ ->
-                                    scale = (scale * zoom).coerceIn(1f, 6f)
-                                    offset += pan
+                Image(
+                    bitmap = currentBitmap,
+                    contentDescription = "Zoomable image",
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .pointerInput(Unit) {
+                            detectTransformGestures { _, pan, zoom, _ ->
+                                scale = (scale * zoom).coerceIn(0.25f, 6f)
+                                offset += pan
+                            }
+                        }
+                        .pointerInput(Unit) {
+                            detectDragGestures { _, dragAmount ->
+                                if (scale > 1f) {
+                                    offset += dragAmount
                                 }
                             }
-                            .pointerInput(Unit) {
-                                detectDragGestures { _, dragAmount ->
-                                    if (scale > 1f) {
-                                        offset += dragAmount
-                                    }
-                                }
-                            }
-                            .graphicsLayer(
-                                scaleX = scale,
-                                scaleY = scale,
-                                translationX = offset.x,
-                                translationY = offset.y,
-                            )
-                            .clickable(onClick = { showActionMenu = !showActionMenu }),
-                        contentScale = ContentScale.Fit
-                    )
-                    
-                    DropdownMenu(
-                        expanded = showActionMenu,
-                        onDismissRequest = { showActionMenu = false },
-                        modifier = Modifier.align(Alignment.TopEnd)
-                    ) {
-                        DropdownMenuItem(
-                            text = { Text("Open in Editor") },
-                            onClick = { 
-                                val mimeType = resolveMimeType(activity.contentResolver, currentUri)
-                                val shareUri = if (currentUri.scheme == "file") {
-                                    FileProvider.getUriForFile(activity, "${activity.packageName}.fileprovider", File(currentUri.path!!))
-                                } else {
-                                    currentUri
-                                }
-                                // Use ACTION_SEND or ACTION_EDIT. Some apps prefer SEND for "sharing" to editor.
-                                // But for editing in place, ACTION_EDIT is standard.
-                                val editIntent = Intent(Intent.ACTION_EDIT).apply {
-                                    setDataAndType(shareUri, mimeType)
-                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-                                }
-                                try {
-                                    activity.startActivity(Intent.createChooser(editIntent, "Edit Image"))
-                                } catch (_: Exception) {
-                                    // Fallback: try ACTION_VIEW with write permission
-                                    val viewIntent = Intent(Intent.ACTION_VIEW).apply {
-                                        setDataAndType(shareUri, mimeType)
-                                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-                                    }
-                                    try {
-                                        activity.startActivity(Intent.createChooser(viewIntent, "Open with..."))
-                                    } catch (_: Exception) {}
-                                }
-                                showActionMenu = false 
-                            },
-                            leadingIcon = { Icon(Icons.Filled.Edit, null) }
+                        }
+                        .graphicsLayer(
+                            scaleX = scale,
+                            scaleY = scale,
+                            translationX = offset.x,
+                            translationY = offset.y,
                         )
-                        DropdownMenuItem(
-                            text = { Text("Print / Share") },
-                            onClick = { 
-                                val mimeType = resolveMimeType(activity.contentResolver, currentUri)
-                                val shareUri = if (currentUri.scheme == "file") {
-                                    FileProvider.getUriForFile(activity, "${activity.packageName}.fileprovider", File(currentUri.path!!))
-                                } else {
-                                    currentUri
-                                }
-                                val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                                    type = mimeType
-                                    putExtra(Intent.EXTRA_STREAM, shareUri)
-                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                }
-                                activity.startActivity(Intent.createChooser(shareIntent, "Print or Share Image"))
-                                showActionMenu = false 
-                            },
-                            leadingIcon = { Icon(Icons.Filled.PhotoLibrary, null) } // Use PhotoLibrary icon for share/import
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Close") },
-                            onClick = { onClose() },
-                            leadingIcon = { Icon(Icons.Filled.Close, null) }
-                        )
-                    }
-                }
+                        .combinedClickable(
+                            onClick = { showMenu = !showMenu },
+                            onLongClick = { imageActionUri = currentUri },
+                        ),
+                )
             }
 
             if (galleryMode == GalleryMode.THUMBNAILS) {
-                val columns = gridZoom.toInt().coerceIn(1, 8)
-                val highQuality = columns <= 2
-                
                 LazyVerticalGrid(
-                    columns = GridCells.Fixed(columns),
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .transformable(state = transformState),
-                    contentPadding = PaddingValues(4.dp),
+                    columns = GridCells.Fixed(3),
+                    modifier = Modifier.fillMaxSize(),
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    items(images, key = { it.uri }) { file ->
-                        val targetSize = if (highQuality) 512 else 160
-                        val thumb = remember(file.uri, activity, targetSize) { loadBitmap(activity, file.uri, targetSize, targetSize) }
+                    items(images) { file ->
+                        val thumb = remember(file.uri, activity) { loadBitmap(activity, file.uri, 120, 120) }
                         Column(
                             horizontalAlignment = Alignment.CenterHorizontally,
                             modifier = Modifier
@@ -1314,31 +1058,23 @@ private fun ImageViewerScreen(
                         ) {
                             Box(
                                 modifier = Modifier
-                                    .fillMaxWidth()
-                                    .aspectRatio(1f)
+                                    .size(110.dp)
                                     .background(MaterialTheme.colorScheme.surfaceVariant),
                                 contentAlignment = Alignment.Center,
                             ) {
                                 if (thumb != null) {
-                                    Image(
-                                        bitmap = thumb, 
-                                        contentDescription = file.name ?: "Thumbnail", 
-                                        modifier = Modifier.fillMaxSize(),
-                                        contentScale = ContentScale.Fit
-                                    )
+                                    Image(bitmap = thumb, contentDescription = file.name ?: "Thumbnail", modifier = Modifier.fillMaxSize())
                                 } else {
-                                    Icon(Icons.Filled.Image, contentDescription = null, modifier = Modifier.size(32.dp))
+                                    Icon(Icons.Filled.Image, contentDescription = null)
                                 }
                             }
-                            if (columns <= 4) {
-                                Text(
-                                    text = file.name ?: "Image",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.padding(top = 2.dp),
-                                )
-                            }
+                            Text(
+                                text = file.name ?: "Image",
+                                style = MaterialTheme.typography.labelSmall,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.padding(top = 4.dp),
+                            )
                         }
                     }
                 }
@@ -1356,32 +1092,64 @@ private fun ImageViewerScreen(
                     Button(onClick = { galleryMode = GalleryMode.THUMBNAILS; showMenu = false }) { Text("Show thumbnails") }
                 }
             }
+
+            if (imageActionUri != null) {
+                AlertDialog(
+                    onDismissRequest = { imageActionUri = null },
+                    title = { Text("Image actions") },
+                    text = {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(onClick = {
+                                openFileWithDefaultApp(activity, imageActionUri!!)
+                                imageActionUri = null
+                            }) { Text("Open in external app") }
+                            Button(onClick = {
+                                activity.startActivity(
+                                    Intent.createChooser(
+                                        Intent(Intent.ACTION_EDIT, imageActionUri!!).apply {
+                                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                        },
+                                        "Edit image",
+                                    ),
+                                )
+                                imageActionUri = null
+                            }) { Text("Edit in external editor") }
+                            Button(onClick = {
+                                DocumentFile.fromSingleUri(activity, imageActionUri!!)?.delete()
+                                imageActionUri = null
+                                val remaining = images.filterNot { it.uri == imageActionUri }
+                                if (remaining.isNotEmpty()) {
+                                    currentUri = remaining.first().uri
+                                } else {
+                                    onClose()
+                                }
+                            }) { Text("Delete") }
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(onClick = { imageActionUri = null }) { Text("Close") }
+                    },
+                )
+            }
         }
     }
 }
 
 private fun loadBitmap(activity: ComponentActivity, uri: Uri, width: Int = 0, height: Int = 0): ImageBitmap? {
-    val bounds = activity.contentResolver.openInputStream(uri)?.use { input ->
-        val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeStream(input, null, opts)
-        opts
-    } ?: return null
+    return activity.contentResolver.openInputStream(uri)?.use { input ->
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeStream(input, null, bounds)
+        val targetWidth = if (width > 0) width else bounds.outWidth
+        val targetHeight = if (height > 0) height else bounds.outHeight
+        val sample = computeInSampleSize(bounds.outWidth, bounds.outHeight, targetWidth, targetHeight)
 
-    // If width/height are 0, we still want to cap at screen size to prevent crashes with massive files
-    val displayMetrics = activity.resources.displayMetrics
-    val maxW = if (width > 0) width else displayMetrics.widthPixels
-    val maxH = if (height > 0) height else displayMetrics.heightPixels
-
-    val sample = computeInSampleSize(bounds.outWidth, bounds.outHeight, maxW, maxH)
-
-    return activity.contentResolver.openInputStream(uri)?.use { stream ->
-        val opts = BitmapFactory.Options().apply {
-            inJustDecodeBounds = false
-            inSampleSize = sample
-            // Use RGB_565 (2 bytes/pixel) for smaller thumbnails to save 50% memory
-            inPreferredConfig = if (maxW > 400) Bitmap.Config.ARGB_8888 else Bitmap.Config.RGB_565
+        activity.contentResolver.openInputStream(uri)?.use { stream ->
+            val opts = BitmapFactory.Options().apply {
+                inJustDecodeBounds = false
+                inSampleSize = sample
+            }
+            BitmapFactory.decodeStream(stream, null, opts)?.asImageBitmap()
         }
-        BitmapFactory.decodeStream(stream, null, opts)?.asImageBitmap()
     }
 }
 
@@ -1406,43 +1174,46 @@ private fun DirectoryPane(
     modifier: Modifier = Modifier,
     onActivate: () -> Unit,
     onChooseRoot: () -> Unit,
-    onToggleExpanded: (Uri) -> Unit,
-    onOpenFile: (Uri, Boolean) -> Unit,
-    onSelectionChange: (Uri, Boolean) -> Unit,
-    isImageFile: (Uri) -> Boolean,
-    onOpenInGallery: (Uri) -> Unit,
-    onOpenWithChooser: (Uri) -> Unit,
-    onSetAsRoot: (Uri) -> Unit
+    onNavigate: (Uri) -> Unit,
+    onOpenFile: (Uri) -> Unit,
+    onMoveUp: () -> Unit,
+    onSelectionChange: (Set<Uri>) -> Unit,
+    onImageLongPress: (Uri) -> Unit,
+    showHiddenFiles: Boolean,
+    showTrashFiles: Boolean,
 ) {
     val context = LocalContext.current
-    val rootUri = state.root
+    val currentUri = state.current ?: state.root
+    val listing by produceState<DirectoryListing?>(initialValue = null, currentUri, state.refreshKey) {
+        value = currentUri?.let { uri ->
+            withContext(Dispatchers.IO) {
+                val dir = DocumentFile.fromTreeUri(context, uri)
+                DirectoryListing(
+                    name = dir?.name,
+                    files = (dir?.listFiles()?.filter { file -> shouldDisplayDocument(file, showHiddenFiles, showTrashFiles) }
+                        ?.sortedWith(
+                            compareByDescending<DocumentFile> { it.isDirectory }.thenBy { it.name ?: "" },
+                        ) ?: emptyList()),
+                )
+            }
+        }
+    }
+    val files = listing?.files ?: emptyList()
+    val isLoading = currentUri != null && listing == null
 
-    Column(modifier = modifier
-        .clickable(onClick = onActivate)
-        .fillMaxHeight()) {
-        if (rootUri == null) {
+    Column(modifier = modifier.clickable(onClick = onActivate).fillMaxHeight()) {
+        if (currentUri == null && state.root == null) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(16.dp),
                 contentAlignment = Alignment.Center,
             ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(
-                        text = "Choose a root folder to begin",
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Spacer(modifier = Modifier.size(12.dp))
-                    Text(
-                        text = "Select Root Folder",
-                        style = MaterialTheme.typography.labelLarge.copy(
-                            color = MaterialTheme.colorScheme.primary,
-                            textDecoration = TextDecoration.Underline
-                        ),
-                        modifier = Modifier.clickable { onChooseRoot() }
-                    )
-                }
+                Text(
+                    text = "Choose a root folder to begin",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
             return
         }
@@ -1457,263 +1228,101 @@ private fun DirectoryPane(
             )
             AssistChip(
                 onClick = onChooseRoot,
-                label = { Text("Change root") },
+                label = { Text(if (state.root == null) "Choose root" else "Change root") },
                 leadingIcon = { Icon(Icons.Filled.FolderOpen, contentDescription = null, Modifier.size(18.dp)) },
             )
+            if (state.root != null && currentUri != null && currentUri != state.root) {
+                AssistChip(onClick = onMoveUp, label = { Text("Up") })
+            }
         }
 
         Text(
-            text = resolveDisplayPath(context, rootUri),
+            text = listing?.name ?: "No folder selected",
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             style = MaterialTheme.typography.labelMedium,
         )
 
-        LazyColumn(Modifier.fillMaxSize()) {
-            item {
-                val rootDoc = getDocumentFile(context, rootUri)
-                if (rootDoc != null) {
-                    TreeRoot(
-                        context = context,
-                        root = rootDoc,
-                        state = state,
-                        onToggleExpanded = onToggleExpanded,
-                        onOpenFile = onOpenFile,
-                        onSelectionChange = onSelectionChange,
-                        isImageFile = isImageFile,
-                        onOpenInGallery = onOpenInGallery,
-                        onOpenWithChooser = onOpenWithChooser,
-                        onSetAsRoot = onSetAsRoot
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun TreeRoot(
-    context: Context,
-    root: DocumentFile,
-    state: BrowserPaneState,
-    onToggleExpanded: (Uri) -> Unit,
-    onOpenFile: (Uri, Boolean) -> Unit,
-    onSelectionChange: (Uri, Boolean) -> Unit,
-    isImageFile: (Uri) -> Boolean,
-    onOpenInGallery: (Uri) -> Unit,
-    onOpenWithChooser: (Uri) -> Unit,
-    onSetAsRoot: (Uri) -> Unit
-) {
-    Column {
-        RenderTreeNodes(
-            context = context,
-            parent = root,
-            expanded = state.expanded,
-            selected = state.selected,
-            parentSelected = root.uri in state.selected,
-            depth = 0,
-            onToggleExpanded = onToggleExpanded,
-            onOpenFile = onOpenFile,
-            onSelectionChange = onSelectionChange,
-            isImageFile = isImageFile,
-            onOpenInGallery = onOpenInGallery,
-            onOpenWithChooser = onOpenWithChooser,
-            onSetAsRoot = onSetAsRoot
-        )
-    }
-}
-
-@Composable
-private fun RenderTreeNodes(
-    context: Context,
-    parent: DocumentFile,
-    expanded: Set<Uri>,
-    selected: Set<Uri>,
-    parentSelected: Boolean,
-    depth: Int,
-    onToggleExpanded: (Uri) -> Unit,
-    onOpenFile: (Uri, Boolean) -> Unit,
-    onSelectionChange: (Uri, Boolean) -> Unit,
-    isImageFile: (Uri) -> Boolean,
-    onOpenInGallery: (Uri) -> Unit,
-    onOpenWithChooser: (Uri) -> Unit,
-    onSetAsRoot: (Uri) -> Unit
-) {
-    // Load files asynchronously to prevent UI hang on cloud storage
-    val filesState = produceState<List<DocumentFile>?>(initialValue = null, parent.uri) {
-        value = withContext(Dispatchers.IO) {
-            try {
-                parent.listFiles().sortedWith(
-                    compareByDescending<DocumentFile> { it.isDirectory }.thenBy { it.name ?: "" }
-                )
-            } catch (_: Exception) {
-                emptyList()
-            }
-        }
-    }
-
-    val files = filesState.value
-
-    if (files == null) {
-        Row(modifier = Modifier.padding(start = (depth * 12 + 16).dp).padding(vertical = 4.dp)) {
-            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-            Spacer(Modifier.width(8.dp))
-            Text("Loading...", style = MaterialTheme.typography.labelSmall)
-        }
-    } else {
-        files.forEach { file ->
-            val isExplicitlySelected = file.uri in selected
-            val isEffectivelySelected = parentSelected || isExplicitlySelected
-            val isExpanded = file.uri in expanded
-
-            FileTreeRow(
-                file = file,
-                depth = depth,
-                isExpanded = isExpanded,
-                isSelected = isEffectivelySelected,
-                onToggleExpanded = { onToggleExpanded(file.uri) },
-                onOpenFile = { onOpenFile(file.uri, file.isDirectory) },
-                onSelect = {
-                    onSelectionChange(file.uri, file.isDirectory)
-                },
-                isImageFile = isImageFile,
-                onOpenInGallery = onOpenInGallery,
-                onOpenWithChooser = onOpenWithChooser,
-                onSetAsRoot = onSetAsRoot
-            )
-
-            if (file.isDirectory && isExpanded) {
-                RenderTreeNodes(
-                    context = context,
-                    parent = file,
-                    expanded = expanded,
-                    selected = selected,
-                    parentSelected = isEffectivelySelected,
-                    depth = depth + 1,
-                    onToggleExpanded = onToggleExpanded,
-                    onOpenFile = onOpenFile,
-                    onSelectionChange = onSelectionChange,
-                    isImageFile = isImageFile,
-                    onOpenInGallery = onOpenInGallery,
-                    onOpenWithChooser = onOpenWithChooser,
-                    onSetAsRoot = onSetAsRoot
-                )
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun FileTreeRow(
-    file: DocumentFile,
-    depth: Int,
-    isExpanded: Boolean,
-    isSelected: Boolean,
-    onToggleExpanded: () -> Unit,
-    onOpenFile: () -> Unit,
-    onSelect: () -> Unit,
-    isImageFile: (Uri) -> Boolean,
-    onOpenInGallery: (Uri) -> Unit,
-    onOpenWithChooser: (Uri) -> Unit,
-    onSetAsRoot: (Uri) -> Unit
-) {
-    var showMenu by remember { mutableStateOf(false) }
-    val isImage = !file.isDirectory && isImageFile(file.uri)
-
-    val icon = if (file.isDirectory) {
-        if (isExpanded) Icons.Filled.KeyboardArrowDown else Icons.AutoMirrored.Filled.KeyboardArrowRight
-    } else {
-        Icons.AutoMirrored.Filled.InsertDriveFile
-    }
-
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(start = (depth * 12).dp)
-            .background(if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface)
-            .padding(vertical = 2.dp, horizontal = 4.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        RadioButton(
-            selected = isSelected,
-            onClick = onSelect,
-            modifier = Modifier.size(16.dp)
-        )
-        Spacer(modifier = Modifier.width(6.dp))
-        if (file.isDirectory) {
-            Icon(
-                imageVector = icon,
-                contentDescription = if (isExpanded) "Collapse" else "Expand",
+        if (isLoading) {
+            Box(
                 modifier = Modifier
-                    .size(20.dp)
-                    .clickable { onToggleExpanded() },
-                tint = MaterialTheme.colorScheme.primary
-            )
-        } else {
-            Icon(
-                imageVector = icon,
-                contentDescription = "File",
-                modifier = Modifier.size(18.dp).padding(start = 2.dp),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-
-        Box(modifier = Modifier.weight(1f)) {
-            Text(
-                text = file.name ?: "Unnamed",
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(start = 8.dp)
-                    .combinedClickable(
-                        onClick = {
-                            if (file.isDirectory) onToggleExpanded()
-                            else if (isImage) showMenu = true
-                            else onOpenFile()
-                        },
-                        onLongClick = {
-                            showMenu = true
-                        }
-                    ),
-                style = MaterialTheme.typography.bodyMedium,
-                color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-
-            DropdownMenu(
-                expanded = showMenu,
-                onDismissRequest = { showMenu = false }
+                    .fillMaxSize()
+                    .padding(16.dp),
+                contentAlignment = Alignment.Center,
             ) {
-                if (file.isDirectory) {
-                    DropdownMenuItem(
-                        text = { Text("Set as Pane Root") },
-                        onClick = {
-                            onSetAsRoot(file.uri)
-                            showMenu = false
-                        },
-                        leadingIcon = { Icon(Icons.Filled.FolderOpen, null) }
-                    )
-                }
-                if (isImage) {
-                    DropdownMenuItem(
-                        text = { Text("Open in Gallery") },
-                        onClick = {
-                            onOpenInGallery(file.uri)
-                            showMenu = false
-                        },
-                        leadingIcon = { Icon(Icons.Filled.PhotoLibrary, null) }
-                    )
-                }
-                DropdownMenuItem(
-                    text = { Text("Open with App") },
-                    onClick = {
-                        onOpenWithChooser(file.uri)
-                        showMenu = false
-                    },
-                    leadingIcon = { Icon(Icons.Filled.Edit, null) }
+                Text(
+                    text = "Loading…",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+        } else if (files.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(16.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "This folder is empty",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        } else {
+            LazyColumn(Modifier.fillMaxSize()) {
+                items(files, key = { it.uri }) { file ->
+                    val selected = file.uri in state.selected
+                    val icon = if (file.isDirectory) Icons.Filled.FolderOpen else Icons.AutoMirrored.Filled.InsertDriveFile
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant)
+                            .combinedClickable(
+                                onClick = {
+                                    onActivate()
+                                    onSelectionChange(if (selected) state.selected - file.uri else state.selected + file.uri)
+                                },
+                                onDoubleClick = {
+                                    onActivate()
+                                    if (file.isDirectory) {
+                                        onNavigate(file.uri)
+                                    } else {
+                                        onOpenFile(file.uri)
+                                    }
+                                },
+                                onLongClick = {
+                                    onActivate()
+                                    if (!file.isDirectory) {
+                                        onSelectionChange(setOf(file.uri))
+                                        if (resolveMimeType((context as? ComponentActivity)?.contentResolver ?: return@combinedClickable, file.uri).startsWith("image/")) {
+                                            onImageLongPress(file.uri)
+                                        }
+                                    }
+                                },
+                            )
+                            .padding(horizontal = 12.dp, vertical = 12.dp),
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = icon,
+                                contentDescription = if (file.isDirectory) "Folder" else "File",
+                                modifier = Modifier.size(22.dp),
+                                tint = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Text(
+                                text = file.name ?: "Unnamed",
+                                modifier = Modifier.padding(start = 10.dp),
+                                color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                }
             }
         }
     }
