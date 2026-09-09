@@ -1,0 +1,136 @@
+:root {
+    --bg: #000000;
+    --fg: #e8f5e9;
+    --muted: #8aa08f;
+    --accent: #00ff41;
+    --panel: #0b0f0c;
+    --border: #1d2a20;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    padding: 0 1.25rem 4rem;
+    background: var(--bg);
+    color: var(--fg);
+    font: 16px/1.65 ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+}
+
+main,
+header {
+    max-width: 46rem;
+    margin: 0 auto;
+}
+
+header {
+    padding: 3rem 0 2rem;
+    display: flex;
+    align-items: center;
+    gap: 1.25rem;
+    flex-wrap: wrap;
+}
+
+header img {
+    width: 88px;
+    height: 88px;
+    border: 1px solid var(--border);
+    border-radius: 18px;
+}
+
+h1 {
+    font-size: 2rem;
+    margin: 0;
+    letter-spacing: -0.01em;
+}
+
+h2 {
+    margin-top: 2.5rem;
+    font-size: 1.25rem;
+    color: var(--accent);
+}
+
+h3 {
+    margin-top: 1.75rem;
+    font-size: 1rem;
+}
+
+.tagline {
+    margin: 0.35rem 0 0;
+    color: var(--muted);
+}
+
+a {
+    color: var(--accent);
+}
+
+code {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.1rem 0.35rem;
+    font-size: 0.9em;
+}
+
+.panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1rem 1.25rem;
+}
+
+.cta {
+    display: inline-block;
+    margin-top: 0.5rem;
+    padding: 0.7rem 1.4rem;
+    border: 2px solid var(--accent);
+    border-radius: 8px;
+    color: var(--accent);
+    font-weight: 600;
+    text-decoration: none;
+}
+
+.cta:hover {
+    background: var(--accent);
+    color: #000;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 1rem;
+}
+
+th,
+td {
+    text-align: left;
+    padding: 0.55rem 0.6rem;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+    font-size: 0.94rem;
+}
+
+th {
+    color: var(--accent);
+    font-weight: 600;
+}
+
+footer {
+    max-width: 46rem;
+    margin: 3.5rem auto 0;
+    padding-top: 1.25rem;
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 0.9rem;
+}
+
+footer a {
+    margin-right: 1rem;
+}
+
+.note {
+    color: var(--muted);
+    font-size: 0.9rem;
+}
