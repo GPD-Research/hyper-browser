@@ -10,7 +10,6 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
-import android.os.storage.StorageManager
 import android.provider.DocumentsContract
 import android.provider.Settings
 import android.webkit.MimeTypeMap
@@ -25,6 +24,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.gestures.detectTransformGestures
@@ -33,14 +34,18 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -57,17 +62,18 @@ import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -93,6 +99,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import kotlin.math.roundToInt
 import androidx.documentfile.provider.DocumentFile
 import kotlinx.coroutines.Dispatchers
@@ -144,11 +151,6 @@ private data class SelectionInfo(
     val details: String,
 )
 
-private data class StorageRoot(
-    val label: String,
-    val directory: File,
-)
-
 private data class ClipboardEntry(
     val sourceDir: Uri,
     val items: Set<Uri>,
@@ -180,14 +182,10 @@ private fun HyperBrowserApp() {
     var fileDisplayOptions by remember { mutableStateOf(FileDisplayOptions()) }
     var selectionPreviewVisible by remember { mutableStateOf(true) }
     var selectionPreviewOffset by remember { mutableStateOf(Offset.Zero) }
-    var showAllFilesPrompt by remember { mutableStateOf(false) }
-    var fullAccessGranted by remember { mutableStateOf(hasAllFilesAccess()) }
-    var rootChooserPane by remember { mutableStateOf<Pane?>(null) }
     var clipboard by remember { mutableStateOf<ClipboardEntry?>(null) }
-    val pickerStartUri = remember { primaryStorageInitialUri(activity) }
-    val storageRoots by produceState(initialValue = emptyList<StorageRoot>(), fullAccessGranted) {
-        value = if (fullAccessGranted) withContext(Dispatchers.IO) { deviceStorageRoots(activity) } else emptyList()
-    }
+
+    var showLeftPicker by remember { mutableStateOf(false) }
+    var showRightPicker by remember { mutableStateOf(false) }
 
     val sourcePane = if (transferDirection == TransferDirection.LEFT_TO_RIGHT) Pane.LEFT else Pane.RIGHT
     val destinationPane = if (sourcePane == Pane.LEFT) Pane.RIGHT else Pane.LEFT
@@ -211,76 +209,6 @@ private fun HyperBrowserApp() {
         value = destinationState.current?.let { uri -> withContext(Dispatchers.IO) { resolveDisplayPath(activity, uri) } } ?: "destination"
     }
 
-    // Persistable grants can throw on providers (e.g. some Google Drive setups) that
-    // don't return a persistable-capable Uri; fall back to a session-only grant instead
-    // of crashing so the folder can still be selected.
-    fun takeUriPermissionSafely(uri: Uri) {
-        val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-        try {
-            activity.contentResolver.takePersistableUriPermission(uri, flags)
-        } catch (_: SecurityException) {
-        }
-    }
-
-    val leftPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        uri ?: return@rememberLauncherForActivityResult
-        takeUriPermissionSafely(uri)
-        leftPane = BrowserPaneState(root = uri, current = uri, selected = emptySet())
-    }
-    val rightPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        uri ?: return@rememberLauncherForActivityResult
-        takeUriPermissionSafely(uri)
-        rightPane = BrowserPaneState(root = uri, current = uri, selected = emptySet())
-    }
-
-    val runtimePermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {}
-    val allFilesAccessLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-        fullAccessGranted = hasAllFilesAccess()
-        showAllFilesPrompt = !fullAccessGranted
-    }
-
-    fun requestAllFilesAccess() {
-        runCatching { allFilesAccessLauncher.launch(allFilesAccessIntent(activity)) }
-            .onFailure { runCatching { allFilesAccessLauncher.launch(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) } }
-    }
-
-    fun applyRoot(pane: Pane, uri: Uri) {
-        val newState = BrowserPaneState(root = uri, current = uri)
-        if (pane == Pane.LEFT) leftPane = newState else rightPane = newState
-    }
-
-    LaunchedEffect(Unit) {
-        val missing = missingRuntimePermissions(activity)
-        if (missing.isNotEmpty()) {
-            runtimePermissionLauncher.launch(missing)
-        }
-        fullAccessGranted = hasAllFilesAccess()
-        showAllFilesPrompt = !fullAccessGranted
-
-        // Folder grants survive restarts, so reopen the last roots instead of asking again.
-        val persisted = withContext(Dispatchers.IO) {
-            activity.contentResolver.persistedUriPermissions.filter { it.isReadPermission }.map { it.uri }
-        }
-        persisted.getOrNull(0)?.let { uri ->
-            if (leftPane.root == null) leftPane = BrowserPaneState(root = uri, current = uri)
-        }
-        persisted.getOrNull(1)?.let { uri ->
-            if (rightPane.root == null) rightPane = BrowserPaneState(root = uri, current = uri)
-        }
-    }
-
-    fun enqueueTransfer(mode: TransferMode, selectedItems: Set<Uri> = sourceState.selected) {
-        val sourceDir = sourceState.current ?: sourceState.root ?: return
-        val targetDir = destinationState.current ?: destinationState.root ?: return
-        pendingRequest = TransferRequest(
-            sourceDir = sourceDir,
-            targetDir = targetDir,
-            selected = selectedItems,
-            wholeDirectory = selectedItems.isEmpty(),
-            mode = mode,
-        )
-    }
-
     fun refreshPanesAfterWrite() {
         leftPane = leftPane.copy(refreshKey = leftPane.refreshKey + 1, selected = if (sourcePane == Pane.LEFT) emptySet() else leftPane.selected)
         rightPane = rightPane.copy(refreshKey = rightPane.refreshKey + 1, selected = if (sourcePane == Pane.RIGHT) emptySet() else rightPane.selected)
@@ -293,25 +221,6 @@ private fun HyperBrowserApp() {
         }
     }
 
-    fun executeTransferNow(mode: TransferMode, selectedItems: Set<Uri> = sourceState.selected) {
-        val sourceDir = sourceState.current ?: sourceState.root ?: return
-        val targetDir = destinationState.current ?: destinationState.root ?: return
-        runTransfer(
-            TransferRequest(
-                sourceDir = sourceDir,
-                targetDir = targetDir,
-                selected = selectedItems,
-                wholeDirectory = selectedItems.isEmpty(),
-                mode = mode,
-            ),
-        )
-    }
-
-    fun openGallery(uri: Uri, directory: Uri?) {
-        galleryDirectory = directory
-        galleryUri = uri
-    }
-
     fun copyToClipboard(mode: TransferMode) {
         val sourceDir = sourceState.current ?: sourceState.root ?: return
         clipboard = ClipboardEntry(sourceDir = sourceDir, items = sourceState.selected, mode = mode)
@@ -322,15 +231,20 @@ private fun HyperBrowserApp() {
         val activeState = if (activePane == Pane.LEFT) leftPane else rightPane
         val targetDir = activeState.current ?: activeState.root ?: return
         clipboard = null
-        runTransfer(
-            TransferRequest(
-                sourceDir = entry.sourceDir,
-                targetDir = targetDir,
-                selected = entry.items,
-                wholeDirectory = entry.items.isEmpty(),
-                mode = entry.mode,
-            ),
+        val request = TransferRequest(
+            sourceDir = entry.sourceDir,
+            targetDir = targetDir,
+            selected = entry.items,
+            wholeDirectory = entry.items.isEmpty(),
+            mode = entry.mode,
         )
+        // Pasting with nothing selected transfers the whole folder, so make it explicit.
+        if (request.wholeDirectory) pendingRequest = request else runTransfer(request)
+    }
+
+    fun openGallery(uri: Uri, directory: Uri?) {
+        galleryDirectory = directory
+        galleryUri = uri
     }
 
     fun handleFileDoubleTap(uri: Uri, directory: Uri?) {
@@ -341,6 +255,26 @@ private fun HyperBrowserApp() {
             } else {
                 openFileWithDefaultApp(activity, uri)
             }
+        }
+    }
+
+    val runtimePermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {}
+
+    LaunchedEffect(Unit) {
+        val missing = missingRuntimePermissions(activity)
+        if (missing.isNotEmpty()) {
+            runtimePermissionLauncher.launch(missing)
+        }
+
+        // Folder grants survive restarts, so reopen the last roots instead of asking again.
+        val persisted = withContext(Dispatchers.IO) {
+            activity.contentResolver.persistedUriPermissions.filter { it.isReadPermission }.map { it.uri }
+        }
+        persisted.getOrNull(0)?.let { uri ->
+            if (leftPane.root == null) leftPane = BrowserPaneState(root = uri, current = uri)
+        }
+        persisted.getOrNull(1)?.let { uri ->
+            if (rightPane.root == null) rightPane = BrowserPaneState(root = uri, current = uri)
         }
     }
 
@@ -360,23 +294,10 @@ private fun HyperBrowserApp() {
                     onReverse = {
                         transferDirection = if (transferDirection == TransferDirection.LEFT_TO_RIGHT) TransferDirection.RIGHT_TO_LEFT else TransferDirection.LEFT_TO_RIGHT
                     },
-                    onCopy = {
-                        // A copy with nothing selected takes the whole folder, so make it explicit.
-                        if (sourceState.selected.isEmpty()) enqueueTransfer(TransferMode.COPY) else executeTransferNow(TransferMode.COPY)
-                    },
-                    onMove = { enqueueTransfer(TransferMode.MOVE) },
-                    onChooseLeftRoot = { rootChooserPane = Pane.LEFT },
-                    onChooseRightRoot = { rootChooserPane = Pane.RIGHT },
+                    onChooseLeftRoot = { showLeftPicker = true },
+                    onChooseRightRoot = { showRightPicker = true },
                     sourceLabel = sourceLabel,
                     destinationLabel = destinationLabel,
-                )
-
-                PreviewDetailPane(
-                    info = selectionInfo,
-                    selectedFile = selectedFile,
-                    isImage = isImageSelected,
-                    onOpen = { selectedFile?.let { openFileWithDefaultApp(activity, it) } },
-                    onView = { selectedFile?.let { if (isImageSelected) openGallery(it, sourceState.current) } },
                 )
 
                 if (galleryUri != null) {
@@ -387,88 +308,98 @@ private fun HyperBrowserApp() {
                         onClose = { galleryUri = null },
                     )
                 } else {
-                    Row(
-                        modifier = Modifier.fillMaxSize(),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        CommandStrip(
-                            layoutMode = layoutMode,
-                            pasteEnabled = clipboard != null,
-                            onCopy = { copyToClipboard(TransferMode.COPY) },
-                            onPaste = { pasteClipboard() },
-                            onMove = { copyToClipboard(TransferMode.MOVE) },
-                            onDelete = {
-                                val items = sourceState.selected.ifEmpty { setOfNotNull(sourceState.current) }
-                                if (items.isNotEmpty()) {
-                                    pendingDelete = items
-                                }
-                            },
-                            onGallery = {
-                                val image = selectedFile?.takeIf { isImageSelected }
-                                if (image != null) {
-                                    openGallery(image, sourceState.current)
-                                }
-                            },
-                            onSelectMulti = { activePane = sourcePane },
-                            onOpenSettings = { showLayoutSettings = true },
-                        )
+                    Box(modifier = Modifier.weight(1f)) {
+                        Row(
+                            modifier = Modifier.fillMaxSize(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            CommandStrip(
+                                layoutMode = layoutMode,
+                                pasteEnabled = clipboard != null,
+                                onCopy = { copyToClipboard(TransferMode.COPY) },
+                                onPaste = { pasteClipboard() },
+                                onMove = { copyToClipboard(TransferMode.MOVE) },
+                                onDelete = {
+                                    val items = sourceState.selected.ifEmpty { setOfNotNull(sourceState.current) }
+                                    if (items.isNotEmpty()) {
+                                        pendingDelete = items
+                                    }
+                                },
+                                onGallery = {
+                                    val image = selectedFile?.takeIf { isImageSelected }
+                                    if (image != null) {
+                                        openGallery(image, sourceState.current)
+                                    }
+                                },
+                                onSelectMulti = { activePane = sourcePane },
+                                onOpenSettings = { showLayoutSettings = true },
+                            )
 
-                        DirectoryPane(
-                            title = "",
-                            state = leftPane,
-                            isActive = activePane == Pane.LEFT,
-                            modifier = Modifier.weight(if (layoutMode == LayoutMode.TABLET_WIDE) 1.6f else if (layoutMode == LayoutMode.TABLET_BALANCED) 1.2f else 1f),
-                            onActivate = { activePane = Pane.LEFT },
-                            onChooseRoot = { rootChooserPane = Pane.LEFT },
-                            onNavigate = { directory -> leftPane = leftPane.copy(current = directory, selected = emptySet()) },
-                            onOpenFile = { uri -> handleFileDoubleTap(uri, leftPane.current ?: leftPane.root) },
-                            onMoveUp = {
-                                val parent = leftPane.current?.let { parentDirectoryUri(activity, it) }
-                                if (parent != null) {
-                                    leftPane = leftPane.copy(current = parent, selected = emptySet())
-                                }
-                            },
-                            onSelectionChange = { selectedSet -> leftPane = leftPane.copy(selected = selectedSet) },
-                            onImageLongPress = { uri -> openGallery(uri, leftPane.current ?: leftPane.root) },
-                            showHiddenFiles = fileDisplayOptions.showHiddenFiles,
-                            showTrashFiles = fileDisplayOptions.showTrashFiles,
-                        )
+                            DirectoryPane(
+                                title = "",
+                                state = leftPane,
+                                isActive = activePane == Pane.LEFT,
+                                modifier = Modifier.weight(if (layoutMode == LayoutMode.TABLET_WIDE) 1.6f else if (layoutMode == LayoutMode.TABLET_BALANCED) 1.2f else 1f),
+                                onActivate = { activePane = Pane.LEFT },
+                                onChooseRoot = { showLeftPicker = true },
+                                onNavigate = { directory -> leftPane = leftPane.copy(current = directory, selected = emptySet()) },
+                                onOpenFile = { uri -> handleFileDoubleTap(uri, leftPane.current ?: leftPane.root) },
+                                onMoveUp = {
+                                    val parent = leftPane.current?.let { parentDirectoryUri(activity, it) }
+                                    if (parent != null) {
+                                        leftPane = leftPane.copy(current = parent, selected = emptySet())
+                                    }
+                                },
+                                onSelectionChange = { selectedSet -> leftPane = leftPane.copy(selected = selectedSet) },
+                                onImageLongPress = { uri -> openGallery(uri, leftPane.current ?: leftPane.root) },
+                                showHiddenFiles = fileDisplayOptions.showHiddenFiles,
+                                showTrashFiles = fileDisplayOptions.showTrashFiles,
+                            )
 
-                        DirectoryPane(
-                            title = "",
-                            state = rightPane,
-                            isActive = activePane == Pane.RIGHT,
-                            modifier = Modifier.weight(if (layoutMode == LayoutMode.TABLET_WIDE) 1.6f else if (layoutMode == LayoutMode.TABLET_BALANCED) 1.2f else 1f),
-                            onActivate = { activePane = Pane.RIGHT },
-                            onChooseRoot = { rootChooserPane = Pane.RIGHT },
-                            onNavigate = { directory -> rightPane = rightPane.copy(current = directory, selected = emptySet()) },
-                            onOpenFile = { uri -> handleFileDoubleTap(uri, rightPane.current ?: rightPane.root) },
-                            onMoveUp = {
-                                val parent = rightPane.current?.let { parentDirectoryUri(activity, it) }
-                                if (parent != null) {
-                                    rightPane = rightPane.copy(current = parent, selected = emptySet())
-                                }
-                            },
-                            onSelectionChange = { selectedSet -> rightPane = rightPane.copy(selected = selectedSet) },
-                            onImageLongPress = { uri -> openGallery(uri, rightPane.current ?: rightPane.root) },
-                            showHiddenFiles = fileDisplayOptions.showHiddenFiles,
-                            showTrashFiles = fileDisplayOptions.showTrashFiles,
-                        )
+                            DirectoryPane(
+                                title = "",
+                                state = rightPane,
+                                isActive = activePane == Pane.RIGHT,
+                                modifier = Modifier.weight(if (layoutMode == LayoutMode.TABLET_WIDE) 1.6f else if (layoutMode == LayoutMode.TABLET_BALANCED) 1.2f else 1f),
+                                onActivate = { activePane = Pane.RIGHT },
+                                onChooseRoot = { showRightPicker = true },
+                                onNavigate = { directory -> rightPane = rightPane.copy(current = directory, selected = emptySet()) },
+                                onOpenFile = { uri -> handleFileDoubleTap(uri, rightPane.current ?: rightPane.root) },
+                                onMoveUp = {
+                                    val parent = rightPane.current?.let { parentDirectoryUri(activity, it) }
+                                    if (parent != null) {
+                                        rightPane = rightPane.copy(current = parent, selected = emptySet())
+                                    }
+                                },
+                                onSelectionChange = { selectedSet -> rightPane = rightPane.copy(selected = selectedSet) },
+                                onImageLongPress = { uri -> openGallery(uri, rightPane.current ?: rightPane.root) },
+                                showHiddenFiles = fileDisplayOptions.showHiddenFiles,
+                                showTrashFiles = fileDisplayOptions.showTrashFiles,
+                            )
+                        }
+
+                        if (selectedFile != null && isImageSelected && galleryUri == null && selectionPreviewVisible) {
+                            SelectionThumbnail(
+                                activity = activity,
+                                uri = selectedFile,
+                                offset = selectionPreviewOffset,
+                                onOffsetChange = { selectionPreviewOffset = it },
+                                onClose = { selectionPreviewVisible = false },
+                                modifier = Modifier
+                                    .align(Alignment.BottomEnd)
+                                    .padding(12.dp),
+                            )
+                        }
                     }
-                }
-            }
 
-            if (selectedFile != null && isImageSelected && galleryUri == null && selectionPreviewVisible) {
-                SelectionThumbnail(
-                    activity = activity,
-                    uri = selectedFile,
-                    offset = selectionPreviewOffset,
-                    onOffsetChange = { selectionPreviewOffset = it },
-                    onClose = { selectionPreviewVisible = false },
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(12.dp),
-                )
+                    PreviewDetailPane(
+                        info = selectionInfo,
+                        selectedFile = selectedFile,
+                        isImage = isImageSelected,
+                        onOpen = { selectedFile?.let { openFileWithDefaultApp(activity, it) } },
+                        onView = { selectedFile?.let { if (isImageSelected) openGallery(it, sourceState.current) } },
+                    )
+                }
             }
             }
         }
@@ -500,51 +431,6 @@ private fun HyperBrowserApp() {
         )
     }
 
-    rootChooserPane?.let { pane ->
-        StorageRootDialog(
-            roots = storageRoots,
-            fullAccessGranted = fullAccessGranted,
-            onPickRoot = { root ->
-                rootChooserPane = null
-                applyRoot(pane, Uri.fromFile(root.directory))
-            },
-            onBrowse = {
-                rootChooserPane = null
-                if (pane == Pane.LEFT) leftPicker.launch(pickerStartUri) else rightPicker.launch(pickerStartUri)
-            },
-            onGrantFullAccess = {
-                rootChooserPane = null
-                requestAllFilesAccess()
-            },
-            onDismiss = { rootChooserPane = null },
-        )
-    }
-
-    if (showAllFilesPrompt) {
-        AlertDialog(
-            onDismissRequest = { showAllFilesPrompt = false },
-            title = { Text("Full storage access") },
-            text = {
-                Text(
-                    "Grant \"All files access\" so Hyper Browser can reach every folder on the device " +
-                        "instead of asking you to pick each one. Cloud roots such as Google Drive still " +
-                        "have to be picked individually.",
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        showAllFilesPrompt = false
-                        requestAllFilesAccess()
-                    },
-                ) { Text("Grant") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showAllFilesPrompt = false }) { Text("Not now") }
-            },
-        )
-    }
-
     if (showLayoutSettings) {
         LayoutSettingsDialog(
             selectedMode = layoutMode,
@@ -559,16 +445,27 @@ private fun HyperBrowserApp() {
             onDismiss = { showLayoutSettings = false },
         )
     }
+
+    if (showLeftPicker) {
+        FolderPickerDialog(
+            onFolderSelected = { uri ->
+                leftPane = BrowserPaneState(root = uri, current = uri, selected = emptySet())
+                showLeftPicker = false
+            },
+            onDismiss = { showLeftPicker = false }
+        )
+    }
+
+    if (showRightPicker) {
+        FolderPickerDialog(
+            onFolderSelected = { uri ->
+                rightPane = BrowserPaneState(root = uri, current = uri, selected = emptySet())
+                showRightPicker = false
+            },
+            onDismiss = { showRightPicker = false }
+        )
+    }
 }
-
-private fun hasAllFilesAccess(): Boolean =
-    Build.VERSION.SDK_INT < Build.VERSION_CODES.R || Environment.isExternalStorageManager()
-
-private fun allFilesAccessIntent(context: Context): Intent =
-    Intent(
-        Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
-        Uri.fromParts("package", context.packageName, null),
-    )
 
 private fun missingRuntimePermissions(context: Context): Array<String> {
     val wanted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -586,37 +483,13 @@ private fun missingRuntimePermissions(context: Context): Array<String> {
         .toTypedArray()
 }
 
-// Makes the folder picker open at the device storage root instead of "Recent".
-@Suppress("DEPRECATION")
-private fun primaryStorageInitialUri(context: Context): Uri? {
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-        val volume = context.getSystemService(StorageManager::class.java)?.primaryStorageVolume
-        val fromVolume = volume?.createOpenDocumentTreeIntent()?.getParcelableExtra<Uri>(DocumentsContract.EXTRA_INITIAL_URI)
-        if (fromVolume != null) return fromVolume
-    }
-    return runCatching {
-        DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", "primary:")
-    }.getOrNull()
-}
-
-@Suppress("DEPRECATION")
-private fun deviceStorageRoots(context: Context): List<StorageRoot> {
-    val volumes = context.getSystemService(StorageManager::class.java)?.storageVolumes.orEmpty()
-    val roots = volumes.mapNotNull { volume ->
-        val directory = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            volume.directory
-        } else if (volume.isPrimary) {
-            Environment.getExternalStorageDirectory()
-        } else {
-            null
-        }
-        directory?.takeIf { it.canRead() }?.let { StorageRoot(volume.getDescription(context) ?: it.name, it) }
-    }
-    val fallback = Environment.getExternalStorageDirectory()?.takeIf { it.canRead() }
-        ?.let { listOf(StorageRoot("Internal storage", it)) }
-        .orEmpty()
-    val systemRoot = File("/").takeIf { it.canRead() }?.let { listOf(StorageRoot("System root (/)", it)) }.orEmpty()
-    return (roots.ifEmpty { fallback } + systemRoot).distinctBy { it.directory.absolutePath }
+private fun openAllFilesAccessSettings(context: Context) {
+    val appSpecific = Intent(
+        Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+        Uri.fromParts("package", context.packageName, null),
+    )
+    runCatching { context.startActivity(appSpecific) }
+        .onFailure { runCatching { context.startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) } }
 }
 
 private fun openFileWithDefaultApp(activity: ComponentActivity, uri: Uri) {
@@ -632,8 +505,8 @@ private fun openFileWithDefaultApp(activity: ComponentActivity, uri: Uri) {
 
 private fun executeTransfer(activity: ComponentActivity, request: TransferRequest) {
     if (request.wholeDirectory) {
-        val sourceDoc = documentFromUri(activity, request.sourceDir) ?: return
-        val targetDoc = documentFromUri(activity, request.targetDir) ?: return
+        val sourceDoc = getDocumentFile(activity, request.sourceDir) ?: return
+        val targetDoc = getDocumentFile(activity, request.targetDir) ?: return
         when (request.mode) {
             TransferMode.COPY -> copyTree(activity.contentResolver, sourceDoc, targetDoc)
             TransferMode.MOVE -> moveTree(activity.contentResolver, sourceDoc, targetDoc)
@@ -641,9 +514,9 @@ private fun executeTransfer(activity: ComponentActivity, request: TransferReques
         return
     }
 
-    val targetDoc = documentFromUri(activity, request.targetDir) ?: return
+    val targetDoc = getDocumentFile(activity, request.targetDir) ?: return
     request.selected.forEach { uri ->
-        val sourceDoc = documentFromUri(activity, uri) ?: return@forEach
+        val sourceDoc = getDocumentFile(activity, uri) ?: return@forEach
         when (request.mode) {
             TransferMode.COPY -> transferDocument(activity.contentResolver, sourceDoc, targetDoc, true)
             TransferMode.MOVE -> transferDocument(activity.contentResolver, sourceDoc, targetDoc, false)
@@ -651,37 +524,9 @@ private fun executeTransfer(activity: ComponentActivity, request: TransferReques
     }
 }
 
-// Children of a picked tree keep the "tree" path segment; SingleDocumentFile cannot list or
-// walk them, so resolve those through fromTreeUri instead. file:// roots come from All files access.
-private fun documentFromUri(context: Context, uri: Uri): DocumentFile? = when {
-    uri.scheme == ContentResolver.SCHEME_FILE -> uri.path?.let { DocumentFile.fromFile(File(it)) }
-    uri.pathSegments.firstOrNull() == "tree" -> DocumentFile.fromTreeUri(context, uri)
-    else -> DocumentFile.fromSingleUri(context, uri)
-}
-
-// fromTreeUri()/fromSingleUri() always report a null parent, so derive it from the document id.
-private fun parentDirectoryUri(context: Context, uri: Uri): Uri? {
-    if (uri.scheme == ContentResolver.SCHEME_FILE) {
-        return uri.path?.let { File(it).parentFile }?.takeIf { it.canRead() }?.let(Uri::fromFile)
-    }
-    return runCatching {
-        val treeRootId = DocumentsContract.getTreeDocumentId(uri)
-        val documentId = if (DocumentsContract.isDocumentUri(context, uri)) {
-            DocumentsContract.getDocumentId(uri)
-        } else {
-            treeRootId
-        }
-        val separator = documentId.lastIndexOf('/')
-        if (documentId == treeRootId || separator <= 0) return@runCatching null
-        val parentId = documentId.substring(0, separator)
-        if (!parentId.startsWith(treeRootId)) return@runCatching null
-        DocumentsContract.buildDocumentUriUsingTree(uri, parentId)
-    }.getOrNull()
-}
-
 private fun deleteItems(activity: ComponentActivity, uris: Set<Uri>) {
     uris.forEach { uri ->
-        documentFromUri(activity, uri)?.delete()
+        getDocumentFile(activity, uri)?.delete()
     }
 }
 
@@ -818,6 +663,26 @@ private fun nextAvailableName(targetDir: DocumentFile, preferredName: String): S
     }
 }
 
+// fromTreeUri()/fromSingleUri() always report a null parent, so derive it from the document id.
+private fun parentDirectoryUri(context: Context, uri: Uri): Uri? {
+    if (uri.scheme == ContentResolver.SCHEME_FILE) {
+        return uri.path?.let { File(it).parentFile }?.takeIf { it.canRead() }?.let(Uri::fromFile)
+    }
+    return runCatching {
+        val treeRootId = DocumentsContract.getTreeDocumentId(uri)
+        val documentId = if (DocumentsContract.isDocumentUri(context, uri)) {
+            DocumentsContract.getDocumentId(uri)
+        } else {
+            treeRootId
+        }
+        val separator = documentId.lastIndexOf('/')
+        if (documentId == treeRootId || separator <= 0) return@runCatching null
+        val parentId = documentId.substring(0, separator)
+        if (!parentId.startsWith(treeRootId)) return@runCatching null
+        DocumentsContract.buildDocumentUriUsingTree(uri, parentId)
+    }.getOrNull()
+}
+
 private fun resolveMimeType(resolver: ContentResolver, uri: Uri): String {
     return resolver.getType(uri) ?: when (uri.toString().substringAfterLast('.', "").lowercase()) {
         "jpg", "jpeg", "png", "gif", "bmp", "webp" -> "image/bitmap"
@@ -828,11 +693,22 @@ private fun resolveMimeType(resolver: ContentResolver, uri: Uri): String {
 }
 
 private fun resolveDisplayPath(context: ComponentActivity, uri: Uri): String {
-    if (uri.scheme == ContentResolver.SCHEME_FILE) {
-        return uri.path ?: "unknown"
-    }
-    val doc = documentFromUri(context, uri)
+    val doc = getDocumentFile(context, uri)
     return doc?.name ?: uri.lastPathSegment ?: "unknown"
+}
+
+private fun getDocumentFile(context: Context, uri: Uri): DocumentFile? {
+    return if (uri.scheme == "content") {
+        if (uri.toString().contains("tree")) {
+            DocumentFile.fromTreeUri(context, uri)
+        } else {
+            DocumentFile.fromSingleUri(context, uri)
+        }
+    } else if (uri.scheme == "file") {
+        uri.path?.let { DocumentFile.fromFile(File(it)) }
+    } else {
+        null
+    }
 }
 
 private fun isImageMimeType(value: String): Boolean = value.startsWith("image/")
@@ -867,7 +743,7 @@ private fun buildSelectionInfo(activity: ComponentActivity, uris: Set<Uri>): Sel
     }
     if (uris.size == 1) {
         val uri = uris.first()
-        val doc = documentFromUri(activity, uri)
+        val doc = getDocumentFile(activity, uri)
         if (doc == null) {
             return SelectionInfo(
                 title = uri.lastPathSegment ?: "Unknown",
@@ -887,7 +763,7 @@ private fun buildSelectionInfo(activity: ComponentActivity, uris: Set<Uri>): Sel
             details = if (isDir) "Directory" else (doc.type ?: "Document"),
         )
     }
-    val names = uris.take(3).mapNotNull { uri -> documentFromUri(activity, uri)?.name ?: uri.lastPathSegment }
+    val names = uris.take(3).mapNotNull { uri -> getDocumentFile(activity, uri)?.name ?: uri.lastPathSegment }
     return SelectionInfo(
         title = "${uris.size} items selected",
         kind = "Multi-select",
@@ -913,43 +789,41 @@ private fun formatBytes(size: Long): String {
 private fun MinimalTransferMenu(
     direction: TransferDirection,
     onReverse: () -> Unit,
-    onCopy: () -> Unit,
-    onMove: () -> Unit,
     onChooseLeftRoot: () -> Unit,
     onChooseRightRoot: () -> Unit,
     sourceLabel: String,
     destinationLabel: String,
 ) {
-    Column(modifier = Modifier.padding(vertical = 4.dp)) {
+    Column(modifier = Modifier.padding(vertical = 2.dp)) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
+                .padding(horizontal = 12.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             AssistChip(
                 onClick = onChooseLeftRoot,
-                label = { Text("Left root") },
-                leadingIcon = { Icon(Icons.Filled.FolderOpen, contentDescription = null, Modifier.size(18.dp)) },
+                label = { Text("Left root", fontSize = 10.sp) },
+                leadingIcon = { Icon(Icons.Filled.FolderOpen, contentDescription = null, Modifier.size(14.dp)) },
                 modifier = Modifier.weight(1f),
             )
 
             IconButton(
                 onClick = onReverse,
-                modifier = Modifier.size(48.dp),
+                modifier = Modifier.size(36.dp),
             ) {
                 Icon(
                     imageVector = if (direction == TransferDirection.LEFT_TO_RIGHT) Icons.AutoMirrored.Filled.ArrowForward else Icons.AutoMirrored.Filled.ArrowBack,
                     contentDescription = "Reverse transfer direction",
-                    modifier = Modifier.size(24.dp),
+                    modifier = Modifier.size(20.dp),
                 )
             }
 
             AssistChip(
                 onClick = onChooseRightRoot,
-                label = { Text("Right root") },
-                leadingIcon = { Icon(Icons.Filled.FolderOpen, contentDescription = null, Modifier.size(18.dp)) },
+                label = { Text("Right root", fontSize = 10.sp) },
+                leadingIcon = { Icon(Icons.Filled.FolderOpen, contentDescription = null, Modifier.size(14.dp)) },
                 modifier = Modifier.weight(1f),
             )
         }
@@ -957,29 +831,14 @@ private fun MinimalTransferMenu(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
+                .padding(horizontal = 12.dp, vertical = 2.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Column(horizontalAlignment = Alignment.Start, modifier = Modifier.weight(1f)) {
-                Text("From", style = MaterialTheme.typography.labelSmall)
-                Text(sourceLabel, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
-
-            Column(horizontalAlignment = Alignment.End, modifier = Modifier.weight(1f)) {
-                Text("To", style = MaterialTheme.typography.labelSmall)
-                Text(destinationLabel, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
-        }
-
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            OutlinedButton(onClick = onCopy, modifier = Modifier.weight(1f)) { Text("Copy files") }
-            OutlinedButton(onClick = onMove, modifier = Modifier.weight(1f)) { Text("Move files") }
+            Text("From:", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary, fontSize = 9.sp)
+            Text(sourceLabel, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, fontSize = 10.sp, modifier = Modifier.weight(1f))
+            Text("To:", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary, fontSize = 9.sp)
+            Text(destinationLabel, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, fontSize = 10.sp, modifier = Modifier.weight(1f), textAlign = TextAlign.End)
         }
     }
 }
@@ -992,23 +851,28 @@ private fun PreviewDetailPane(
     onOpen: () -> Unit,
     onView: () -> Unit,
 ) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 8.dp, vertical = 4.dp),
+    Surface(
+        tonalElevation = 2.dp,
+        modifier = Modifier.fillMaxWidth()
     ) {
-        Text("Preview", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
-        Text(info.title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        Text("${info.kind} · ${info.sizeLabel}", style = MaterialTheme.typography.bodyMedium)
-        Text(info.details, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
-        Text(info.path, style = MaterialTheme.typography.labelSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
-        if (selectedFile != null) {
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.padding(top = 8.dp),
-            ) {
-                Button(onClick = onOpen) { Text("Open file") }
-                Button(onClick = onView, enabled = isImage) { Text("View image") }
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(info.title, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text("${info.kind} · ${info.sizeLabel} · ${info.details}", style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            if (selectedFile != null) {
+                TextButton(onClick = onOpen, contentPadding = PaddingValues(4.dp)) { 
+                    Text("Open", fontSize = 11.sp) 
+                }
+                if (isImage) {
+                    TextButton(onClick = onView, contentPadding = PaddingValues(4.dp)) { 
+                        Text("View", fontSize = 11.sp) 
+                    }
+                }
             }
         }
     }
@@ -1027,15 +891,16 @@ private fun CommandStrip(
     onOpenSettings: () -> Unit,
 ) {
     val stripWidth = when (layoutMode) {
-        LayoutMode.PHONE -> 104.dp
-        LayoutMode.TABLET_BALANCED -> 112.dp
-        LayoutMode.TABLET_WIDE -> 120.dp
+        LayoutMode.PHONE -> 64.dp
+        LayoutMode.TABLET_BALANCED -> 72.dp
+        LayoutMode.TABLET_WIDE -> 80.dp
     }
 
     Column(
         modifier = Modifier
             .fillMaxHeight()
             .width(stripWidth)
+            .verticalScroll(rememberScrollState())
             .padding(horizontal = 8.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -1180,53 +1045,6 @@ private fun LayoutSettingsDialog(
 }
 
 @Composable
-private fun StorageRootDialog(
-    roots: List<StorageRoot>,
-    fullAccessGranted: Boolean,
-    onPickRoot: (StorageRoot) -> Unit,
-    onBrowse: () -> Unit,
-    onGrantFullAccess: () -> Unit,
-    onDismiss: () -> Unit,
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Choose a root") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (fullAccessGranted) {
-                    Text("Device storage", style = MaterialTheme.typography.labelLarge)
-                    roots.forEach { root ->
-                        Button(onClick = { onPickRoot(root) }, modifier = Modifier.fillMaxWidth()) {
-                            Text(root.label, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        }
-                    }
-                    if (roots.isEmpty()) {
-                        Text("No readable volumes found", style = MaterialTheme.typography.bodySmall)
-                    }
-                } else {
-                    Text(
-                        "Without \"All files access\" only folders you pick one by one are reachable, " +
-                            "and the device top level cannot be selected.",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    Button(onClick = onGrantFullAccess, modifier = Modifier.fillMaxWidth()) {
-                        Text("Grant full storage access")
-                    }
-                }
-
-                Text("Cloud and removable storage", style = MaterialTheme.typography.labelLarge)
-                OutlinedButton(onClick = onBrowse, modifier = Modifier.fillMaxWidth()) {
-                    Text("Pick a folder (SD card, Drive, …)")
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
-        },
-    )
-}
-
-@Composable
 private fun ConfirmDeleteDialog(
     count: Int,
     onDismiss: () -> Unit,
@@ -1238,6 +1056,143 @@ private fun ConfirmDeleteDialog(
         text = { Text(if (count == 1) "Delete this item permanently?" else "Delete $count items permanently?") },
         confirmButton = { TextButton(onClick = onConfirm) { Text("Delete") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
+private fun FolderPickerDialog(
+    onFolderSelected: (Uri) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current as ComponentActivity
+    var rootUri by remember { mutableStateOf<Uri?>(null) }
+    var currentUri by remember { mutableStateOf<Uri?>(null) }
+    var selectedUri by remember { mutableStateOf<Uri?>(null) }
+
+    fun takeUriPermissionSafely(uri: Uri) {
+        if (uri.scheme != "content") return
+        val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+        try {
+            context.contentResolver.takePersistableUriPermission(uri, flags)
+        } catch (_: SecurityException) {
+        }
+    }
+
+    val hasAllFilesAccess = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        Environment.isExternalStorageManager()
+    } else {
+        true
+    }
+
+    val pickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        uri?.let {
+            takeUriPermissionSafely(it)
+            onFolderSelected(it)
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Select Default Folder") },
+        text = {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                if (rootUri == null) {
+                    Text("Choose a starting location.")
+                    Spacer(modifier = Modifier.size(12.dp))
+                    Button(onClick = { pickerLauncher.launch(null) }, modifier = Modifier.fillMaxWidth()) {
+                        Text("Select Folder (via SAF)")
+                    }
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !hasAllFilesAccess) {
+                        Spacer(modifier = Modifier.size(8.dp))
+                        Button(
+                            onClick = { openAllFilesAccessSettings(context) },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Grant All Files Access")
+                        }
+                    }
+                    if (hasAllFilesAccess) {
+                        Spacer(modifier = Modifier.size(8.dp))
+                        Button(
+                            onClick = {
+                                val root = Environment.getExternalStorageDirectory()
+                                val uri = Uri.fromFile(root)
+                                rootUri = uri
+                                currentUri = uri
+                                selectedUri = uri
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Use Device Root (/sdcard)")
+                        }
+                    }
+                } else {
+                    val currentDoc = getDocumentFile(context, currentUri!!)
+                    val folders = currentDoc?.listFiles()?.filter { it.isDirectory } ?: emptyList()
+
+                    Text(
+                        text = "Browsing: ${resolveDisplayPath(context, currentUri!!)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(modifier = Modifier.size(8.dp))
+
+                    LazyColumn(modifier = Modifier.height(300.dp)) {
+                        if (currentUri != rootUri) {
+                            item {
+                                TextButton(
+                                    onClick = { currentUri = currentUri?.let { parentDirectoryUri(context, it) } ?: rootUri },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(".. [Up to parent]")
+                                }
+                            }
+                        }
+                        items(folders) { folder ->
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { currentUri = folder.uri }
+                                    .padding(vertical = 4.dp)
+                            ) {
+                                Checkbox(
+                                    checked = selectedUri == folder.uri,
+                                    onCheckedChange = { if (it) selectedUri = folder.uri }
+                                )
+                                Text(
+                                    text = folder.name ?: "Folder",
+                                    modifier = Modifier.padding(start = 8.dp),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                        if (folders.isEmpty()) {
+                            item {
+                                Text(
+                                    "No subfolders here",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    modifier = Modifier.padding(16.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                enabled = selectedUri != null,
+                onClick = { selectedUri?.let { onFolderSelected(it) } }
+            ) {
+                Text("Select")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
     )
 }
 
@@ -1304,11 +1259,11 @@ private fun ImageViewerScreen(
 
     val images by produceState(initialValue = emptyList<DocumentFile>(), directoryUri, startingUri, listingRefresh) {
         value = withContext(Dispatchers.IO) {
-            val dir = directoryUri?.let { documentFromUri(activity, it) }
+            val dir = directoryUri?.let { getDocumentFile(activity, it) }
             dir?.listFiles()
                 ?.filter { file -> file.isFile && isImageMimeType(resolveMimeType(activity.contentResolver, file.uri)) }
                 ?.sortedBy { it.name ?: "" }
-                ?: listOfNotNull(documentFromUri(activity, startingUri))
+                ?: listOfNotNull(getDocumentFile(activity, startingUri))
         }
     }
 
@@ -1488,7 +1443,7 @@ private fun ImageViewerScreen(
                             }) { Text("Edit in external editor") }
                             Button(onClick = {
                                 val target = imageActionUri ?: return@Button
-                                documentFromUri(activity, target)?.delete()
+                                getDocumentFile(activity, target)?.delete()
                                 imageActionUri = null
                                 val remaining = images.filterNot { it.uri == target }
                                 if (remaining.isEmpty()) {
@@ -1566,7 +1521,7 @@ private fun DirectoryPane(
     val listing by produceState<DirectoryListing?>(initialValue = null, currentUri, state.refreshKey, showHiddenFiles, showTrashFiles) {
         value = currentUri?.let { uri ->
             withContext(Dispatchers.IO) {
-                val dir = documentFromUri(context, uri)
+                val dir = getDocumentFile(context, uri)
                 DirectoryListing(
                     name = dir?.name,
                     files = (dir?.listFiles()?.filter { file -> shouldDisplayDocument(file, showHiddenFiles, showTrashFiles) }
@@ -1581,21 +1536,6 @@ private fun DirectoryPane(
     val isLoading = currentUri != null && listing == null
 
     Column(modifier = modifier.clickable(onClick = onActivate).fillMaxHeight()) {
-        if (currentUri == null && state.root == null) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(16.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = "Choose a root folder to begin",
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            return
-        }
         FlowRow(
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 10.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
