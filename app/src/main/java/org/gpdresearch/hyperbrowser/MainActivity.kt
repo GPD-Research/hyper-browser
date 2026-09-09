@@ -10,6 +10,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.os.storage.StorageManager
 import android.provider.DocumentsContract
 import android.provider.Settings
 import android.webkit.MimeTypeMap
@@ -155,6 +156,11 @@ private data class ClipboardEntry(
     val sourceDir: Uri,
     val items: Set<Uri>,
     val mode: TransferMode,
+)
+
+private data class StorageRoot(
+    val label: String,
+    val directory: File,
 )
 
 class MainActivity : ComponentActivity() {
@@ -481,6 +487,26 @@ private fun missingRuntimePermissions(context: Context): Array<String> {
     return wanted
         .filter { context.checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
         .toTypedArray()
+}
+
+@Suppress("DEPRECATION")
+private fun deviceStorageRoots(context: Context): List<StorageRoot> {
+    val volumes = context.getSystemService(StorageManager::class.java)?.storageVolumes.orEmpty()
+    val roots = volumes.mapNotNull { volume ->
+        val directory = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            volume.directory
+        } else if (volume.isPrimary) {
+            Environment.getExternalStorageDirectory()
+        } else {
+            null
+        }
+        directory?.takeIf { it.canRead() }?.let { StorageRoot(volume.getDescription(context) ?: it.name, it) }
+    }
+    val fallback = Environment.getExternalStorageDirectory()?.takeIf { it.canRead() }
+        ?.let { listOf(StorageRoot("Internal storage", it)) }
+        .orEmpty()
+    val systemRoot = File("/").takeIf { it.canRead() }?.let { listOf(StorageRoot("System root (/)", it)) }.orEmpty()
+    return (roots.ifEmpty { fallback } + systemRoot).distinctBy { it.directory.absolutePath }
 }
 
 private fun openAllFilesAccessSettings(context: Context) {
@@ -1112,18 +1138,20 @@ private fun FolderPickerDialog(
                         }
                     }
                     if (hasAllFilesAccess) {
-                        Spacer(modifier = Modifier.size(8.dp))
-                        Button(
-                            onClick = {
-                                val root = Environment.getExternalStorageDirectory()
-                                val uri = Uri.fromFile(root)
-                                rootUri = uri
-                                currentUri = uri
-                                selectedUri = uri
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text("Use Device Root (/sdcard)")
+                        val volumes = remember { deviceStorageRoots(context) }
+                        volumes.forEach { root ->
+                            Spacer(modifier = Modifier.size(8.dp))
+                            Button(
+                                onClick = {
+                                    val uri = Uri.fromFile(root.directory)
+                                    rootUri = uri
+                                    currentUri = uri
+                                    selectedUri = uri
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(root.label, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
                         }
                     }
                 } else {
