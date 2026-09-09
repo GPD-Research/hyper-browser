@@ -51,6 +51,15 @@ android {
     }
 
     buildTypes {
+        debug {
+            signingConfig = android.signingConfigs.findByName("debug")?.apply {
+                storeFile = file(System.getProperty("user.home") + "/.android/debug.keystore")
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
+        }
+
         release {
             // R8 is off: the Drive REST models are bound reflectively by GSON.
             isMinifyEnabled = false
@@ -59,17 +68,6 @@ android {
                     logger.warn("No release keystore configured - release artifacts will be unsigned.")
                     null
                 }
-        }
-    }
-
-    buildTypes {
-        debug {
-            signingConfig = android.signingConfigs.findByName("debug")?.apply {
-                storeFile = file(System.getProperty("user.home") + "/.android/debug.keystore")
-                storePassword = "android"
-                keyAlias = "androiddebugkey"
-                keyPassword = "android"
-            }
         }
     }
 
