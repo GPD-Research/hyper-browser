@@ -1,0 +1,205 @@
+package org.gpdresearch.hyperbrowser
+
+import android.content.ContentResolver
+import android.content.Context
+import android.net.Uri
+import android.provider.DocumentsContract
+import androidx.documentfile.provider.DocumentFile
+import java.io.File
+import java.io.InputStream
+import java.nio.file.Files
+import java.nio.file.Paths
+import java.nio.file.attribute.BasicFileAttributes
+
+/** A storage-agnostic file or folder, backed by either SAF or the Drive REST API. */
+data class FileEntry(
+    val uri: Uri,
+    val name: String,
+    val isDirectory: Boolean,
+    val size: Long = 0L,
+    val mimeType: String? = null,
+    val lastModified: Long = 0L,
+    /** Falls back to [lastModified] when the backend does not track a creation time. */
+    val createdAt: Long = 0L,
+)
+
+/** Bytes plus the effective type and name once a virtual or Google-native document has been exported. */
+class ReadableContent(
+    val stream: InputStream,
+    val mimeType: String,
+    val fileName: String,
+)
+
+/**
+ * Single entry point for every file operation, dispatching between SAF documents and Drive so the
+ * browser panes and transfer engine never need to know which backend they are looking at.
+ */
+object Storage {
+
+    fun entry(context: Context, uri: Uri): FileEntry? = if (DriveUris.isDrive(uri)) {
+        DriveClient.metadata(DriveUris.idOf(uri))
+    } else {
+        documentFile(context, uri)?.toEntry()
+    }
+
+    fun children(context: Context, uri: Uri): List<FileEntry> = if (DriveUris.isDrive(uri)) {
+        DriveClient.listChildren(DriveUris.idOf(uri))
+    } else {
+        documentFile(context, uri)?.listFiles()?.map { it.toEntry() }.orEmpty()
+    }
+
+    fun parent(context: Context, uri: Uri): Uri? = if (DriveUris.isDrive(uri)) {
+        DriveClient.parentId(DriveUris.idOf(uri))?.let { DriveUris.forId(it) }
+    } else {
+        parentDocumentUri(context, uri)
+    }
+
+    fun mimeType(context: Context, uri: Uri): String {
+        if (DriveUris.isDrive(uri)) {
+            return entry(context, uri)?.mimeType ?: "application/octet-stream"
+        }
+        return context.contentResolver.getType(uri) ?: when (uri.toString().substringAfterLast('.', "").lowercase()) {
+            "jpg", "jpeg", "png", "gif", "bmp", "webp" -> "image/bitmap"
+            "pdf" -> "application/pdf"
+            "txt" -> "text/plain"
+            else -> "application/octet-stream"
+        }
+    }
+
+    fun openInput(context: Context, uri: Uri): InputStream? = if (DriveUris.isDrive(uri)) {
+        entry(context, uri)?.let { DriveClient.read(it)?.stream }
+    } else {
+        openDocumentStream(context.contentResolver, uri)
+    }
+
+    fun read(context: Context, entry: FileEntry): ReadableContent? {
+        if (DriveUris.isDrive(entry.uri)) return DriveClient.read(entry)
+        val resolver = context.contentResolver
+        val exportType = if (isVirtualDocument(resolver, entry.uri)) {
+            exportMimeType(resolver, entry.uri) ?: return null
+        } else {
+            null
+        }
+        val stream = openDocumentStream(resolver, entry.uri, exportType) ?: return null
+        return ReadableContent(
+            stream = stream,
+            mimeType = exportType ?: entry.mimeType ?: "application/octet-stream",
+            fileName = if (exportType != null) withExportExtension(entry.name, exportType) else entry.name,
+        )
+    }
+
+    fun createFolder(context: Context, parentUri: Uri, name: String): FileEntry? = if (DriveUris.isDrive(parentUri)) {
+        DriveClient.createFolder(DriveUris.idOf(parentUri), name)
+    } else {
+        documentFile(context, parentUri)?.createDirectory(name)?.toEntry()
+    }
+
+    fun writeChild(context: Context, parentUri: Uri, name: String, mimeType: String, input: InputStream): Boolean {
+        if (DriveUris.isDrive(parentUri)) {
+            return DriveClient.upload(DriveUris.idOf(parentUri), name, mimeType, input)
+        }
+        val targetDir = documentFile(context, parentUri) ?: return false
+        val destination = targetDir.createFile(mimeType, name) ?: return false
+        val written = runCatching {
+            context.contentResolver.openOutputStream(destination.uri)?.use { output ->
+                input.copyTo(output)
+                output.flush()
+                true
+            }
+        }.getOrNull() == true
+        if (!written) destination.delete()
+        return written
+    }
+
+    fun delete(context: Context, uri: Uri): Boolean = if (DriveUris.isDrive(uri)) {
+        DriveClient.delete(DriveUris.idOf(uri))
+    } else {
+        documentFile(context, uri)?.delete() == true
+    }
+
+    fun childNames(context: Context, uri: Uri): MutableSet<String> =
+        children(context, uri).mapTo(mutableSetOf()) { it.name }
+
+    private fun DocumentFile.toEntry(): FileEntry {
+        val modified = runCatching { lastModified() }.getOrDefault(0L)
+        return FileEntry(
+            uri = uri,
+            name = name ?: uri.lastPathSegment ?: "unknown",
+            isDirectory = isDirectory,
+            size = if (isDirectory) 0L else length(),
+            mimeType = type,
+            lastModified = modified,
+            createdAt = creationTimeMillis(uri) ?: modified,
+        )
+    }
+}
+
+/** Only local paths expose a creation time; SAF providers have no such column. */
+private fun creationTimeMillis(uri: Uri): Long? {
+    if (uri.scheme != ContentResolver.SCHEME_FILE) return null
+    val path = uri.path ?: return null
+    return runCatching {
+        Files.readAttributes(Paths.get(path), BasicFileAttributes::class.java).creationTime().toMillis()
+    }.getOrNull()?.takeIf { it > 0L }
+}
+
+fun documentFile(context: Context, uri: Uri): DocumentFile? {
+    return if (uri.scheme == ContentResolver.SCHEME_CONTENT) {
+        if (uri.toString().contains("tree")) {
+            DocumentFile.fromTreeUri(context, uri)
+        } else {
+            DocumentFile.fromSingleUri(context, uri)
+        }
+    } else if (uri.scheme == ContentResolver.SCHEME_FILE) {
+        uri.path?.let { DocumentFile.fromFile(File(it)) }
+    } else {
+        null
+    }
+}
+
+// fromTreeUri()/fromSingleUri() always report a null parent, so derive it from the document id.
+private fun parentDocumentUri(context: Context, uri: Uri): Uri? {
+    if (uri.scheme == ContentResolver.SCHEME_FILE) {
+        return uri.path?.let { File(it).parentFile }?.takeIf { it.canRead() }?.let(Uri::fromFile)
+    }
+    return runCatching {
+        val treeRootId = DocumentsContract.getTreeDocumentId(uri)
+        val documentId = if (DocumentsContract.isDocumentUri(context, uri)) {
+            DocumentsContract.getDocumentId(uri)
+        } else {
+            treeRootId
+        }
+        val separator = documentId.lastIndexOf('/')
+        if (documentId == treeRootId || separator <= 0) return@runCatching null
+        val parentId = documentId.substring(0, separator)
+        if (!parentId.startsWith(treeRootId)) return@runCatching null
+        DocumentsContract.buildDocumentUriUsingTree(uri, parentId)
+    }.getOrNull()
+}
+
+// Cloud documents (Google Docs, Sheets, …) hold no bytes; they must be exported to a real type.
+fun isVirtualDocument(resolver: ContentResolver, uri: Uri): Boolean {
+    if (uri.scheme != ContentResolver.SCHEME_CONTENT) return false
+    return runCatching {
+        resolver.query(uri, arrayOf(DocumentsContract.Document.COLUMN_FLAGS), null, null, null)?.use { cursor ->
+            cursor.moveToFirst() &&
+                (cursor.getInt(0) and DocumentsContract.Document.FLAG_VIRTUAL_DOCUMENT) != 0
+        }
+    }.getOrNull() == true
+}
+
+fun exportMimeType(resolver: ContentResolver, uri: Uri): String? {
+    val available = runCatching { resolver.getStreamTypes(uri, "*/*") }.getOrNull()?.filterNotNull().orEmpty()
+    if (available.isEmpty()) return null
+    val preferred = listOf("application/pdf", "image/png", "image/jpeg", "text/plain")
+    return preferred.firstOrNull { it in available } ?: available.first()
+}
+
+fun openDocumentStream(resolver: ContentResolver, uri: Uri, exportType: String? = null): InputStream? {
+    val mimeType = exportType ?: if (isVirtualDocument(resolver, uri)) exportMimeType(resolver, uri) else null
+    return if (mimeType == null) {
+        resolver.openInputStream(uri)
+    } else {
+        resolver.openTypedAssetFileDescriptor(uri, mimeType, null)?.createInputStream()
+    }
+}

@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -15,8 +16,9 @@ import android.os.storage.StorageManager
 import android.provider.DocumentsContract
 import android.provider.Settings
 import android.util.LruCache
-import android.webkit.MimeTypeMap
+import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -28,13 +30,13 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
-import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -69,6 +71,7 @@ import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.ZoomIn
@@ -79,8 +82,10 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -98,6 +103,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
@@ -112,13 +118,17 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.FileProvider
+import androidx.exifinterface.media.ExifInterface
+import com.google.android.gms.auth.api.signin.GoogleSignIn
+import com.google.android.gms.auth.api.signin.GoogleSignInAccount
+import com.google.android.gms.common.api.ApiException
+import kotlin.math.abs
 import kotlin.math.roundToInt
-import androidx.documentfile.provider.DocumentFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.io.InputStream
 
 private enum class Pane { LEFT, RIGHT }
 private enum class TransferDirection { LEFT_TO_RIGHT, RIGHT_TO_LEFT }
@@ -147,6 +157,40 @@ private data class FileDisplayOptions(
     val showTrashFiles: Boolean = false,
 )
 
+private enum class SortOrder(val label: String) {
+    NAME_ASC("Alphanumeric A-Z"),
+    NAME_DESC("Alphanumeric Z-A"),
+    MODIFIED_NEWEST("Modified newest"),
+    MODIFIED_OLDEST("Modified oldest"),
+    CREATED_NEWEST("Created newest"),
+    CREATED_OLDEST("Created oldest"),
+}
+
+/** When [split] is off, folders follow [fileOrder] too; folders are always listed first. */
+private data class SortOptions(
+    val split: Boolean = true,
+    val folderOrder: SortOrder = SortOrder.NAME_ASC,
+    val fileOrder: SortOrder = SortOrder.MODIFIED_NEWEST,
+)
+
+private fun comparatorFor(order: SortOrder): Comparator<FileEntry> {
+    val byName = compareBy(String.CASE_INSENSITIVE_ORDER) { entry: FileEntry -> entry.name }
+    return when (order) {
+        SortOrder.NAME_ASC -> byName
+        SortOrder.NAME_DESC -> byName.reversed()
+        SortOrder.MODIFIED_NEWEST -> compareByDescending<FileEntry> { it.lastModified }.then(byName)
+        SortOrder.MODIFIED_OLDEST -> compareBy<FileEntry> { it.lastModified }.then(byName)
+        SortOrder.CREATED_NEWEST -> compareByDescending<FileEntry> { it.createdAt }.then(byName)
+        SortOrder.CREATED_OLDEST -> compareBy<FileEntry> { it.createdAt }.then(byName)
+    }
+}
+
+private fun sortEntries(entries: List<FileEntry>, options: SortOptions): List<FileEntry> {
+    val folderOrder = if (options.split) options.folderOrder else options.fileOrder
+    return entries.filter { it.isDirectory }.sortedWith(comparatorFor(folderOrder)) +
+        entries.filterNot { it.isDirectory }.sortedWith(comparatorFor(options.fileOrder))
+}
+
 private data class BrowserPaneState(
     val root: Uri? = null,
     val current: Uri? = null,
@@ -154,9 +198,30 @@ private data class BrowserPaneState(
     val refreshKey: Int = 0,
 )
 
+private const val PANE_PREFS = "hyper_browser_panes"
+private const val PANE_LEFT = "left"
+private const val PANE_RIGHT = "right"
+
+private fun loadPaneState(prefs: SharedPreferences, key: String): BrowserPaneState {
+    val root = prefs.getString("${key}_root", null)?.let(Uri::parse) ?: return BrowserPaneState()
+    val current = prefs.getString("${key}_current", null)?.let(Uri::parse) ?: root
+    // A file:// root only works while All files access is granted, so drop it when unreadable.
+    if (root.scheme == ContentResolver.SCHEME_FILE && root.path?.let { File(it).canRead() } != true) {
+        return BrowserPaneState()
+    }
+    return BrowserPaneState(root = root, current = current)
+}
+
+private fun savePaneState(prefs: SharedPreferences, key: String, state: BrowserPaneState) {
+    prefs.edit()
+        .putString("${key}_root", state.root?.toString())
+        .putString("${key}_current", state.current?.toString())
+        .apply()
+}
+
 private data class DirectoryListing(
     val name: String?,
-    val files: List<DocumentFile>,
+    val files: List<FileEntry>,
 )
 
 private data class TransferRequest(
@@ -224,8 +289,9 @@ class MainActivity : ComponentActivity() {
 private fun HyperBrowserApp() {
     val activity = LocalContext.current as? ComponentActivity ?: return
 
-    var leftPane by remember { mutableStateOf(BrowserPaneState()) }
-    var rightPane by remember { mutableStateOf(BrowserPaneState()) }
+    val prefs = remember { activity.getSharedPreferences(PANE_PREFS, Context.MODE_PRIVATE) }
+    var leftPane by remember { mutableStateOf(loadPaneState(prefs, PANE_LEFT)) }
+    var rightPane by remember { mutableStateOf(loadPaneState(prefs, PANE_RIGHT)) }
     var activePane by remember { mutableStateOf(Pane.LEFT) }
     var transferDirection by remember { mutableStateOf(TransferDirection.LEFT_TO_RIGHT) }
     var layoutMode by remember { mutableStateOf(LayoutMode.PHONE) }
@@ -234,10 +300,14 @@ private fun HyperBrowserApp() {
     var pendingFilesTransfer by remember { mutableStateOf<FilesIntoFolderPrompt?>(null) }
     var reversePrompt by remember { mutableStateOf<TransferMode?>(null) }
     var pendingDelete by remember { mutableStateOf<Set<Uri>?>(null) }
+    var propertiesUri by remember { mutableStateOf<Uri?>(null) }
     var galleryUri by remember { mutableStateOf<Uri?>(null) }
     var galleryDirectory by remember { mutableStateOf<Uri?>(null) }
     var showLayoutSettings by remember { mutableStateOf(false) }
     var fileDisplayOptions by remember { mutableStateOf(FileDisplayOptions()) }
+    var sortOptions by remember { mutableStateOf(SortOptions()) }
+    var gallerySort by remember { mutableStateOf(SortOrder.MODIFIED_NEWEST) }
+    var showSortSettings by remember { mutableStateOf(false) }
     var selectionPreviewVisible by remember { mutableStateOf(true) }
     var selectionPreviewOffset by remember { mutableStateOf(Offset.Zero) }
     var clipboard by remember { mutableStateOf<ClipboardEntry?>(null) }
@@ -253,7 +323,7 @@ private fun HyperBrowserApp() {
     val selected = sourceState.selected
     val selectedFile = selected.singleOrNull()
     val selectedMimeType by produceState(initialValue = "", selectedFile) {
-        value = selectedFile?.let { uri -> withContext(Dispatchers.IO) { resolveMimeType(activity.contentResolver, uri) } } ?: ""
+        value = selectedFile?.let { uri -> withContext(Dispatchers.IO) { Storage.mimeType(activity, uri) } } ?: ""
     }
     val isImageSelected = selectedMimeType.startsWith("image/")
     val idleSelectionInfo = remember { buildSelectionInfo(activity, emptySet()) }
@@ -320,14 +390,14 @@ private fun HyperBrowserApp() {
 
     fun openWith(uri: Uri) {
         scope.launch {
-            val mime = withContext(Dispatchers.IO) { resolveMimeType(activity.contentResolver, uri) }
+            val mime = withContext(Dispatchers.IO) { Storage.mimeType(activity, uri) }
             openFileWithChooser(activity, uri, mime)
         }
     }
 
     fun openFileTarget(uri: Uri, directory: Uri?) {
         scope.launch {
-            val mime = withContext(Dispatchers.IO) { resolveMimeType(activity.contentResolver, uri) }
+            val mime = withContext(Dispatchers.IO) { Storage.mimeType(activity, uri) }
             if (mime.startsWith("image/")) {
                 openGallery(uri, directory)
             } else {
@@ -338,10 +408,20 @@ private fun HyperBrowserApp() {
 
     val runtimePermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {}
 
+    LaunchedEffect(leftPane.root, leftPane.current, rightPane.root, rightPane.current) {
+        savePaneState(prefs, PANE_LEFT, leftPane)
+        savePaneState(prefs, PANE_RIGHT, rightPane)
+    }
+
     LaunchedEffect(Unit) {
         val missing = missingRuntimePermissions(activity)
         if (missing.isNotEmpty()) {
             runtimePermissionLauncher.launch(missing)
+        }
+
+        // A previously authorised Google account is reused so Drive roots survive a restart.
+        DriveAuth.authorizedAccount(activity)?.account?.let { account ->
+            withContext(Dispatchers.IO) { DriveClient.connect(activity, account, account.name) }
         }
 
         // Folder grants survive restarts, so reopen the last roots instead of asking again.
@@ -367,22 +447,25 @@ private fun HyperBrowserApp() {
                 modifier = Modifier
                     .fillMaxSize(),
             ) {
-                MinimalTransferMenu(
-                    direction = transferDirection,
-                    onReverse = {
-                        transferDirection = if (transferDirection == TransferDirection.LEFT_TO_RIGHT) TransferDirection.RIGHT_TO_LEFT else TransferDirection.LEFT_TO_RIGHT
-                    },
-                    onChooseLeftRoot = { showLeftPicker = true },
-                    onChooseRightRoot = { showRightPicker = true },
-                    leftLabel = leftLabel,
-                    rightLabel = rightLabel,
-                )
+                if (galleryUri == null) {
+                    MinimalTransferMenu(
+                        direction = transferDirection,
+                        onReverse = {
+                            transferDirection = if (transferDirection == TransferDirection.LEFT_TO_RIGHT) TransferDirection.RIGHT_TO_LEFT else TransferDirection.LEFT_TO_RIGHT
+                        },
+                        onChooseLeftRoot = { showLeftPicker = true },
+                        onChooseRightRoot = { showRightPicker = true },
+                        leftLabel = leftLabel,
+                        rightLabel = rightLabel,
+                    )
+                }
 
                 if (galleryUri != null) {
                     ImageViewerScreen(
                         activity = activity,
                         startingUri = galleryUri!!,
                         directoryUri = galleryDirectory,
+                        sortOrder = gallerySort,
                         onClose = { galleryUri = null },
                     )
                 } else {
@@ -422,8 +505,9 @@ private fun HyperBrowserApp() {
                                 onNavigate = { directory -> leftPane = leftPane.copy(current = directory, selected = emptySet()) },
                                 onOpenFile = { uri -> openFileTarget(uri, leftPane.current ?: leftPane.root) },
                                 onOpenWith = { uri -> openWith(uri) },
+                                onShowProperties = { uri -> propertiesUri = uri },
                                 onMoveUp = {
-                                    val parent = leftPane.current?.let { parentDirectoryUri(activity, it) }
+                                    val parent = leftPane.current?.let { Storage.parent(activity, it) }
                                     if (parent != null) {
                                         leftPane = leftPane.copy(current = parent, selected = emptySet())
                                     }
@@ -431,6 +515,7 @@ private fun HyperBrowserApp() {
                                 onSelectionChange = { selectedSet -> leftPane = leftPane.copy(selected = selectedSet) },
                                 showHiddenFiles = fileDisplayOptions.showHiddenFiles,
                                 showTrashFiles = fileDisplayOptions.showTrashFiles,
+                                sortOptions = sortOptions,
                             )
 
                             DirectoryPane(
@@ -442,8 +527,9 @@ private fun HyperBrowserApp() {
                                 onNavigate = { directory -> rightPane = rightPane.copy(current = directory, selected = emptySet()) },
                                 onOpenFile = { uri -> openFileTarget(uri, rightPane.current ?: rightPane.root) },
                                 onOpenWith = { uri -> openWith(uri) },
+                                onShowProperties = { uri -> propertiesUri = uri },
                                 onMoveUp = {
-                                    val parent = rightPane.current?.let { parentDirectoryUri(activity, it) }
+                                    val parent = rightPane.current?.let { Storage.parent(activity, it) }
                                     if (parent != null) {
                                         rightPane = rightPane.copy(current = parent, selected = emptySet())
                                     }
@@ -451,6 +537,7 @@ private fun HyperBrowserApp() {
                                 onSelectionChange = { selectedSet -> rightPane = rightPane.copy(selected = selectedSet) },
                                 showHiddenFiles = fileDisplayOptions.showHiddenFiles,
                                 showTrashFiles = fileDisplayOptions.showTrashFiles,
+                                sortOptions = sortOptions,
                             )
                         }
 
@@ -472,7 +559,7 @@ private fun HyperBrowserApp() {
                         info = selectionInfo,
                         selectedFile = selectedFile,
                         isImage = isImageSelected,
-                        onOpen = { selectedFile?.let { openFileWithDefaultApp(activity, it) } },
+                        onOpen = { selectedFile?.let { uri -> openWith(uri) } },
                         onView = { selectedFile?.let { if (isImageSelected) openGallery(it, sourceState.current) } },
                     )
                 }
@@ -541,6 +628,14 @@ private fun HyperBrowserApp() {
         )
     }
 
+    if (propertiesUri != null) {
+        FolderPropertiesDialog(
+            activity = activity,
+            uri = propertiesUri!!,
+            onDismiss = { propertiesUri = null },
+        )
+    }
+
     if (showLayoutSettings) {
         LayoutSettingsDialog(
             selectedMode = layoutMode,
@@ -552,7 +647,21 @@ private fun HyperBrowserApp() {
             },
             onToggleHiddenFiles = { fileDisplayOptions = fileDisplayOptions.copy(showHiddenFiles = it) },
             onToggleTrashFiles = { fileDisplayOptions = fileDisplayOptions.copy(showTrashFiles = it) },
+            onOpenSort = {
+                showLayoutSettings = false
+                showSortSettings = true
+            },
             onDismiss = { showLayoutSettings = false },
+        )
+    }
+
+    if (showSortSettings) {
+        SortSettingsDialog(
+            options = sortOptions,
+            gallerySort = gallerySort,
+            onOptionsChange = { sortOptions = it },
+            onGallerySortChange = { gallerySort = it },
+            onDismiss = { showSortSettings = false },
         )
     }
 
@@ -622,25 +731,38 @@ private fun openAllFilesAccessSettings(context: Context) {
         .onFailure { runCatching { context.startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) } }
 }
 
-private fun openFileWithDefaultApp(activity: ComponentActivity, uri: Uri) {
-    activity.startActivity(
-        Intent.createChooser(
-            Intent(Intent.ACTION_VIEW, uri).apply {
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            },
-            null,
-        ),
-    )
+/** Raw file:// URIs cannot legally leave the process, so other apps get a FileProvider URI instead. */
+private fun shareableUri(context: Context, uri: Uri): Uri? {
+    if (uri.scheme != ContentResolver.SCHEME_FILE) return uri
+    val path = uri.path ?: return null
+    return runCatching {
+        FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", File(path))
+    }.getOrNull()
 }
 
-/** A typed chooser so the "Open with" list actually matches the document. */
-private fun openFileWithChooser(activity: ComponentActivity, uri: Uri, mimeType: String?) {
-    val view = Intent(Intent.ACTION_VIEW).apply {
-        setDataAndType(uri, mimeType?.takeIf { it.isNotBlank() } ?: "*/*")
-        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+private fun launchExternalApp(
+    activity: ComponentActivity,
+    uri: Uri,
+    mimeType: String?,
+    action: String = Intent.ACTION_VIEW,
+    title: String = "Open with",
+) {
+    // Drive items are synthetic URIs no other app can resolve; they must be copied out first.
+    val shared = if (DriveUris.isDrive(uri)) null else shareableUri(activity, uri)
+    if (shared == null) {
+        Toast.makeText(activity, "Copy this file to local storage to open it elsewhere", Toast.LENGTH_SHORT).show()
+        return
     }
-    runCatching { activity.startActivity(Intent.createChooser(view, "Open with")) }
-        .onFailure { openFileWithDefaultApp(activity, uri) }
+    val intent = Intent(action).apply {
+        setDataAndType(shared, mimeType?.takeIf { it.isNotBlank() } ?: "*/*")
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+    }
+    runCatching { activity.startActivity(Intent.createChooser(intent, title)) }
+        .onFailure { Toast.makeText(activity, "No app can open this file", Toast.LENGTH_SHORT).show() }
+}
+
+private fun openFileWithChooser(activity: ComponentActivity, uri: Uri, mimeType: String?) {
+    launchExternalApp(activity, uri, mimeType)
 }
 
 private fun planTransfer(
@@ -649,8 +771,8 @@ private fun planTransfer(
     target: BrowserPaneState,
     mode: TransferMode,
 ): TransferPlan {
-    val sourceDocs = source.selected.mapNotNull { getDocumentFile(activity, it) }
-    val targetDocs = target.selected.mapNotNull { getDocumentFile(activity, it) }
+    val sourceDocs = source.selected.mapNotNull { Storage.entry(activity, it) }
+    val targetDocs = target.selected.mapNotNull { Storage.entry(activity, it) }
     val sourceFolders = sourceDocs.filter { it.isDirectory }
     val targetFolders = targetDocs.filter { it.isDirectory }
 
@@ -663,7 +785,7 @@ private fun planTransfer(
         val targetDir = target.current ?: target.root
         val sourceDir = source.current ?: source.root
         if (targetDir != null && sourceDir != null) {
-            val targetFolder = getDocumentFile(activity, targetDir)
+            val targetFolder = Storage.entry(activity, targetDir)
             return TransferPlan.FilesIntoFolder(
                 FilesIntoFolderPrompt(
                     request = TransferRequest(
@@ -692,8 +814,8 @@ private fun planTransfer(
                     wholeDirectory = true,
                     mode = mode,
                 ),
-                sourceName = sourceFolder.name ?: resolveDisplayPath(activity, sourceFolder.uri),
-                targetName = targetFolder.name ?: resolveDisplayPath(activity, targetFolder.uri),
+                sourceName = sourceFolder.name,
+                targetName = targetFolder.name,
                 offerDeleteSource = mode == TransferMode.MOVE && isRemoteOrRemovableUri(sourceFolder.uri),
             ),
         )
@@ -704,6 +826,7 @@ private fun planTransfer(
 
 // Cloud providers and removable volumes make a "move" destructive in ways the user should opt into.
 private fun isRemoteOrRemovableUri(uri: Uri): Boolean {
+    if (DriveUris.isDrive(uri)) return true
     if (uri.scheme != ContentResolver.SCHEME_CONTENT) return false
     if (uri.authority != "com.android.externalstorage.documents") return true
     val documentId = runCatching { DocumentsContract.getDocumentId(uri) }.getOrNull()
@@ -713,212 +836,87 @@ private fun isRemoteOrRemovableUri(uri: Uri): Boolean {
 }
 
 private fun executeTransfer(activity: ComponentActivity, request: TransferRequest) {
+    val copyMode = request.mode == TransferMode.COPY
+    val takenNames = Storage.childNames(activity, request.targetDir)
     if (request.wholeDirectory) {
-        val sourceDoc = getDocumentFile(activity, request.sourceDir) ?: return
-        val targetDoc = getDocumentFile(activity, request.targetDir) ?: return
-        when (request.mode) {
-            TransferMode.COPY -> copyTree(activity.contentResolver, sourceDoc, targetDoc)
-            TransferMode.MOVE -> moveTree(activity.contentResolver, sourceDoc, targetDoc)
-        }
+        val source = Storage.entry(activity, request.sourceDir) ?: return
+        transferEntry(activity, source, request.targetDir, takenNames, copyMode)
         return
     }
-
-    val targetDoc = getDocumentFile(activity, request.targetDir) ?: return
     request.selected.forEach { uri ->
-        val sourceDoc = getDocumentFile(activity, uri) ?: return@forEach
-        when (request.mode) {
-            TransferMode.COPY -> transferDocument(activity.contentResolver, sourceDoc, targetDoc, true)
-            TransferMode.MOVE -> transferDocument(activity.contentResolver, sourceDoc, targetDoc, false)
-        }
+        val source = Storage.entry(activity, uri) ?: return@forEach
+        transferEntry(activity, source, request.targetDir, takenNames, copyMode)
     }
 }
 
 private fun deleteItems(activity: ComponentActivity, uris: Set<Uri>) {
-    uris.forEach { uri ->
-        getDocumentFile(activity, uri)?.delete()
-    }
+    uris.forEach { uri -> Storage.delete(activity, uri) }
 }
 
-private fun copyTree(resolver: ContentResolver, source: DocumentFile, target: DocumentFile): Boolean {
-    val targetName = nextAvailableName(target, source.name ?: "folder")
-    val destination = target.createDirectory(targetName) ?: return false
-    var ok = true
-    source.listFiles().forEach { child ->
-        if (child.uri == destination.uri) return@forEach
-        val copied = if (child.isDirectory) {
-            copyTree(resolver, child, destination)
-        } else {
-            copyFileContents(resolver, child, destination, nextAvailableName(destination, child.name ?: "file"))
-        }
-        if (!copied) {
-            ok = false
-        }
-    }
-    return ok
-}
-
-private fun moveTree(resolver: ContentResolver, source: DocumentFile, target: DocumentFile): Boolean {
-    if (!copyTree(resolver, source, target)) return false
-    return source.delete()
-}
-
-private fun copyFileContents(
-    resolver: ContentResolver,
-    source: DocumentFile,
-    targetDir: DocumentFile,
-    name: String,
-): Boolean {
-    // Cloud documents (Google Docs, Sheets, …) hold no bytes; they must be exported to a real type.
-    val exportType = if (isVirtualDocument(resolver, source.uri)) {
-        exportMimeType(resolver, source.uri) ?: return false
-    } else {
-        null
-    }
-    val fileName = if (exportType != null) nextAvailableName(targetDir, withExportExtension(name, exportType)) else name
-    val destination = targetDir.createFile(exportType ?: source.type ?: "application/octet-stream", fileName)
-        ?: return false
-    val copied = runCatching {
-        openDocumentStream(resolver, source.uri, exportType)?.use { input ->
-            resolver.openOutputStream(destination.uri)?.use { output ->
-                input.copyTo(output)
-                output.flush()
-                true
-            }
-        }
-    }.getOrNull() == true
-    if (!copied) {
-        destination.delete()
-    }
-    return copied
-}
-
-private fun isVirtualDocument(resolver: ContentResolver, uri: Uri): Boolean {
-    if (uri.scheme != ContentResolver.SCHEME_CONTENT) return false
-    return runCatching {
-        resolver.query(uri, arrayOf(DocumentsContract.Document.COLUMN_FLAGS), null, null, null)?.use { cursor ->
-            cursor.moveToFirst() &&
-                (cursor.getInt(0) and DocumentsContract.Document.FLAG_VIRTUAL_DOCUMENT) != 0
-        }
-    }.getOrNull() == true
-}
-
-private fun exportMimeType(resolver: ContentResolver, uri: Uri): String? {
-    val available = runCatching { resolver.getStreamTypes(uri, "*/*") }.getOrNull()?.filterNotNull().orEmpty()
-    if (available.isEmpty()) return null
-    val preferred = listOf("application/pdf", "image/png", "image/jpeg", "text/plain")
-    return preferred.firstOrNull { it in available } ?: available.first()
-}
-
-private fun withExportExtension(name: String, mimeType: String): String {
-    val extension = MimeTypeMap.getSingleton().getExtensionFromMimeType(mimeType) ?: return name
-    return if (name.endsWith(".$extension", ignoreCase = true)) name else "$name.$extension"
-}
-
-private fun openDocumentStream(resolver: ContentResolver, uri: Uri, exportType: String? = null): InputStream? {
-    val mimeType = exportType ?: if (isVirtualDocument(resolver, uri)) exportMimeType(resolver, uri) else null
-    return if (mimeType == null) {
-        resolver.openInputStream(uri)
-    } else {
-        resolver.openTypedAssetFileDescriptor(uri, mimeType, null)?.createInputStream()
-    }
-}
-
-private fun transferDocument(
-    resolver: ContentResolver,
-    source: DocumentFile,
-    targetDir: DocumentFile,
+/** [takenNames] is threaded through so a batch transfer does not re-list the destination per item. */
+private fun transferEntry(
+    context: Context,
+    source: FileEntry,
+    targetDir: Uri,
+    takenNames: MutableSet<String>,
     copyMode: Boolean,
 ): Boolean {
     if (source.isDirectory) {
-        val targetName = nextAvailableName(targetDir, source.name ?: "folder")
-        val destination = targetDir.createDirectory(targetName) ?: return false
+        val folderName = nextAvailableName(takenNames, source.name)
+        val destination = Storage.createFolder(context, targetDir, folderName) ?: return false
+        val childNames = mutableSetOf<String>()
         var ok = true
-        source.listFiles().forEach { child ->
+        Storage.children(context, source.uri).forEach { child ->
             if (child.uri == destination.uri) return@forEach
-            if (!transferDocument(resolver, child, destination, copyMode)) {
+            if (!transferEntry(context, child, destination.uri, childNames, copyMode)) {
                 ok = false
             }
         }
         if (!copyMode && ok) {
-            source.delete()
+            Storage.delete(context, source.uri)
         }
         return ok
     }
 
-    val targetName = nextAvailableName(targetDir, source.name ?: "file")
-    if (!copyFileContents(resolver, source, targetDir, targetName)) {
-        return false
-    }
+    if (!copyFileContents(context, source, targetDir, takenNames)) return false
     if (!copyMode) {
-        source.delete()
+        Storage.delete(context, source.uri)
     }
     return true
 }
 
-private fun nextAvailableName(targetDir: DocumentFile, preferredName: String): String {
-    if (targetDir.findFile(preferredName) == null) {
-        return preferredName
+private fun copyFileContents(
+    context: Context,
+    source: FileEntry,
+    targetDir: Uri,
+    takenNames: MutableSet<String>,
+): Boolean {
+    val content = Storage.read(context, source) ?: return false
+    val name = nextAvailableName(takenNames, content.fileName)
+    return runCatching {
+        content.stream.use { input -> Storage.writeChild(context, targetDir, name, content.mimeType, input) }
+    }.getOrDefault(false)
+}
+
+private fun nextAvailableName(takenNames: MutableSet<String>, preferredName: String): String {
+    fun claim(name: String): String {
+        takenNames += name
+        return name
     }
+    if (preferredName !in takenNames) return claim(preferredName)
     val dotIndex = preferredName.lastIndexOf('.')
     val base = if (dotIndex > 0) preferredName.substring(0, dotIndex) else preferredName
     val extension = if (dotIndex > 0) preferredName.substring(dotIndex) else ""
     var counter = 1
     while (true) {
         val candidate = "$base ($counter)$extension"
-        if (targetDir.findFile(candidate) == null) {
-            return candidate
-        }
+        if (candidate !in takenNames) return claim(candidate)
         counter += 1
     }
 }
 
-// fromTreeUri()/fromSingleUri() always report a null parent, so derive it from the document id.
-private fun parentDirectoryUri(context: Context, uri: Uri): Uri? {
-    if (uri.scheme == ContentResolver.SCHEME_FILE) {
-        return uri.path?.let { File(it).parentFile }?.takeIf { it.canRead() }?.let(Uri::fromFile)
-    }
-    return runCatching {
-        val treeRootId = DocumentsContract.getTreeDocumentId(uri)
-        val documentId = if (DocumentsContract.isDocumentUri(context, uri)) {
-            DocumentsContract.getDocumentId(uri)
-        } else {
-            treeRootId
-        }
-        val separator = documentId.lastIndexOf('/')
-        if (documentId == treeRootId || separator <= 0) return@runCatching null
-        val parentId = documentId.substring(0, separator)
-        if (!parentId.startsWith(treeRootId)) return@runCatching null
-        DocumentsContract.buildDocumentUriUsingTree(uri, parentId)
-    }.getOrNull()
-}
-
-private fun resolveMimeType(resolver: ContentResolver, uri: Uri): String {
-    return resolver.getType(uri) ?: when (uri.toString().substringAfterLast('.', "").lowercase()) {
-        "jpg", "jpeg", "png", "gif", "bmp", "webp" -> "image/bitmap"
-        "pdf" -> "application/pdf"
-        "txt" -> "text/plain"
-        else -> "application/octet-stream"
-    }
-}
-
-private fun resolveDisplayPath(context: ComponentActivity, uri: Uri): String {
-    val doc = getDocumentFile(context, uri)
-    return doc?.name ?: uri.lastPathSegment ?: "unknown"
-}
-
-private fun getDocumentFile(context: Context, uri: Uri): DocumentFile? {
-    return if (uri.scheme == "content") {
-        if (uri.toString().contains("tree")) {
-            DocumentFile.fromTreeUri(context, uri)
-        } else {
-            DocumentFile.fromSingleUri(context, uri)
-        }
-    } else if (uri.scheme == "file") {
-        uri.path?.let { DocumentFile.fromFile(File(it)) }
-    } else {
-        null
-    }
-}
+private fun resolveDisplayPath(context: Context, uri: Uri): String =
+    Storage.entry(context, uri)?.name ?: uri.lastPathSegment ?: "unknown"
 
 private fun isImageMimeType(value: String): Boolean = value.startsWith("image/")
 
@@ -931,10 +929,9 @@ private fun isTrashRelatedPath(name: String?): Boolean {
     return lower.contains("trash") || lower.contains("recycle") || lower.contains("deleted") || lower.contains("recentlydeleted")
 }
 
-private fun shouldDisplayDocument(doc: DocumentFile, showHiddenFiles: Boolean, showTrashFiles: Boolean): Boolean {
-    val name = doc.name ?: return true
-    val hidden = isHiddenPathSegment(name)
-    val trash = isTrashRelatedPath(name)
+private fun shouldDisplayDocument(doc: FileEntry, showHiddenFiles: Boolean, showTrashFiles: Boolean): Boolean {
+    val hidden = isHiddenPathSegment(doc.name)
+    val trash = isTrashRelatedPath(doc.name)
     if (hidden && !showHiddenFiles) return false
     if (trash && !showTrashFiles) return false
     return true
@@ -952,7 +949,7 @@ private fun buildSelectionInfo(activity: ComponentActivity, uris: Set<Uri>): Sel
     }
     if (uris.size == 1) {
         val uri = uris.first()
-        val doc = getDocumentFile(activity, uri)
+        val doc = Storage.entry(activity, uri)
         if (doc == null) {
             return SelectionInfo(
                 title = uri.lastPathSegment ?: "Unknown",
@@ -963,16 +960,16 @@ private fun buildSelectionInfo(activity: ComponentActivity, uris: Set<Uri>): Sel
             )
         }
         val isDir = doc.isDirectory
-        val childCount = if (isDir) runCatching { doc.listFiles().size }.getOrNull() else null
+        val childCount = if (isDir) runCatching { Storage.children(activity, uri).size }.getOrNull() else null
         return SelectionInfo(
-            title = doc.name ?: uri.lastPathSegment ?: "Unknown",
+            title = doc.name,
             kind = if (isDir) "Folder" else "File",
-            sizeLabel = if (isDir) childCount?.let { "$it items" } ?: "Unknown" else formatBytes(doc.length()),
+            sizeLabel = if (isDir) childCount?.let { "$it items" } ?: "Unknown" else formatBytes(doc.size),
             path = doc.uri.toString(),
-            details = if (isDir) "Directory" else (doc.type ?: "Document"),
+            details = if (isDir) "Directory" else (doc.mimeType ?: "Document"),
         )
     }
-    val names = uris.take(3).mapNotNull { uri -> getDocumentFile(activity, uri)?.name ?: uri.lastPathSegment }
+    val names = uris.take(3).mapNotNull { uri -> Storage.entry(activity, uri)?.name ?: uri.lastPathSegment }
     return SelectionInfo(
         title = "${uris.size} items selected",
         kind = "Multi-select",
@@ -1198,6 +1195,7 @@ private fun LayoutSettingsDialog(
     onSelect: (LayoutMode) -> Unit,
     onToggleHiddenFiles: (Boolean) -> Unit,
     onToggleTrashFiles: (Boolean) -> Unit,
+    onOpenSort: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     AlertDialog(
@@ -1232,12 +1230,88 @@ private fun LayoutSettingsDialog(
                 ) {
                     Text(if (showTrashFiles) "Hide trash-related files" else "Show trash-related files")
                 }
+
+                Text("Sorting", style = MaterialTheme.typography.labelLarge)
+                Button(onClick = onOpenSort, modifier = Modifier.fillMaxWidth()) {
+                    Text("Sort options")
+                }
             }
         },
         confirmButton = {
             TextButton(onClick = onDismiss) { Text("Close") }
         },
     )
+}
+
+@Composable
+private fun SortSettingsDialog(
+    options: SortOptions,
+    gallerySort: SortOrder,
+    onOptionsChange: (SortOptions) -> Unit,
+    onGallerySortChange: (SortOrder) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Sort options") },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(
+                        checked = options.split,
+                        onCheckedChange = { onOptionsChange(options.copy(split = it)) },
+                    )
+                    Text("Sort folders separately from files")
+                }
+
+                if (options.split) {
+                    Text("Folders", style = MaterialTheme.typography.labelLarge)
+                    SortOrder.entries.forEach { order ->
+                        SortChoice(order.label, order == options.folderOrder) {
+                            onOptionsChange(options.copy(folderOrder = order))
+                        }
+                    }
+                }
+
+                Text(if (options.split) "Files" else "Folders and files", style = MaterialTheme.typography.labelLarge)
+                SortOrder.entries.forEach { order ->
+                    SortChoice(order.label, order == options.fileOrder) {
+                        onOptionsChange(options.copy(fileOrder = order))
+                    }
+                }
+
+                Text("Gallery", style = MaterialTheme.typography.labelLarge)
+                SortOrder.entries.forEach { order ->
+                    SortChoice(order.label, order == gallerySort) { onGallerySortChange(order) }
+                }
+
+                Text(
+                    "Creation dates are only tracked on local storage and Google Drive; elsewhere they fall back to the modified date.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Close") }
+        },
+    )
+}
+
+@Composable
+private fun SortChoice(label: String, selected: Boolean, onSelect: () -> Unit) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onSelect),
+    ) {
+        RadioButton(selected = selected, onClick = onSelect)
+        Text(label, style = MaterialTheme.typography.bodyMedium)
+    }
 }
 
 @Composable
@@ -1261,9 +1335,11 @@ private fun FolderPickerDialog(
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current as ComponentActivity
+    val scope = rememberCoroutineScope()
     var rootUri by remember { mutableStateOf<Uri?>(null) }
     var currentUri by remember { mutableStateOf<Uri?>(null) }
     var selectedUri by remember { mutableStateOf<Uri?>(null) }
+    var driveMessage by remember { mutableStateOf<String?>(null) }
 
     fun takeUriPermissionSafely(uri: Uri) {
         if (uri.scheme != "content") return
@@ -1271,6 +1347,25 @@ private fun FolderPickerDialog(
         try {
             context.contentResolver.takePersistableUriPermission(uri, flags)
         } catch (_: SecurityException) {
+        }
+    }
+
+    fun browseDriveRoot() {
+        rootUri = DriveUris.ROOT
+        currentUri = DriveUris.ROOT
+        selectedUri = DriveUris.ROOT
+    }
+
+    fun connectDrive(account: GoogleSignInAccount) {
+        val androidAccount = account.account
+        if (androidAccount == null) {
+            driveMessage = "That Google account could not be used for Drive."
+            return
+        }
+        scope.launch {
+            withContext(Dispatchers.IO) { DriveClient.connect(context, androidAccount, account.email) }
+            driveMessage = null
+            browseDriveRoot()
         }
     }
 
@@ -1287,6 +1382,17 @@ private fun FolderPickerDialog(
         }
     }
 
+    val driveSignInLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val account = runCatching {
+            GoogleSignIn.getSignedInAccountFromIntent(result.data).getResult(ApiException::class.java)
+        }.getOrNull()
+        if (account != null && DriveAuth.hasDriveScope(account)) {
+            connectDrive(account)
+        } else {
+            driveMessage = "Drive sign-in was cancelled or the Drive permission was declined."
+        }
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Select Default Folder") },
@@ -1297,6 +1403,28 @@ private fun FolderPickerDialog(
                     Spacer(modifier = Modifier.size(12.dp))
                     Button(onClick = { pickerLauncher.launch(null) }, modifier = Modifier.fillMaxWidth()) {
                         Text("Select Folder (via SAF)")
+                    }
+                    Spacer(modifier = Modifier.size(8.dp))
+                    Button(
+                        onClick = {
+                            if (DriveClient.isConnected) {
+                                browseDriveRoot()
+                            } else {
+                                val existing = DriveAuth.authorizedAccount(context)
+                                if (existing != null) {
+                                    connectDrive(existing)
+                                } else {
+                                    driveSignInLauncher.launch(DriveAuth.signInClient(context).signInIntent)
+                                }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(DriveClient.accountName?.let { "Google Drive ($it)" } ?: "Google Drive")
+                    }
+                    driveMessage?.let {
+                        Spacer(modifier = Modifier.size(4.dp))
+                        Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
                     }
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !hasAllFilesAccess) {
                         Spacer(modifier = Modifier.size(8.dp))
@@ -1325,11 +1453,18 @@ private fun FolderPickerDialog(
                         }
                     }
                 } else {
-                    val currentDoc = getDocumentFile(context, currentUri!!)
-                    val folders = currentDoc?.listFiles()?.filter { it.isDirectory } ?: emptyList()
+                    val browseUri = currentUri!!
+                    val folders by produceState(initialValue = emptyList<FileEntry>(), browseUri) {
+                        value = withContext(Dispatchers.IO) {
+                            Storage.children(context, browseUri).filter { it.isDirectory }
+                        }
+                    }
+                    val browseName by produceState(initialValue = "…", browseUri) {
+                        value = withContext(Dispatchers.IO) { resolveDisplayPath(context, browseUri) }
+                    }
 
                     Text(
-                        text = "Browsing: ${resolveDisplayPath(context, currentUri!!)}",
+                        text = "Browsing: $browseName",
                         style = MaterialTheme.typography.bodySmall,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
@@ -1340,7 +1475,7 @@ private fun FolderPickerDialog(
                         if (currentUri != rootUri) {
                             item {
                                 TextButton(
-                                    onClick = { currentUri = currentUri?.let { parentDirectoryUri(context, it) } ?: rootUri },
+                                    onClick = { currentUri = currentUri?.let { Storage.parent(context, it) } ?: rootUri },
                                     modifier = Modifier.fillMaxWidth()
                                 ) {
                                     Text(".. [Up to parent]")
@@ -1360,7 +1495,7 @@ private fun FolderPickerDialog(
                                     onCheckedChange = { if (it) selectedUri = folder.uri }
                                 )
                                 Text(
-                                    text = folder.name ?: "Folder",
+                                    text = folder.name,
                                     modifier = Modifier.padding(start = 8.dp),
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
@@ -1529,12 +1664,167 @@ private fun ConfirmFilesIntoFolderDialog(
     )
 }
 
+private data class FolderStats(
+    val directFiles: Int,
+    val directFolders: Int,
+    val totalFiles: Int,
+    val totalFolders: Int,
+    val bytes: Long,
+)
+
+/** Walks the tree iteratively; recursion would blow the stack on a deep folder. */
+private fun scanFolder(context: Context, uri: Uri): FolderStats {
+    val direct = Storage.children(context, uri)
+    var totalFiles = 0
+    var totalFolders = 0
+    var bytes = 0L
+    val pending = ArrayDeque<FileEntry>()
+    pending += direct
+    while (pending.isNotEmpty()) {
+        val entry = pending.removeLast()
+        if (entry.isDirectory) {
+            totalFolders += 1
+            pending += Storage.children(context, entry.uri)
+        } else {
+            totalFiles += 1
+            bytes += entry.size
+        }
+    }
+    return FolderStats(
+        directFiles = direct.count { !it.isDirectory },
+        directFolders = direct.count { it.isDirectory },
+        totalFiles = totalFiles,
+        totalFolders = totalFolders,
+        bytes = bytes,
+    )
+}
+
+@Composable
+private fun FolderPropertiesDialog(
+    activity: ComponentActivity,
+    uri: Uri,
+    onDismiss: () -> Unit,
+) {
+    val entry by produceState<FileEntry?>(initialValue = null, uri) {
+        value = withContext(Dispatchers.IO) { Storage.entry(activity, uri) }
+    }
+    val stats by produceState<FolderStats?>(initialValue = null, uri) {
+        value = withContext(Dispatchers.IO) { scanFolder(activity, uri) }
+    }
+    val measured = stats
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(entry?.name ?: uri.lastPathSegment ?: "Folder") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (measured == null) {
+                    Text("Measuring folder contents…", style = MaterialTheme.typography.bodyMedium)
+                } else {
+                    PropertyRow("Contains", "${measured.directFolders} folders, ${measured.directFiles} files")
+                    PropertyRow("All files", "${measured.totalFiles}")
+                    PropertyRow("All subfolders", "${measured.totalFolders}")
+                    PropertyRow("Total size", formatBytes(measured.bytes))
+                }
+                PropertyRow("Type", if (DriveUris.isDrive(uri)) "Google Drive folder" else "Folder")
+                Text(
+                    text = uri.toString(),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Close") }
+        },
+    )
+}
+
+@Composable
+private fun PropertyRow(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Text(label, style = MaterialTheme.typography.labelMedium)
+        Text(value, style = MaterialTheme.typography.bodyMedium)
+    }
+}
+
+private fun readExif(context: Context, uri: Uri): List<Pair<String, String>> {
+    val stream = runCatching { Storage.openInput(context, uri) }.getOrNull() ?: return emptyList()
+    val exif = stream.use { runCatching { ExifInterface(it) }.getOrNull() } ?: return emptyList()
+    val tags = listOf(
+        "Taken" to ExifInterface.TAG_DATETIME_ORIGINAL,
+        "Camera" to ExifInterface.TAG_MAKE,
+        "Model" to ExifInterface.TAG_MODEL,
+        "Lens" to ExifInterface.TAG_LENS_MODEL,
+        "Exposure" to ExifInterface.TAG_EXPOSURE_TIME,
+        "Aperture" to ExifInterface.TAG_F_NUMBER,
+        "ISO" to ExifInterface.TAG_PHOTOGRAPHIC_SENSITIVITY,
+        "Focal length" to ExifInterface.TAG_FOCAL_LENGTH,
+        "Flash" to ExifInterface.TAG_FLASH,
+        "White balance" to ExifInterface.TAG_WHITE_BALANCE,
+        "Orientation" to ExifInterface.TAG_ORIENTATION,
+        "Software" to ExifInterface.TAG_SOFTWARE,
+    )
+    val rows = mutableListOf<Pair<String, String>>()
+    val width = exif.getAttributeInt(ExifInterface.TAG_IMAGE_WIDTH, 0)
+    val height = exif.getAttributeInt(ExifInterface.TAG_IMAGE_LENGTH, 0)
+    if (width > 0 && height > 0) rows += "Dimensions" to "$width × $height"
+    tags.forEach { (label, tag) ->
+        exif.getAttribute(tag)?.takeIf { it.isNotBlank() }?.let { rows += label to it }
+    }
+    exif.latLong?.let { rows += "Location" to "${it[0]}, ${it[1]}" }
+    return rows
+}
+
+@Composable
+private fun ImageInfoDialog(
+    activity: ComponentActivity,
+    entry: FileEntry?,
+    uri: Uri,
+    onDismiss: () -> Unit,
+) {
+    val exifRows by produceState<List<Pair<String, String>>?>(initialValue = null, uri) {
+        value = withContext(Dispatchers.IO) { readExif(activity, uri) }
+    }
+    val rows = exifRows
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(entry?.name ?: uri.lastPathSegment ?: "Image") },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+            ) {
+                entry?.let {
+                    PropertyRow("Size", formatBytes(it.size))
+                    it.mimeType?.let { type -> PropertyRow("Type", type) }
+                }
+                when {
+                    rows == null -> Text("Reading metadata…", style = MaterialTheme.typography.bodyMedium)
+                    rows.isEmpty() -> Text("No EXIF metadata in this file.", style = MaterialTheme.typography.bodyMedium)
+                    else -> rows.forEach { (label, value) -> PropertyRow(label, value) }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Close") }
+        },
+    )
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ImageViewerScreen(
     activity: ComponentActivity,
     startingUri: Uri,
     directoryUri: Uri?,
+    sortOrder: SortOrder,
     onClose: () -> Unit,
 ) {
     var currentUri by remember(startingUri) { mutableStateOf(startingUri) }
@@ -1542,16 +1832,22 @@ private fun ImageViewerScreen(
     var scale by remember { mutableFloatStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
     var showMenu by remember { mutableStateOf(false) }
+    var showExif by remember { mutableStateOf(false) }
     var imageActionUri by remember { mutableStateOf<Uri?>(null) }
     var listingRefresh by remember { mutableIntStateOf(0) }
+    var selectionMode by remember { mutableStateOf(false) }
+    var selectedImages by remember { mutableStateOf(emptySet<Uri>()) }
+    var pendingGalleryDelete by remember { mutableStateOf<Set<Uri>?>(null) }
+    val scope = rememberCoroutineScope()
 
-    val images by produceState(initialValue = emptyList<DocumentFile>(), directoryUri, startingUri, listingRefresh) {
+    val images by produceState(initialValue = emptyList<FileEntry>(), directoryUri, startingUri, listingRefresh, sortOrder) {
         value = withContext(Dispatchers.IO) {
-            val dir = directoryUri?.let { getDocumentFile(activity, it) }
-            dir?.listFiles()
-                ?.filter { file -> file.isFile && isImageMimeType(resolveMimeType(activity.contentResolver, file.uri)) }
-                ?.sortedBy { it.name ?: "" }
-                ?: listOfNotNull(getDocumentFile(activity, startingUri))
+            directoryUri?.let { dir ->
+                Storage.children(activity, dir)
+                    .filter { !it.isDirectory && isImageMimeType(it.mimeType ?: Storage.mimeType(activity, it.uri)) }
+                    .sortedWith(comparatorFor(sortOrder))
+            }?.takeIf { it.isNotEmpty() }
+                ?: listOfNotNull(Storage.entry(activity, startingUri))
         }
     }
 
@@ -1595,51 +1891,98 @@ private fun ImageViewerScreen(
         }
     }
 
+    fun showRelative(step: Int) {
+        if (images.size < 2) return
+        val index = images.indexOfFirst { it.uri == currentUri }
+        val nextIndex = when {
+            index < 0 -> 0
+            else -> (index + step + images.size) % images.size
+        }
+        currentUri = images[nextIndex].uri
+        resetTransform()
+    }
+
+    fun deleteImages(targets: Set<Uri>) {
+        scope.launch {
+            withContext(Dispatchers.IO) { targets.forEach { Storage.delete(activity, it) } }
+            val remaining = images.filterNot { it.uri in targets }
+            selectedImages = emptySet()
+            selectionMode = false
+            if (remaining.isEmpty()) {
+                onClose()
+            } else {
+                if (currentUri in targets) {
+                    val index = images.indexOfFirst { it.uri == currentUri }
+                    currentUri = remaining[index.coerceIn(0, remaining.lastIndex)].uri
+                }
+                listingRefresh += 1
+            }
+        }
+    }
+
+    // The system back gesture returns to the browser rather than leaving the app.
+    BackHandler(enabled = true) { onClose() }
+
     Column(modifier = Modifier.fillMaxSize()) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(8.dp),
+                .padding(horizontal = 6.dp, vertical = 2.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(currentDoc?.name ?: currentUri.lastPathSegment ?: "Image viewer", maxLines = 1, overflow = TextOverflow.Ellipsis)
+            AssistChip(
+                onClick = onClose,
+                label = { Text("File browser", fontSize = 10.sp) },
+                leadingIcon = { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null, Modifier.size(14.dp)) },
+                modifier = Modifier.height(28.dp),
+            )
             Row(verticalAlignment = Alignment.CenterVertically) {
-                if (images.size > 1) {
-                    IconButton(onClick = {
-                        val index = images.indexOfFirst { it.uri == currentUri }
-                        val nextIndex = if (index <= 0) images.lastIndex else index - 1
-                        currentUri = images[nextIndex].uri
-                        scale = 1f
-                        offset = Offset.Zero
-                    }) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Previous image")
-                    }
-                    IconButton(onClick = {
-                        val index = images.indexOfFirst { it.uri == currentUri }
-                        val nextIndex = if (index < 0 || index == images.lastIndex) 0 else index + 1
-                        currentUri = images[nextIndex].uri
-                        scale = 1f
-                        offset = Offset.Zero
-                    }) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = "Next image")
+                if (stage == GalleryStage.SINGLE && images.size > 1) {
+                    GalleryAction(Icons.AutoMirrored.Filled.ArrowBack, "Previous image") { showRelative(-1) }
+                    GalleryAction(Icons.AutoMirrored.Filled.ArrowForward, "Next image") { showRelative(1) }
+                }
+                if (stage != GalleryStage.SINGLE) {
+                    GalleryAction(
+                        icon = Icons.Filled.SelectAll,
+                        description = "Select images",
+                        tint = if (selectionMode) MaterialTheme.colorScheme.primary else LocalContentColor.current,
+                    ) {
+                        selectionMode = !selectionMode
+                        if (!selectionMode) selectedImages = emptySet()
                     }
                 }
-                IconButton(onClick = { zoomOut() }) {
-                    Icon(Icons.Filled.ZoomOut, contentDescription = "Zoom out")
+                GalleryAction(Icons.Filled.Delete, "Delete") {
+                    val targets = when {
+                        selectionMode && selectedImages.isNotEmpty() -> selectedImages
+                        stage == GalleryStage.SINGLE -> setOf(currentUri)
+                        else -> emptySet()
+                    }
+                    if (targets.isNotEmpty()) pendingGalleryDelete = targets
                 }
-                IconButton(onClick = { zoomIn() }) {
-                    Icon(Icons.Filled.ZoomIn, contentDescription = "Zoom in")
+                if (stage == GalleryStage.SINGLE) {
+                    GalleryAction(Icons.Filled.ZoomOut, "Zoom out") { zoomOut() }
+                    GalleryAction(Icons.Filled.ZoomIn, "Zoom in") { zoomIn() }
+                    GalleryAction(Icons.Filled.Info, "Image information") { showExif = true }
                 }
-                IconButton(onClick = {
+                GalleryAction(Icons.Filled.Image, "Toggle gallery view") {
                     stage = if (stage == GalleryStage.SINGLE) GalleryStage.GRID_SMALL else GalleryStage.SINGLE
                     resetTransform()
-                }) {
-                    Icon(Icons.Filled.Image, contentDescription = "Toggle gallery view")
                 }
-                IconButton(onClick = onClose) { Icon(Icons.Filled.Close, contentDescription = "Close gallery") }
             }
         }
+
+        Text(
+            text = if (selectionMode) {
+                "${selectedImages.size} selected"
+            } else {
+                currentDoc?.name ?: currentUri.lastPathSegment ?: "Image viewer"
+            },
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 1.dp),
+        )
 
         Box(
             modifier = Modifier
@@ -1655,18 +1998,22 @@ private fun ImageViewerScreen(
                     contentDescription = "Zoomable image",
                     modifier = Modifier
                         .fillMaxSize()
-                        .pointerInput(Unit) {
-                            detectTransformGestures { _, pan, zoom, _ ->
-                                val next = scale * zoom
-                                if (next < 0.85f) {
-                                    stage = GalleryStage.GRID_MEDIUM
-                                    scale = 1f
-                                    offset = Offset.Zero
-                                } else {
-                                    scale = next.coerceIn(1f, MAX_SINGLE_ZOOM)
-                                    if (scale > 1f) offset += pan
-                                }
-                            }
+                        .pointerInput(images, currentUri) {
+                            detectImageGestures(
+                                currentScale = { scale },
+                                onTransform = { pan, zoom ->
+                                    val next = scale * zoom
+                                    if (next < 0.85f) {
+                                        stage = GalleryStage.GRID_MEDIUM
+                                        scale = 1f
+                                        offset = Offset.Zero
+                                    } else {
+                                        scale = next.coerceIn(1f, MAX_SINGLE_ZOOM)
+                                        if (scale > 1f) offset += pan
+                                    }
+                                },
+                                onSwipe = { step -> showRelative(step) },
+                            )
                         }
                         .graphicsLayer(
                             scaleX = scale,
@@ -1704,14 +2051,21 @@ private fun ImageViewerScreen(
                             }
                         }
                         val thumbnail = thumb
+                        val picked = file.uri in selectedImages
                         Column(
                             horizontalAlignment = Alignment.CenterHorizontally,
-                            modifier = Modifier
-                                .clickable {
-                                    currentUri = file.uri
-                                    stage = GalleryStage.SINGLE
-                                    resetTransform()
+                            modifier = Modifier.combinedClickable(
+                                onClick = {
+                                    if (selectionMode) {
+                                        selectedImages = if (picked) selectedImages - file.uri else selectedImages + file.uri
+                                    } else {
+                                        currentUri = file.uri
+                                        stage = GalleryStage.SINGLE
+                                        resetTransform()
+                                    }
                                 },
+                                onLongClick = { imageActionUri = file.uri },
+                            ),
                         ) {
                             Box(
                                 modifier = Modifier
@@ -1723,16 +2077,25 @@ private fun ImageViewerScreen(
                                 if (thumbnail != null) {
                                     Image(
                                         bitmap = thumbnail,
-                                        contentDescription = file.name ?: "Thumbnail",
+                                        contentDescription = file.name,
                                         contentScale = ContentScale.Crop,
                                         modifier = Modifier.fillMaxSize(),
                                     )
                                 } else {
                                     Icon(Icons.Filled.Image, contentDescription = null)
                                 }
+                                if (selectionMode) {
+                                    RadioButton(
+                                        selected = picked,
+                                        onClick = {
+                                            selectedImages = if (picked) selectedImages - file.uri else selectedImages + file.uri
+                                        },
+                                        modifier = Modifier.align(Alignment.TopStart),
+                                    )
+                                }
                             }
                             Text(
-                                text = file.name ?: "Image",
+                                text = file.name,
                                 style = MaterialTheme.typography.labelSmall,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
@@ -1740,6 +2103,20 @@ private fun ImageViewerScreen(
                             )
                         }
                     }
+                }
+
+                // Thumbnail modes keep the zoom controls out of the toolbar, tucked into the corner.
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(6.dp)
+                        .clip(RoundedCornerShape(topStart = 14.dp))
+                        .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.85f))
+                        .padding(horizontal = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    GalleryAction(Icons.Filled.ZoomOut, "Zoom out") { zoomOut() }
+                    GalleryAction(Icons.Filled.ZoomIn, "Zoom in") { zoomIn() }
                 }
             }
 
@@ -1756,6 +2133,15 @@ private fun ImageViewerScreen(
                 }
             }
 
+            if (showExif) {
+                ImageInfoDialog(
+                    activity = activity,
+                    entry = currentDoc,
+                    uri = currentUri,
+                    onDismiss = { showExif = false },
+                )
+            }
+
             if (imageActionUri != null) {
                 AlertDialog(
                     onDismissRequest = { imageActionUri = null },
@@ -1763,34 +2149,23 @@ private fun ImageViewerScreen(
                     text = {
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Button(onClick = {
-                                openFileWithDefaultApp(activity, imageActionUri!!)
+                                launchExternalApp(activity, imageActionUri!!, null)
                                 imageActionUri = null
                             }) { Text("Open in external app") }
                             Button(onClick = {
-                                activity.startActivity(
-                                    Intent.createChooser(
-                                        Intent(Intent.ACTION_EDIT, imageActionUri!!).apply {
-                                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                        },
-                                        "Edit image",
-                                    ),
+                                launchExternalApp(
+                                    activity,
+                                    imageActionUri!!,
+                                    null,
+                                    action = Intent.ACTION_EDIT,
+                                    title = "Edit image",
                                 )
                                 imageActionUri = null
                             }) { Text("Edit in external editor") }
                             Button(onClick = {
                                 val target = imageActionUri ?: return@Button
-                                getDocumentFile(activity, target)?.delete()
                                 imageActionUri = null
-                                val remaining = images.filterNot { it.uri == target }
-                                if (remaining.isEmpty()) {
-                                    onClose()
-                                } else {
-                                    if (currentUri == target) {
-                                        val index = images.indexOfFirst { it.uri == target }
-                                        currentUri = remaining[index.coerceIn(0, remaining.lastIndex)].uri
-                                    }
-                                    listingRefresh += 1
-                                }
+                                pendingGalleryDelete = setOf(target)
                             }) { Text("Delete") }
                         }
                     },
@@ -1799,6 +2174,61 @@ private fun ImageViewerScreen(
                     },
                 )
             }
+
+            if (pendingGalleryDelete != null) {
+                ConfirmDeleteDialog(
+                    count = pendingGalleryDelete!!.size,
+                    onDismiss = { pendingGalleryDelete = null },
+                    onConfirm = {
+                        val targets = pendingGalleryDelete!!
+                        pendingGalleryDelete = null
+                        deleteImages(targets)
+                    },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun GalleryAction(
+    icon: ImageVector,
+    description: String,
+    tint: Color = LocalContentColor.current,
+    onClick: () -> Unit,
+) {
+    IconButton(onClick = onClick, modifier = Modifier.size(30.dp)) {
+        Icon(icon, contentDescription = description, tint = tint, modifier = Modifier.size(17.dp))
+    }
+}
+
+/**
+ * Zoom, pan and swipe share one detector; separate ones would fight over consuming the same drag.
+ * [onSwipe] gets -1 for the previous image and +1 for the next.
+ */
+private suspend fun PointerInputScope.detectImageGestures(
+    currentScale: () -> Float,
+    onTransform: (pan: Offset, zoom: Float) -> Unit,
+    onSwipe: (Int) -> Unit,
+) {
+    val swipeThreshold = viewConfiguration.touchSlop * 6f
+    awaitEachGesture {
+        awaitFirstDown(requireUnconsumed = false)
+        var travel = Offset.Zero
+        var pinched = false
+        do {
+            val event = awaitPointerEvent()
+            val zoom = event.calculateZoom()
+            val pan = event.calculatePan()
+            if (zoom != 1f) pinched = true
+            if (zoom != 1f || pan != Offset.Zero) onTransform(pan, zoom)
+            travel += pan
+            event.changes.forEach { if (it.positionChanged()) it.consume() }
+        } while (event.changes.any { it.pressed })
+
+        val horizontal = abs(travel.x) > abs(travel.y) && abs(travel.x) > swipeThreshold
+        if (!pinched && currentScale() <= 1.02f && horizontal) {
+            onSwipe(if (travel.x < 0) 1 else -1)
         }
     }
 }
@@ -1810,6 +2240,23 @@ private fun loadBitmap(
     height: Int = 0,
     lowQuality: Boolean = false,
 ): ImageBitmap? {
+    // Remote bytes are pulled once and decoded from memory; a second stream would re-download.
+    if (DriveUris.isDrive(uri)) {
+        val bytes = runCatching { Storage.openInput(activity, uri)?.use { it.readBytes() } }.getOrNull() ?: return null
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        val opts = BitmapFactory.Options().apply {
+            inSampleSize = computeInSampleSize(
+                bounds.outWidth,
+                bounds.outHeight,
+                if (width > 0) width else bounds.outWidth,
+                if (height > 0) height else bounds.outHeight,
+            )
+            if (lowQuality) inPreferredConfig = Bitmap.Config.RGB_565
+        }
+        return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)?.asImageBitmap()
+    }
+
     val resolver = activity.contentResolver
     val exportType = if (isVirtualDocument(resolver, uri)) exportMimeType(resolver, uri) else null
     return openDocumentStream(resolver, uri, exportType)?.use { input ->
@@ -1892,23 +2339,25 @@ private fun DirectoryPane(
     onNavigate: (Uri) -> Unit,
     onOpenFile: (Uri) -> Unit,
     onOpenWith: (Uri) -> Unit,
+    onShowProperties: (Uri) -> Unit,
     onMoveUp: () -> Unit,
     onSelectionChange: (Set<Uri>) -> Unit,
     showHiddenFiles: Boolean,
     showTrashFiles: Boolean,
+    sortOptions: SortOptions,
 ) {
     val context = LocalContext.current
     val currentUri = state.current ?: state.root
-    val listing by produceState<DirectoryListing?>(initialValue = null, currentUri, state.refreshKey, showHiddenFiles, showTrashFiles) {
+    val listing by produceState<DirectoryListing?>(initialValue = null, currentUri, state.refreshKey, showHiddenFiles, showTrashFiles, sortOptions) {
         value = currentUri?.let { uri ->
             withContext(Dispatchers.IO) {
-                val dir = getDocumentFile(context, uri)
                 DirectoryListing(
-                    name = dir?.name,
-                    files = (dir?.listFiles()?.filter { file -> shouldDisplayDocument(file, showHiddenFiles, showTrashFiles) }
-                        ?.sortedWith(
-                            compareByDescending<DocumentFile> { it.isDirectory }.thenBy { it.name ?: "" },
-                        ) ?: emptyList()),
+                    name = Storage.entry(context, uri)?.name,
+                    files = sortEntries(
+                        Storage.children(context, uri)
+                            .filter { file -> shouldDisplayDocument(file, showHiddenFiles, showTrashFiles) },
+                        sortOptions,
+                    ),
                 )
             }
         }
@@ -1918,7 +2367,7 @@ private fun DirectoryPane(
 
     Column(modifier = modifier.clickable(onClick = onActivate).fillMaxHeight()) {
         FlowRow(
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 10.dp),
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Text(
@@ -1927,17 +2376,19 @@ private fun DirectoryPane(
                 color = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
             )
             if (state.root != null && currentUri != null && currentUri != state.root) {
-                AssistChip(onClick = onMoveUp, label = { Text("Up") })
+                AssistChip(onClick = onMoveUp, label = { Text("cd ..", fontSize = 12.sp) })
             }
         }
 
-        Text(
-            text = listing?.name ?: "No folder selected",
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            style = MaterialTheme.typography.labelMedium,
-        )
+        listing?.name?.let { folderName ->
+            Text(
+                text = folderName,
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.labelMedium,
+            )
+        }
 
         if (isLoading) {
             Box(
@@ -1952,19 +2403,6 @@ private fun DirectoryPane(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-        } else if (files.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(16.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = "This folder is empty",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
         } else {
             LazyColumn(Modifier.fillMaxSize()) {
                 items(files, key = { it.uri }) { file ->
@@ -1973,8 +2411,8 @@ private fun DirectoryPane(
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 8.dp, vertical = 4.dp)
-                            .clip(RoundedCornerShape(12.dp))
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                            .clip(RoundedCornerShape(8.dp))
                             .background(if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant)
                             .combinedClickable(
                                 onClick = {
@@ -1994,19 +2432,19 @@ private fun DirectoryPane(
                                     onSelectionChange(setOf(file.uri))
                                 },
                             )
-                            .padding(horizontal = 12.dp, vertical = 12.dp),
+                            .padding(horizontal = 8.dp, vertical = 5.dp),
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(
                                 imageVector = icon,
                                 contentDescription = if (file.isDirectory) "Folder" else "File",
-                                modifier = Modifier.size(22.dp),
+                                modifier = Modifier.size(15.dp),
                                 tint = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                             Text(
-                                text = file.name ?: "Unnamed",
+                                text = file.name,
                                 modifier = Modifier
-                                    .padding(start = 10.dp)
+                                    .padding(start = 6.dp)
                                     .combinedClickable(
                                         onClick = {
                                             onActivate()
@@ -2014,10 +2452,12 @@ private fun DirectoryPane(
                                         },
                                         onLongClick = {
                                             onActivate()
-                                            if (file.isDirectory) onNavigate(file.uri) else onOpenWith(file.uri)
+                                            if (file.isDirectory) onShowProperties(file.uri) else onOpenWith(file.uri)
                                         },
                                     ),
                                 color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
+                                fontSize = 12.sp,
+                                lineHeight = 15.sp,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
