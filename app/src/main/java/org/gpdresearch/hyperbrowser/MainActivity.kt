@@ -391,8 +391,11 @@ private fun HyperBrowserApp() {
 
     fun runTransfer(request: TransferRequest) {
         scope.launch {
-            withContext(Dispatchers.IO) { executeTransfer(activity, request) }
+            val failures = withContext(Dispatchers.IO) { executeTransfer(activity, request) }
             refreshPanesAfterWrite()
+            if (failures > 0) {
+                Toast.makeText(activity, failureMessage(failures, "transferred"), Toast.LENGTH_LONG).show()
+            }
         }
     }
 
@@ -451,7 +454,11 @@ private fun HyperBrowserApp() {
         }
     }
 
-    val runtimePermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {}
+    val runtimePermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
+        if (grants.values.any { granted -> !granted }) {
+            Toast.makeText(activity, "Storage permission denied; some folders will look empty", Toast.LENGTH_LONG).show()
+        }
+    }
 
     LaunchedEffect(leftPane.root, leftPane.current, rightPane.root, rightPane.current) {
         savePaneState(prefs, PANE_LEFT, leftPane)
@@ -537,7 +544,25 @@ private fun HyperBrowserApp() {
                                         openGallery(image, sourceState.current)
                                     }
                                 },
-                                onSelectMulti = { activePane = sourcePane },
+                                onSelectAll = {
+                                    val pane = if (activePane == Pane.LEFT) leftPane else rightPane
+                                    val directory = pane.current ?: pane.root
+                                    if (directory != null) {
+                                        scope.launch {
+                                            val everything = withContext(Dispatchers.IO) {
+                                                Storage.children(activity, directory)
+                                                    .filter { shouldDisplayDocument(it, fileDisplayOptions.showHiddenFiles, fileDisplayOptions.showTrashFiles) }
+                                                    .map { it.uri }
+                                                    .toSet()
+                                            }
+                                            if (activePane == Pane.LEFT) {
+                                                leftPane = leftPane.copy(selected = everything)
+                                            } else {
+                                                rightPane = rightPane.copy(selected = everything)
+                                            }
+                                        }
+                                    }
+                                },
                                 selectionActive = leftPane.selected.isNotEmpty() || rightPane.selected.isNotEmpty(),
                                 onDeselect = {
                                     leftPane = leftPane.copy(selected = emptySet())
@@ -547,7 +572,6 @@ private fun HyperBrowserApp() {
                             )
 
                             DirectoryPane(
-                                title = "",
                                 state = leftPane,
                                 isActive = activePane == Pane.LEFT,
                                 modifier = Modifier.weight(if (layoutMode == LayoutMode.TABLET_WIDE) 1.6f else if (layoutMode == LayoutMode.TABLET_BALANCED) 1.2f else 1f),
@@ -570,7 +594,6 @@ private fun HyperBrowserApp() {
                             )
 
                             DirectoryPane(
-                                title = "",
                                 state = rightPane,
                                 isActive = activePane == Pane.RIGHT,
                                 modifier = Modifier.weight(if (layoutMode == LayoutMode.TABLET_WIDE) 1.6f else if (layoutMode == LayoutMode.TABLET_BALANCED) 1.2f else 1f),
@@ -673,8 +696,11 @@ private fun HyperBrowserApp() {
                 val items = pendingDelete!!
                 pendingDelete = null
                 scope.launch {
-                    withContext(Dispatchers.IO) { deleteItems(activity, items) }
+                    val failures = withContext(Dispatchers.IO) { deleteItems(activity, items) }
                     refreshPanesAfterWrite()
+                    if (failures > 0) {
+                        Toast.makeText(activity, failureMessage(failures, "deleted"), Toast.LENGTH_LONG).show()
+                    }
                 }
             },
         )
@@ -888,23 +914,29 @@ private fun isRemoteOrRemovableUri(uri: Uri): Boolean {
     return !documentId.startsWith("primary:")
 }
 
-private fun executeTransfer(activity: ComponentActivity, request: TransferRequest) {
+private fun executeTransfer(activity: ComponentActivity, request: TransferRequest): Int {
     val copyMode = request.mode == TransferMode.COPY
     val takenNames = Storage.childNames(activity, request.targetDir)
+    var failures = 0
     if (request.wholeDirectory) {
-        val source = Storage.entry(activity, request.sourceDir) ?: return
-        transferEntry(activity, source, request.targetDir, takenNames, copyMode)
-        return
+        val source = Storage.entry(activity, request.sourceDir) ?: return 1
+        if (!transferEntry(activity, source, request.targetDir, takenNames, copyMode)) failures += 1
+        return failures
     }
     request.selected.forEach { uri ->
-        val source = Storage.entry(activity, uri) ?: return@forEach
-        transferEntry(activity, source, request.targetDir, takenNames, copyMode)
+        val source = Storage.entry(activity, uri)
+        if (source == null || !transferEntry(activity, source, request.targetDir, takenNames, copyMode)) {
+            failures += 1
+        }
     }
+    return failures
 }
 
-private fun deleteItems(activity: ComponentActivity, uris: Set<Uri>) {
-    uris.forEach { uri -> Storage.delete(activity, uri) }
-}
+private fun deleteItems(activity: ComponentActivity, uris: Set<Uri>): Int =
+    uris.count { uri -> !Storage.delete(activity, uri) }
+
+private fun failureMessage(count: Int, verb: String): String =
+    if (count == 1) "1 item could not be $verb" else "$count items could not be $verb"
 
 /** [takenNames] is threaded through so a batch transfer does not re-list the destination per item. */
 private fun transferEntry(
@@ -1137,7 +1169,7 @@ private fun CommandStrip(
     onMove: () -> Unit,
     onDelete: () -> Unit,
     onGallery: () -> Unit,
-    onSelectMulti: () -> Unit,
+    onSelectAll: () -> Unit,
     selectionActive: Boolean,
     onDeselect: () -> Unit,
     onOpenSettings: () -> Unit,
@@ -1162,7 +1194,7 @@ private fun CommandStrip(
         CommandButton(label = "Move", icon = Icons.AutoMirrored.Filled.DriveFileMove, onClick = onMove)
         CommandButton(label = "Delete", icon = Icons.Filled.Delete, onClick = onDelete)
         CommandButton(label = "Gallery", icon = Icons.Filled.Image, onClick = onGallery)
-        CommandButton(label = "Multi", icon = Icons.Filled.SelectAll, onClick = onSelectMulti)
+        CommandButton(label = "All", icon = Icons.Filled.SelectAll, onClick = onSelectAll)
         if (selectionActive) {
             CommandButton(label = "Deselect", icon = Icons.Filled.Deselect, onClick = onDeselect)
         }
@@ -1181,8 +1213,9 @@ private fun CommandButton(
     Column(
         modifier = Modifier
             .clickable(enabled = enabled, onClick = onClick)
-            .padding(6.dp)
-            .size(width = 88.dp, height = 76.dp),
+            .fillMaxWidth()
+            .height(76.dp)
+            .padding(4.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
@@ -2418,7 +2451,6 @@ private fun computeInSampleSize(srcWidth: Int, srcHeight: Int, targetWidth: Int,
 @OptIn(ExperimentalFoundationApi::class, ExperimentalLayoutApi::class)
 @Composable
 private fun DirectoryPane(
-    title: String,
     state: BrowserPaneState,
     isActive: Boolean,
     modifier: Modifier = Modifier,
@@ -2453,16 +2485,21 @@ private fun DirectoryPane(
     val files = listing?.files ?: emptyList()
     val isLoading = currentUri != null && listing == null
 
-    Column(modifier = modifier.clickable(onClick = onActivate).fillMaxHeight()) {
+    Column(
+        modifier = modifier
+            .fillMaxHeight()
+            .padding(2.dp)
+            .border(
+                width = 2.dp,
+                color = if (isActive) MaterialTheme.colorScheme.primary else Color.Transparent,
+                shape = RoundedCornerShape(8.dp),
+            )
+            .clickable(onClick = onActivate),
+    ) {
         FlowRow(
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            Text(
-                title,
-                style = MaterialTheme.typography.titleSmall,
-                color = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
-            )
             if (state.root != null && currentUri != null && currentUri != state.root) {
                 AssistChip(onClick = onMoveUp, label = { Text("cd ..", fontSize = 12.sp) })
             }
