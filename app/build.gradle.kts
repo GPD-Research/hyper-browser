@@ -29,6 +29,17 @@ android {
         versionName = "0.1.0"
     }
 
+    buildTypes {
+        debug {
+            signingConfig = android.signingConfigs.findByName("debug")?.apply {
+                storeFile = file(System.getProperty("user.home") + "/.android/debug.keystore")
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
+        }
+    }
+
     packaging {
         resources.excludes += setOf(
             "META-INF/DEPENDENCIES",

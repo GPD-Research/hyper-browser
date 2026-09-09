@@ -95,19 +95,37 @@ object Storage {
     }
 
     fun writeChild(context: Context, parentUri: Uri, name: String, mimeType: String, input: InputStream): Boolean {
+        android.util.Log.d("Storage", "writeChild: parentUri=$parentUri, name=$name, mimeType=$mimeType")
         if (DriveUris.isDrive(parentUri)) {
+            android.util.Log.d("Storage", "Writing to Drive")
             return DriveClient.upload(DriveUris.idOf(parentUri), name, mimeType, input)
         }
-        val targetDir = documentFile(context, parentUri) ?: return false
-        val destination = targetDir.createFile(mimeType, name) ?: return false
+        android.util.Log.d("Storage", "Writing to local storage")
+        val targetDir = documentFile(context, parentUri) ?: run {
+            android.util.Log.e("Storage", "Failed to get target directory for $parentUri")
+            return false
+        }
+        android.util.Log.d("Storage", "Target directory obtained: ${targetDir.uri}")
+        val destination = targetDir.createFile(mimeType, name) ?: run {
+            android.util.Log.e("Storage", "Failed to create file $name with mime type $mimeType")
+            return false
+        }
+        android.util.Log.d("Storage", "File created: ${destination.uri}")
         val written = runCatching {
             context.contentResolver.openOutputStream(destination.uri)?.use { output ->
-                input.copyTo(output)
+                val bytesCopied = input.copyTo(output)
+                android.util.Log.d("Storage", "Copied $bytesCopied bytes")
                 output.flush()
                 true
             }
+        }.onFailure { error ->
+            android.util.Log.e("Storage", "Failed to write to ${destination.uri}", error)
         }.getOrNull() == true
-        if (!written) destination.delete()
+        if (!written) {
+            android.util.Log.e("Storage", "Write failed, deleting destination")
+            destination.delete()
+        }
+        android.util.Log.d("Storage", "Write result: $written")
         return written
     }
 

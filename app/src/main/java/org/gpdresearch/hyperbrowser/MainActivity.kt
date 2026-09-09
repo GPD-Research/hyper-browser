@@ -307,12 +307,6 @@ private data class SelectionInfo(
     val details: String,
 )
 
-private data class ClipboardEntry(
-    val sourceDir: Uri,
-    val items: Set<Uri>,
-    val mode: TransferMode,
-)
-
 private data class StorageRoot(
     val label: String,
     val directory: File,
@@ -351,7 +345,6 @@ private fun HyperBrowserApp() {
     var showSortSettings by remember { mutableStateOf(false) }
     var selectionPreviewVisible by remember { mutableStateOf(true) }
     var selectionPreviewOffset by remember { mutableStateOf(Offset.Zero) }
-    var clipboard by remember { mutableStateOf<ClipboardEntry?>(null) }
 
     var showLeftPicker by remember { mutableStateOf(false) }
     var showRightPicker by remember { mutableStateOf(false) }
@@ -400,36 +393,26 @@ private fun HyperBrowserApp() {
         }
     }
 
-    fun stageClipboard(mode: TransferMode, source: BrowserPaneState) {
-        val sourceDir = source.current ?: source.root ?: return
-        clipboard = ClipboardEntry(sourceDir = sourceDir, items = source.selected, mode = mode)
-    }
-
     fun startOperation(mode: TransferMode, source: BrowserPaneState, target: BrowserPaneState) {
         scope.launch {
             when (val plan = withContext(Dispatchers.IO) { planTransfer(activity, source, target, mode) }) {
-                TransferPlan.Staged -> stageClipboard(mode, source)
+                TransferPlan.Staged -> {
+                    val sourceDir = source.current ?: source.root ?: return@launch
+                    val targetDir = target.current ?: target.root ?: return@launch
+                    val request = TransferRequest(
+                        sourceDir = sourceDir,
+                        targetDir = targetDir,
+                        selected = source.selected,
+                        wholeDirectory = source.selected.isEmpty(),
+                        mode = mode,
+                    )
+                    if (request.wholeDirectory) pendingRequest = request else runTransfer(request)
+                }
                 TransferPlan.ReverseSuggested -> reversePrompt = mode
                 is TransferPlan.FolderIntoFolder -> pendingFolderTransfer = plan.prompt
                 is TransferPlan.FilesIntoFolder -> pendingFilesTransfer = plan.prompt
             }
         }
-    }
-
-    fun pasteClipboard() {
-        val entry = clipboard ?: return
-        val activeState = if (activePane == Pane.LEFT) leftPane else rightPane
-        val targetDir = activeState.current ?: activeState.root ?: return
-        clipboard = null
-        val request = TransferRequest(
-            sourceDir = entry.sourceDir,
-            targetDir = targetDir,
-            selected = entry.items,
-            wholeDirectory = entry.items.isEmpty(),
-            mode = entry.mode,
-        )
-        // Pasting with nothing selected transfers the whole folder, so make it explicit.
-        if (request.wholeDirectory) pendingRequest = request else runTransfer(request)
     }
 
     fun openGallery(uri: Uri, directory: Uri?) {
@@ -529,9 +512,7 @@ private fun HyperBrowserApp() {
                         ) {
                             CommandStrip(
                                 layoutMode = layoutMode,
-                                pasteEnabled = clipboard != null,
                                 onCopy = { startOperation(TransferMode.COPY, sourceState, destinationState) },
-                                onPaste = { pasteClipboard() },
                                 onMove = { startOperation(TransferMode.MOVE, sourceState, destinationState) },
                                 onDelete = {
                                     val items = sourceState.selected.ifEmpty { setOfNotNull(sourceState.current) }
@@ -574,9 +555,13 @@ private fun HyperBrowserApp() {
                                 onOpenWith = { uri -> openWith(uri) },
                                 onShowProperties = { uri -> propertiesUri = uri },
                                 onMoveUp = {
-                                    val parent = leftPane.current?.let { Storage.parent(activity, it) }
-                                    if (parent != null) {
-                                        leftPane = leftPane.copy(current = parent, selected = emptySet())
+                                    scope.launch {
+                                        val parent = withContext(Dispatchers.IO) {
+                                            leftPane.current?.let { Storage.parent(activity, it) }
+                                        }
+                                        if (parent != null) {
+                                            leftPane = leftPane.copy(current = parent, selected = emptySet())
+                                        }
                                     }
                                 },
                                 onSelectionChange = { selectedSet -> leftPane = leftPane.copy(selected = selectedSet) },
@@ -597,9 +582,13 @@ private fun HyperBrowserApp() {
                                 onOpenWith = { uri -> openWith(uri) },
                                 onShowProperties = { uri -> propertiesUri = uri },
                                 onMoveUp = {
-                                    val parent = rightPane.current?.let { Storage.parent(activity, it) }
-                                    if (parent != null) {
-                                        rightPane = rightPane.copy(current = parent, selected = emptySet())
+                                    scope.launch {
+                                        val parent = withContext(Dispatchers.IO) {
+                                            rightPane.current?.let { Storage.parent(activity, it) }
+                                        }
+                                        if (parent != null) {
+                                            rightPane = rightPane.copy(current = parent, selected = emptySet())
+                                        }
                                     }
                                 },
                                 onSelectionChange = { selectedSet -> rightPane = rightPane.copy(selected = selectedSet) },
@@ -1158,9 +1147,7 @@ private fun PreviewDetailPane(
 @Composable
 private fun CommandStrip(
     layoutMode: LayoutMode,
-    pasteEnabled: Boolean,
     onCopy: () -> Unit,
-    onPaste: () -> Unit,
     onMove: () -> Unit,
     onDelete: () -> Unit,
     onGallery: () -> Unit,
@@ -1186,7 +1173,6 @@ private fun CommandStrip(
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         CommandButton(label = "Copy", icon = Icons.Filled.ContentCopy, onClick = onCopy)
-        CommandButton(label = "Paste", icon = Icons.Filled.ContentPaste, onClick = onPaste, enabled = pasteEnabled)
         CommandButton(label = "Move", icon = Icons.AutoMirrored.Filled.DriveFileMove, onClick = onMove)
         CommandButton(label = "Delete", icon = Icons.Filled.Delete, onClick = onDelete)
         CommandButton(label = "Gallery", icon = Icons.Filled.Image, onClick = onGallery)
@@ -1504,13 +1490,21 @@ private fun FolderPickerDialog(
     }
 
     val driveSignInLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-        val account = runCatching {
+        val accountResult = runCatching {
             GoogleSignIn.getSignedInAccountFromIntent(result.data).getResult(ApiException::class.java)
-        }.getOrNull()
+        }
+        val account = accountResult.getOrNull()
         if (account != null && DriveAuth.hasDriveScope(account)) {
             connectDrive(account)
         } else {
-            driveMessage = "Drive sign-in was cancelled or the Drive permission was declined."
+            val error = accountResult.exceptionOrNull()
+            if (error is ApiException) {
+                android.util.Log.e("DriveSignIn", "ApiException code: ${error.statusCode}, message: ${error.message}")
+                driveMessage = "Drive sign-in failed (code ${error.statusCode}): ${error.message}"
+            } else {
+                android.util.Log.e("DriveSignIn", "Sign-in error: ${error?.message}", error)
+                driveMessage = "Drive sign-in was cancelled or the Drive permission was declined."
+            }
         }
     }
 
@@ -1596,7 +1590,13 @@ private fun FolderPickerDialog(
                         if (currentUri != rootUri) {
                             item {
                                 TextButton(
-                                    onClick = { currentUri = currentUri?.let { Storage.parent(context, it) } ?: rootUri },
+                                    onClick = {
+                                        scope.launch {
+                                            currentUri = withContext(Dispatchers.IO) {
+                                                currentUri?.let { Storage.parent(context, it) }
+                                            } ?: rootUri
+                                        }
+                                    },
                                     modifier = Modifier.fillMaxWidth()
                                 ) {
                                     Text(".. [Up to parent]")

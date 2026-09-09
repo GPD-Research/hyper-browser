@@ -4,6 +4,7 @@ import android.accounts.Account
 import android.app.Activity
 import android.content.Context
 import android.net.Uri
+import android.util.Log
 import android.webkit.MimeTypeMap
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.auth.api.signin.GoogleSignInAccount
@@ -11,6 +12,7 @@ import com.google.android.gms.auth.api.signin.GoogleSignInClient
 import com.google.android.gms.auth.api.signin.GoogleSignInOptions
 import com.google.android.gms.common.api.Scope
 import com.google.api.client.googleapis.extensions.android.gms.auth.GoogleAccountCredential
+import com.google.api.client.googleapis.json.GoogleJsonResponseException
 import com.google.api.client.http.InputStreamContent
 import com.google.api.client.http.javanet.NetHttpTransport
 import com.google.api.client.json.gson.GsonFactory
@@ -71,12 +73,24 @@ object DriveClient {
         get() = service != null
 
     fun connect(context: Context, account: Account, displayName: String?) {
+        Log.d("DriveClient", "Connecting to Drive with account: ${account.name}")
         val credential = GoogleAccountCredential.usingOAuth2(context, listOf(DriveScopes.DRIVE))
         credential.selectedAccount = account
+        Log.d("DriveClient", "Credential selected account: ${credential.selectedAccount}")
+        Log.d("DriveClient", "Credential scope: ${credential.scope}")
+        // Force token refresh to ensure we have the Drive scope
+        Log.d("DriveClient", "Requesting token refresh...")
+        try {
+            credential.token
+            Log.d("DriveClient", "Token obtained successfully")
+        } catch (e: Exception) {
+            Log.e("DriveClient", "Failed to obtain token", e)
+        }
         service = Drive.Builder(NetHttpTransport(), GsonFactory.getDefaultInstance(), credential)
             .setApplicationName("Hyper Browser")
             .build()
         accountName = displayName ?: account.name
+        Log.d("DriveClient", "Drive service created successfully")
     }
 
     fun disconnect() {
@@ -99,7 +113,15 @@ object DriveClient {
                     .setIncludeItemsFromAllDrives(true)
                     .setPageToken(pageToken)
                     .execute()
+            }.onFailure { error ->
+                Log.e("DriveClient", "Failed to list children for folder $folderId", error)
+                if (error is GoogleJsonResponseException) {
+                    Log.e("DriveClient", "Error details: ${error.details}")
+                    Log.e("DriveClient", "Error status code: ${error.statusCode}")
+                    Log.e("DriveClient", "Error message: ${error.message}")
+                }
             }.getOrNull() ?: return results
+            Log.d("DriveClient", "Found ${page.files?.size ?: 0} files in folder $folderId")
             page.files?.forEach { results += it.toEntry() }
             pageToken = page.nextPageToken
         } while (pageToken != null)
@@ -119,8 +141,14 @@ object DriveClient {
     fun parentId(fileId: String): String? {
         val drive = service ?: return null
         if (fileId == DriveUris.ROOT_ID) return null
+        Log.d("DriveClient", "Getting parent for file: $fileId")
         return runCatching {
-            drive.files().get(fileId).setFields("parents").setSupportsAllDrives(true).execute().parents?.firstOrNull()
+            val file = drive.files().get(fileId).setFields("parents").setSupportsAllDrives(true).execute()
+            val parents = file.parents
+            Log.d("DriveClient", "Parents for $fileId: $parents")
+            parents?.firstOrNull()
+        }.onFailure { error ->
+            Log.e("DriveClient", "Failed to get parent for $fileId", error)
         }.getOrNull()
     }
 
@@ -128,15 +156,24 @@ object DriveClient {
     fun read(entry: FileEntry): ReadableContent? {
         val drive = service ?: return null
         val fileId = DriveUris.idOf(entry.uri)
+        Log.d("DriveClient", "Reading file: ${entry.name} (id: $fileId, mimeType: ${entry.mimeType})")
         val nativeType = entry.mimeType?.takeIf { it.startsWith(GOOGLE_NATIVE_PREFIX) }
         return if (nativeType != null) {
+            Log.d("DriveClient", "File is Google-native type: $nativeType")
             val exportType = exportTypeFor(nativeType)
-            val stream = runCatching { drive.files().export(fileId, exportType).executeMediaAsInputStream() }
-                .getOrNull() ?: return null
+            Log.d("DriveClient", "Exporting as: $exportType")
+            val stream = runCatching {
+                drive.files().export(fileId, exportType).executeMediaAsInputStream()
+            }.onFailure { error ->
+                Log.e("DriveClient", "Failed to export Google-native file $fileId", error)
+            }.getOrNull() ?: return null
             ReadableContent(stream, exportType, withExportExtension(entry.name, exportType))
         } else {
+            Log.d("DriveClient", "File is regular type, downloading directly")
             val stream = runCatching {
                 drive.files().get(fileId).setSupportsAllDrives(true).executeMediaAsInputStream()
+            }.onFailure { error ->
+                Log.e("DriveClient", "Failed to download file $fileId", error)
             }.getOrNull() ?: return null
             ReadableContent(stream, entry.mimeType ?: "application/octet-stream", entry.name)
         }
