@@ -16,6 +16,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.gestures.detectTransformGestures
@@ -24,6 +26,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -58,6 +61,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -81,6 +85,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import kotlin.math.roundToInt
 import androidx.documentfile.provider.DocumentFile
 import kotlinx.coroutines.Dispatchers
@@ -249,20 +254,10 @@ private fun HyperBrowserApp() {
                     onReverse = {
                         transferDirection = if (transferDirection == TransferDirection.LEFT_TO_RIGHT) TransferDirection.RIGHT_TO_LEFT else TransferDirection.LEFT_TO_RIGHT
                     },
-                    onCopy = { executeTransferNow(TransferMode.COPY) },
-                    onMove = { enqueueTransfer(TransferMode.MOVE) },
                     onChooseLeftRoot = { leftPicker.launch(null) },
                     onChooseRightRoot = { rightPicker.launch(null) },
                     sourceLabel = sourceLabel,
                     destinationLabel = destinationLabel,
-                )
-
-                PreviewDetailPane(
-                    info = selectionInfo,
-                    selectedFile = selectedFile,
-                    isImage = isImageSelected,
-                    onOpen = { selectedFile?.let { openFileWithDefaultApp(activity, it) } },
-                    onView = { selectedFile?.let { if (isImageSelected) galleryUri = it } },
                 )
 
                 if (galleryUri != null) {
@@ -272,94 +267,104 @@ private fun HyperBrowserApp() {
                         onClose = { galleryUri = null },
                     )
                 } else {
-                    Row(
-                        modifier = Modifier.fillMaxSize(),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        CommandStrip(
-                            layoutMode = layoutMode,
-                            onCopy = { executeTransferNow(TransferMode.COPY) },
-                            onPaste = {},
-                            onMove = {
-                                val items = sourceState.selected.ifEmpty { setOfNotNull(sourceState.current) }
-                                if (items.isNotEmpty()) {
-                                    enqueueTransfer(TransferMode.MOVE, items)
-                                }
-                            },
-                            onDelete = {
-                                val items = sourceState.selected.ifEmpty { setOfNotNull(sourceState.current) }
-                                if (items.isNotEmpty()) {
-                                    pendingDelete = items
-                                }
-                            },
-                            onGallery = {
-                                val image = selectedFile?.takeIf { isImageSelected }
-                                if (image != null) {
-                                    galleryUri = image
-                                }
-                            },
-                            onSelectMulti = { activePane = sourcePane },
-                            onOpenSettings = { showLayoutSettings = true },
-                        )
+                    Box(modifier = Modifier.weight(1f)) {
+                        Row(
+                            modifier = Modifier.fillMaxSize(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            CommandStrip(
+                                layoutMode = layoutMode,
+                                onCopy = { executeTransferNow(TransferMode.COPY) },
+                                onPaste = {},
+                                onMove = {
+                                    val items = sourceState.selected.ifEmpty { setOfNotNull(sourceState.current) }
+                                    if (items.isNotEmpty()) {
+                                        enqueueTransfer(TransferMode.MOVE, items)
+                                    }
+                                },
+                                onDelete = {
+                                    val items = sourceState.selected.ifEmpty { setOfNotNull(sourceState.current) }
+                                    if (items.isNotEmpty()) {
+                                        pendingDelete = items
+                                    }
+                                },
+                                onGallery = {
+                                    val image = selectedFile?.takeIf { isImageSelected }
+                                    if (image != null) {
+                                        galleryUri = image
+                                    }
+                                },
+                                onSelectMulti = { activePane = sourcePane },
+                                onOpenSettings = { showLayoutSettings = true },
+                            )
 
-                        DirectoryPane(
-                            title = "",
-                            state = leftPane,
-                            isActive = activePane == Pane.LEFT,
-                            modifier = Modifier.weight(if (layoutMode == LayoutMode.TABLET_WIDE) 1.6f else if (layoutMode == LayoutMode.TABLET_BALANCED) 1.2f else 1f),
-                            onActivate = { activePane = Pane.LEFT },
-                            onChooseRoot = { leftPicker.launch(null) },
-                            onNavigate = { directory -> leftPane = leftPane.copy(current = directory, selected = emptySet()) },
-                            onOpenFile = { uri -> handleFileDoubleTap(uri) },
-                            onMoveUp = {
-                                val currentDoc = leftPane.current?.let { DocumentFile.fromTreeUri(activity, it) }
-                                val parent = currentDoc?.parentFile
-                                if (parent != null) {
-                                    leftPane = leftPane.copy(current = parent.uri, selected = emptySet())
-                                }
-                            },
-                            onSelectionChange = { selectedSet -> leftPane = leftPane.copy(selected = selectedSet) },
-                            onImageLongPress = { uri -> galleryUri = uri },
-                            showHiddenFiles = fileDisplayOptions.showHiddenFiles,
-                            showTrashFiles = fileDisplayOptions.showTrashFiles,
-                        )
+                            DirectoryPane(
+                                title = "",
+                                state = leftPane,
+                                isActive = activePane == Pane.LEFT,
+                                modifier = Modifier.weight(if (layoutMode == LayoutMode.TABLET_WIDE) 1.6f else if (layoutMode == LayoutMode.TABLET_BALANCED) 1.2f else 1f),
+                                onActivate = { activePane = Pane.LEFT },
+                                onChooseRoot = { leftPicker.launch(null) },
+                                onNavigate = { directory -> leftPane = leftPane.copy(current = directory, selected = emptySet()) },
+                                onOpenFile = { uri -> handleFileDoubleTap(uri) },
+                                onMoveUp = {
+                                    val currentDoc = leftPane.current?.let { DocumentFile.fromTreeUri(activity, it) }
+                                    val parent = currentDoc?.parentFile
+                                    if (parent != null) {
+                                        leftPane = leftPane.copy(current = parent.uri, selected = emptySet())
+                                    }
+                                },
+                                onSelectionChange = { selectedSet -> leftPane = leftPane.copy(selected = selectedSet) },
+                                onImageLongPress = { uri -> galleryUri = uri },
+                                showHiddenFiles = fileDisplayOptions.showHiddenFiles,
+                                showTrashFiles = fileDisplayOptions.showTrashFiles,
+                            )
 
-                        DirectoryPane(
-                            title = "",
-                            state = rightPane,
-                            isActive = activePane == Pane.RIGHT,
-                            modifier = Modifier.weight(if (layoutMode == LayoutMode.TABLET_WIDE) 1.6f else if (layoutMode == LayoutMode.TABLET_BALANCED) 1.2f else 1f),
-                            onActivate = { activePane = Pane.RIGHT },
-                            onChooseRoot = { rightPicker.launch(null) },
-                            onNavigate = { directory -> rightPane = rightPane.copy(current = directory, selected = emptySet()) },
-                            onOpenFile = { uri -> handleFileDoubleTap(uri) },
-                            onMoveUp = {
-                                val currentDoc = rightPane.current?.let { DocumentFile.fromTreeUri(activity, it) }
-                                val parent = currentDoc?.parentFile
-                                if (parent != null) {
-                                    rightPane = rightPane.copy(current = parent.uri, selected = emptySet())
-                                }
-                            },
-                            onSelectionChange = { selectedSet -> rightPane = rightPane.copy(selected = selectedSet) },
-                            onImageLongPress = { uri -> galleryUri = uri },
-                            showHiddenFiles = fileDisplayOptions.showHiddenFiles,
-                            showTrashFiles = fileDisplayOptions.showTrashFiles,
-                        )
+                            DirectoryPane(
+                                title = "",
+                                state = rightPane,
+                                isActive = activePane == Pane.RIGHT,
+                                modifier = Modifier.weight(if (layoutMode == LayoutMode.TABLET_WIDE) 1.6f else if (layoutMode == LayoutMode.TABLET_BALANCED) 1.2f else 1f),
+                                onActivate = { activePane = Pane.RIGHT },
+                                onChooseRoot = { rightPicker.launch(null) },
+                                onNavigate = { directory -> rightPane = rightPane.copy(current = directory, selected = emptySet()) },
+                                onOpenFile = { uri -> handleFileDoubleTap(uri) },
+                                onMoveUp = {
+                                    val currentDoc = rightPane.current?.let { DocumentFile.fromTreeUri(activity, it) }
+                                    val parent = currentDoc?.parentFile
+                                    if (parent != null) {
+                                        rightPane = rightPane.copy(current = parent.uri, selected = emptySet())
+                                    }
+                                },
+                                onSelectionChange = { selectedSet -> rightPane = rightPane.copy(selected = selectedSet) },
+                                onImageLongPress = { uri -> galleryUri = uri },
+                                showHiddenFiles = fileDisplayOptions.showHiddenFiles,
+                                showTrashFiles = fileDisplayOptions.showTrashFiles,
+                            )
+                        }
+
+                        if (selectedFile != null && isImageSelected && galleryUri == null && selectionPreviewVisible) {
+                            SelectionThumbnail(
+                                activity = activity,
+                                uri = selectedFile,
+                                offset = selectionPreviewOffset,
+                                onOffsetChange = { selectionPreviewOffset = it },
+                                onClose = { selectionPreviewVisible = false },
+                                modifier = Modifier
+                                    .align(Alignment.BottomEnd)
+                                    .padding(12.dp),
+                            )
+                        }
                     }
-                }
-            }
 
-            if (selectedFile != null && isImageSelected && galleryUri == null && selectionPreviewVisible) {
-                SelectionThumbnail(
-                    activity = activity,
-                    uri = selectedFile,
-                    offset = selectionPreviewOffset,
-                    onOffsetChange = { selectionPreviewOffset = it },
-                    onClose = { selectionPreviewVisible = false },
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(12.dp),
-                )
+                    PreviewDetailPane(
+                        info = selectionInfo,
+                        selectedFile = selectedFile,
+                        isImage = isImageSelected,
+                        onOpen = { selectedFile?.let { openFileWithDefaultApp(activity, it) } },
+                        onView = { selectedFile?.let { if (isImageSelected) galleryUri = it } },
+                    )
+                }
             }
             }
         }
@@ -610,43 +615,41 @@ private fun formatBytes(size: Long): String {
 private fun MinimalTransferMenu(
     direction: TransferDirection,
     onReverse: () -> Unit,
-    onCopy: () -> Unit,
-    onMove: () -> Unit,
     onChooseLeftRoot: () -> Unit,
     onChooseRightRoot: () -> Unit,
     sourceLabel: String,
     destinationLabel: String,
 ) {
-    Column(modifier = Modifier.padding(vertical = 4.dp)) {
+    Column(modifier = Modifier.padding(vertical = 2.dp)) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
+                .padding(horizontal = 12.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             AssistChip(
                 onClick = onChooseLeftRoot,
-                label = { Text("Top level") },
-                leadingIcon = { Icon(Icons.Filled.FolderOpen, contentDescription = null, Modifier.size(18.dp)) },
+                label = { Text("Left root", fontSize = 10.sp) },
+                leadingIcon = { Icon(Icons.Filled.FolderOpen, contentDescription = null, Modifier.size(14.dp)) },
                 modifier = Modifier.weight(1f),
             )
 
             IconButton(
                 onClick = onReverse,
-                modifier = Modifier.size(48.dp),
+                modifier = Modifier.size(36.dp),
             ) {
                 Icon(
                     imageVector = if (direction == TransferDirection.LEFT_TO_RIGHT) Icons.AutoMirrored.Filled.ArrowForward else Icons.AutoMirrored.Filled.ArrowBack,
                     contentDescription = "Reverse transfer direction",
-                    modifier = Modifier.size(24.dp),
+                    modifier = Modifier.size(20.dp),
                 )
             }
 
             AssistChip(
                 onClick = onChooseRightRoot,
-                label = { Text("Top level") },
-                leadingIcon = { Icon(Icons.Filled.FolderOpen, contentDescription = null, Modifier.size(18.dp)) },
+                label = { Text("Right root", fontSize = 10.sp) },
+                leadingIcon = { Icon(Icons.Filled.FolderOpen, contentDescription = null, Modifier.size(14.dp)) },
                 modifier = Modifier.weight(1f),
             )
         }
@@ -654,29 +657,14 @@ private fun MinimalTransferMenu(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
+                .padding(horizontal = 12.dp, vertical = 2.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Column(horizontalAlignment = Alignment.Start, modifier = Modifier.weight(1f)) {
-                Text("From", style = MaterialTheme.typography.labelSmall)
-                Text(sourceLabel, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
-
-            Column(horizontalAlignment = Alignment.End, modifier = Modifier.weight(1f)) {
-                Text("To", style = MaterialTheme.typography.labelSmall)
-                Text(destinationLabel, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
-        }
-
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            OutlinedButton(onClick = onCopy, modifier = Modifier.weight(1f)) { Text("Copy files") }
-            OutlinedButton(onClick = onMove, modifier = Modifier.weight(1f)) { Text("Move files") }
+            Text("From:", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary, fontSize = 9.sp)
+            Text(sourceLabel, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, fontSize = 10.sp, modifier = Modifier.weight(1f))
+            Text("To:", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary, fontSize = 9.sp)
+            Text(destinationLabel, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, fontSize = 10.sp, modifier = Modifier.weight(1f), textAlign = TextAlign.End)
         }
     }
 }
@@ -689,23 +677,28 @@ private fun PreviewDetailPane(
     onOpen: () -> Unit,
     onView: () -> Unit,
 ) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 8.dp, vertical = 4.dp),
+    Surface(
+        tonalElevation = 2.dp,
+        modifier = Modifier.fillMaxWidth()
     ) {
-        Text("Preview", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
-        Text(info.title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        Text("${info.kind} · ${info.sizeLabel}", style = MaterialTheme.typography.bodyMedium)
-        Text(info.details, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
-        Text(info.path, style = MaterialTheme.typography.labelSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
-        if (selectedFile != null) {
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.padding(top = 8.dp),
-            ) {
-                Button(onClick = onOpen) { Text("Open file") }
-                Button(onClick = onView, enabled = isImage) { Text("View image") }
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(info.title, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text("${info.kind} · ${info.sizeLabel} · ${info.details}", style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            if (selectedFile != null) {
+                TextButton(onClick = onOpen, contentPadding = PaddingValues(4.dp)) { 
+                    Text("Open", fontSize = 11.sp) 
+                }
+                if (isImage) {
+                    TextButton(onClick = onView, contentPadding = PaddingValues(4.dp)) { 
+                        Text("View", fontSize = 11.sp) 
+                    }
+                }
             }
         }
     }
@@ -723,15 +716,16 @@ private fun CommandStrip(
     onOpenSettings: () -> Unit,
 ) {
     val stripWidth = when (layoutMode) {
-        LayoutMode.PHONE -> 104.dp
-        LayoutMode.TABLET_BALANCED -> 112.dp
-        LayoutMode.TABLET_WIDE -> 120.dp
+        LayoutMode.PHONE -> 64.dp
+        LayoutMode.TABLET_BALANCED -> 72.dp
+        LayoutMode.TABLET_WIDE -> 80.dp
     }
 
     Column(
         modifier = Modifier
             .fillMaxHeight()
             .width(stripWidth)
+            .verticalScroll(rememberScrollState())
             .padding(horizontal = 8.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
