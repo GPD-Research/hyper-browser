@@ -56,7 +56,6 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -89,7 +88,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -438,7 +436,7 @@ private fun HyperBrowserApp() {
     fun openWith(uri: Uri) {
         scope.launch {
             val mime = withContext(Dispatchers.IO) { Storage.mimeType(activity, uri) }
-            openFileWithChooser(activity, uri, mime)
+            launchExternalApp(activity, uri, mime)
         }
     }
 
@@ -448,7 +446,7 @@ private fun HyperBrowserApp() {
             if (mime.startsWith("image/")) {
                 openGallery(uri, directory)
             } else {
-                openFileWithChooser(activity, uri, mime)
+                launchExternalApp(activity, uri, mime)
             }
         }
     }
@@ -818,10 +816,6 @@ private fun launchExternalApp(
     }
     runCatching { activity.startActivity(Intent.createChooser(intent, title)) }
         .onFailure { Toast.makeText(activity, "No app can open this file", Toast.LENGTH_SHORT).show() }
-}
-
-private fun openFileWithChooser(activity: ComponentActivity, uri: Uri, mimeType: String?) {
-    launchExternalApp(activity, uri, mimeType)
 }
 
 private fun planTransfer(
