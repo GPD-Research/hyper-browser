@@ -355,6 +355,7 @@ private fun HyperBrowserApp() {
 
     var showLeftPicker by remember { mutableStateOf(false) }
     var showRightPicker by remember { mutableStateOf(false) }
+    var multiSelect by remember { mutableStateOf(false) }
     var appTheme by remember {
         val stored = prefs.getString(THEME_PREF, null)
         mutableStateOf(AppTheme.entries.firstOrNull { it.name == stored } ?: AppTheme.LIGHT)
@@ -544,23 +545,15 @@ private fun HyperBrowserApp() {
                                         openGallery(image, sourceState.current)
                                     }
                                 },
-                                onSelectAll = {
-                                    val pane = if (activePane == Pane.LEFT) leftPane else rightPane
-                                    val directory = pane.current ?: pane.root
-                                    if (directory != null) {
-                                        scope.launch {
-                                            val everything = withContext(Dispatchers.IO) {
-                                                Storage.children(activity, directory)
-                                                    .filter { shouldDisplayDocument(it, fileDisplayOptions.showHiddenFiles, fileDisplayOptions.showTrashFiles) }
-                                                    .map { it.uri }
-                                                    .toSet()
-                                            }
-                                            if (activePane == Pane.LEFT) {
-                                                leftPane = leftPane.copy(selected = everything)
-                                            } else {
-                                                rightPane = rightPane.copy(selected = everything)
-                                            }
-                                        }
+                                multiSelect = multiSelect,
+                                // Leaving multi mode doubles as "I changed my mind" and drops the payload.
+                                onToggleMulti = {
+                                    if (multiSelect) {
+                                        multiSelect = false
+                                        leftPane = leftPane.copy(selected = emptySet())
+                                        rightPane = rightPane.copy(selected = emptySet())
+                                    } else {
+                                        multiSelect = true
                                     }
                                 },
                                 selectionActive = leftPane.selected.isNotEmpty() || rightPane.selected.isNotEmpty(),
@@ -587,6 +580,7 @@ private fun HyperBrowserApp() {
                                     }
                                 },
                                 onSelectionChange = { selectedSet -> leftPane = leftPane.copy(selected = selectedSet) },
+                                multiSelect = multiSelect,
                                 selectionOutline = selectionOutlineColor(appTheme),
                                 showHiddenFiles = fileDisplayOptions.showHiddenFiles,
                                 showTrashFiles = fileDisplayOptions.showTrashFiles,
@@ -609,6 +603,7 @@ private fun HyperBrowserApp() {
                                     }
                                 },
                                 onSelectionChange = { selectedSet -> rightPane = rightPane.copy(selected = selectedSet) },
+                                multiSelect = multiSelect,
                                 selectionOutline = selectionOutlineColor(appTheme),
                                 showHiddenFiles = fileDisplayOptions.showHiddenFiles,
                                 showTrashFiles = fileDisplayOptions.showTrashFiles,
@@ -1169,7 +1164,8 @@ private fun CommandStrip(
     onMove: () -> Unit,
     onDelete: () -> Unit,
     onGallery: () -> Unit,
-    onSelectAll: () -> Unit,
+    multiSelect: Boolean,
+    onToggleMulti: () -> Unit,
     selectionActive: Boolean,
     onDeselect: () -> Unit,
     onOpenSettings: () -> Unit,
@@ -1194,7 +1190,7 @@ private fun CommandStrip(
         CommandButton(label = "Move", icon = Icons.AutoMirrored.Filled.DriveFileMove, onClick = onMove)
         CommandButton(label = "Delete", icon = Icons.Filled.Delete, onClick = onDelete)
         CommandButton(label = "Gallery", icon = Icons.Filled.Image, onClick = onGallery)
-        CommandButton(label = "All", icon = Icons.Filled.SelectAll, onClick = onSelectAll)
+        CommandButton(label = "Multi", icon = Icons.Filled.SelectAll, onClick = onToggleMulti, active = multiSelect)
         if (selectionActive) {
             CommandButton(label = "Deselect", icon = Icons.Filled.Deselect, onClick = onDeselect)
         }
@@ -1209,6 +1205,7 @@ private fun CommandButton(
     onClick: () -> Unit,
     showLabel: Boolean = true,
     enabled: Boolean = true,
+    active: Boolean = false,
 ) {
     Column(
         modifier = Modifier
@@ -1219,7 +1216,11 @@ private fun CommandButton(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        val contentColor = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+        val contentColor = when {
+            !enabled -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+            active -> MaterialTheme.colorScheme.primary
+            else -> MaterialTheme.colorScheme.onSurface
+        }
         Icon(icon, contentDescription = label, modifier = Modifier.size(24.dp), tint = contentColor)
         if (showLabel) {
             Text(
@@ -2461,6 +2462,7 @@ private fun DirectoryPane(
     onShowProperties: (Uri) -> Unit,
     onMoveUp: () -> Unit,
     onSelectionChange: (Set<Uri>) -> Unit,
+    multiSelect: Boolean,
     selectionOutline: Color,
     showHiddenFiles: Boolean,
     showTrashFiles: Boolean,
@@ -2549,7 +2551,14 @@ private fun DirectoryPane(
                             .combinedClickable(
                                 onClick = {
                                     onActivate()
-                                    onSelectionChange(if (selected) state.selected - file.uri else state.selected + file.uri)
+                                    onSelectionChange(
+                                        when {
+                                            multiSelect && selected -> state.selected - file.uri
+                                            multiSelect -> state.selected + file.uri
+                                            selected -> emptySet()
+                                            else -> setOf(file.uri)
+                                        }
+                                    )
                                 },
                                 onDoubleClick = {
                                     onActivate()
