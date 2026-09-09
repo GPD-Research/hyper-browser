@@ -1,10 +1,14 @@
 package org.gpdresearch.hyperbrowser
 
 import android.content.ContentResolver
+import android.content.Context
 import android.content.Intent
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -28,13 +32,16 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -56,6 +63,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -90,6 +98,7 @@ import kotlin.math.roundToInt
 import androidx.documentfile.provider.DocumentFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
 
@@ -161,6 +170,9 @@ private fun HyperBrowserApp() {
     var selectionPreviewVisible by remember { mutableStateOf(true) }
     var selectionPreviewOffset by remember { mutableStateOf(Offset.Zero) }
 
+    var showLeftPicker by remember { mutableStateOf(false) }
+    var showRightPicker by remember { mutableStateOf(false) }
+
     val sourcePane = if (transferDirection == TransferDirection.LEFT_TO_RIGHT) Pane.LEFT else Pane.RIGHT
     val destinationPane = if (sourcePane == Pane.LEFT) Pane.RIGHT else Pane.LEFT
     val sourceState = if (sourcePane == Pane.LEFT) leftPane else rightPane
@@ -178,28 +190,6 @@ private fun HyperBrowserApp() {
     }
     val destinationLabel by produceState(initialValue = "destination", destinationState.current) {
         value = destinationState.current?.let { uri -> withContext(Dispatchers.IO) { resolveDisplayPath(activity, uri) } } ?: "destination"
-    }
-
-    // Persistable grants can throw on providers (e.g. some Google Drive setups) that
-    // don't return a persistable-capable Uri; fall back to a session-only grant instead
-    // of crashing so the folder can still be selected.
-    fun takeUriPermissionSafely(uri: Uri) {
-        val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-        try {
-            activity.contentResolver.takePersistableUriPermission(uri, flags)
-        } catch (_: SecurityException) {
-        }
-    }
-
-    val leftPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        uri ?: return@rememberLauncherForActivityResult
-        takeUriPermissionSafely(uri)
-        leftPane = BrowserPaneState(root = uri, current = uri, selected = emptySet())
-    }
-    val rightPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        uri ?: return@rememberLauncherForActivityResult
-        takeUriPermissionSafely(uri)
-        rightPane = BrowserPaneState(root = uri, current = uri, selected = emptySet())
     }
 
     fun enqueueTransfer(mode: TransferMode, selectedItems: Set<Uri> = sourceState.selected) {
@@ -254,8 +244,8 @@ private fun HyperBrowserApp() {
                     onReverse = {
                         transferDirection = if (transferDirection == TransferDirection.LEFT_TO_RIGHT) TransferDirection.RIGHT_TO_LEFT else TransferDirection.LEFT_TO_RIGHT
                     },
-                    onChooseLeftRoot = { leftPicker.launch(null) },
-                    onChooseRightRoot = { rightPicker.launch(null) },
+                    onChooseLeftRoot = { showLeftPicker = true },
+                    onChooseRightRoot = { showRightPicker = true },
                     sourceLabel = sourceLabel,
                     destinationLabel = destinationLabel,
                 )
@@ -304,11 +294,11 @@ private fun HyperBrowserApp() {
                                 isActive = activePane == Pane.LEFT,
                                 modifier = Modifier.weight(if (layoutMode == LayoutMode.TABLET_WIDE) 1.6f else if (layoutMode == LayoutMode.TABLET_BALANCED) 1.2f else 1f),
                                 onActivate = { activePane = Pane.LEFT },
-                                onChooseRoot = { leftPicker.launch(null) },
+                                onChooseRoot = { showLeftPicker = true },
                                 onNavigate = { directory -> leftPane = leftPane.copy(current = directory, selected = emptySet()) },
                                 onOpenFile = { uri -> handleFileDoubleTap(uri) },
                                 onMoveUp = {
-                                    val currentDoc = leftPane.current?.let { DocumentFile.fromTreeUri(activity, it) }
+                                    val currentDoc = leftPane.current?.let { getDocumentFile(activity, it) }
                                     val parent = currentDoc?.parentFile
                                     if (parent != null) {
                                         leftPane = leftPane.copy(current = parent.uri, selected = emptySet())
@@ -326,11 +316,11 @@ private fun HyperBrowserApp() {
                                 isActive = activePane == Pane.RIGHT,
                                 modifier = Modifier.weight(if (layoutMode == LayoutMode.TABLET_WIDE) 1.6f else if (layoutMode == LayoutMode.TABLET_BALANCED) 1.2f else 1f),
                                 onActivate = { activePane = Pane.RIGHT },
-                                onChooseRoot = { rightPicker.launch(null) },
+                                onChooseRoot = { showRightPicker = true },
                                 onNavigate = { directory -> rightPane = rightPane.copy(current = directory, selected = emptySet()) },
                                 onOpenFile = { uri -> handleFileDoubleTap(uri) },
                                 onMoveUp = {
-                                    val currentDoc = rightPane.current?.let { DocumentFile.fromTreeUri(activity, it) }
+                                    val currentDoc = rightPane.current?.let { getDocumentFile(activity, it) }
                                     val parent = currentDoc?.parentFile
                                     if (parent != null) {
                                         rightPane = rightPane.copy(current = parent.uri, selected = emptySet())
@@ -410,6 +400,26 @@ private fun HyperBrowserApp() {
             onDismiss = { showLayoutSettings = false },
         )
     }
+
+    if (showLeftPicker) {
+        FolderPickerDialog(
+            onFolderSelected = { uri ->
+                leftPane = BrowserPaneState(root = uri, current = uri, selected = emptySet())
+                showLeftPicker = false
+            },
+            onDismiss = { showLeftPicker = false }
+        )
+    }
+
+    if (showRightPicker) {
+        FolderPickerDialog(
+            onFolderSelected = { uri ->
+                rightPane = BrowserPaneState(root = uri, current = uri, selected = emptySet())
+                showRightPicker = false
+            },
+            onDismiss = { showRightPicker = false }
+        )
+    }
 }
 
 private fun openFileWithDefaultApp(activity: ComponentActivity, uri: Uri) {
@@ -425,8 +435,8 @@ private fun openFileWithDefaultApp(activity: ComponentActivity, uri: Uri) {
 
 private fun executeTransfer(activity: ComponentActivity, request: TransferRequest) {
     if (request.wholeDirectory) {
-        val sourceDoc = DocumentFile.fromTreeUri(activity, request.sourceDir) ?: return
-        val targetDoc = DocumentFile.fromTreeUri(activity, request.targetDir) ?: return
+        val sourceDoc = getDocumentFile(activity, request.sourceDir) ?: return
+        val targetDoc = getDocumentFile(activity, request.targetDir) ?: return
         when (request.mode) {
             TransferMode.COPY -> copyTree(activity.contentResolver, sourceDoc, targetDoc)
             TransferMode.MOVE -> moveTree(activity.contentResolver, sourceDoc, targetDoc)
@@ -434,9 +444,9 @@ private fun executeTransfer(activity: ComponentActivity, request: TransferReques
         return
     }
 
-    val targetDoc = DocumentFile.fromTreeUri(activity, request.targetDir) ?: return
+    val targetDoc = getDocumentFile(activity, request.targetDir) ?: return
     request.selected.forEach { uri ->
-        val sourceDoc = DocumentFile.fromSingleUri(activity, uri) ?: return@forEach
+        val sourceDoc = getDocumentFile(activity, uri) ?: return@forEach
         when (request.mode) {
             TransferMode.COPY -> transferDocument(activity.contentResolver, sourceDoc, targetDoc, true)
             TransferMode.MOVE -> transferDocument(activity.contentResolver, sourceDoc, targetDoc, false)
@@ -446,7 +456,7 @@ private fun executeTransfer(activity: ComponentActivity, request: TransferReques
 
 private fun deleteItems(activity: ComponentActivity, uris: Set<Uri>) {
     uris.forEach { uri ->
-        DocumentFile.fromSingleUri(activity, uri)?.delete()
+        getDocumentFile(activity, uri)?.delete()
     }
 }
 
@@ -534,8 +544,22 @@ private fun resolveMimeType(resolver: ContentResolver, uri: Uri): String {
 }
 
 private fun resolveDisplayPath(context: ComponentActivity, uri: Uri): String {
-    val doc = DocumentFile.fromTreeUri(context, uri)
+    val doc = getDocumentFile(context, uri)
     return doc?.name ?: uri.lastPathSegment ?: "unknown"
+}
+
+private fun getDocumentFile(context: Context, uri: Uri): DocumentFile? {
+    return if (uri.scheme == "content") {
+        if (uri.toString().contains("tree")) {
+            DocumentFile.fromTreeUri(context, uri)
+        } else {
+            DocumentFile.fromSingleUri(context, uri)
+        }
+    } else if (uri.scheme == "file") {
+        uri.path?.let { DocumentFile.fromFile(File(it)) }
+    } else {
+        null
+    }
 }
 
 private fun isImageMimeType(value: String): Boolean = value.startsWith("image/")
@@ -570,7 +594,7 @@ private fun buildSelectionInfo(activity: ComponentActivity, uris: Set<Uri>): Sel
     }
     if (uris.size == 1) {
         val uri = uris.first()
-        val doc = DocumentFile.fromSingleUri(activity, uri)
+        val doc = getDocumentFile(activity, uri)
         if (doc == null) {
             return SelectionInfo(
                 title = uri.lastPathSegment ?: "Unknown",
@@ -589,7 +613,7 @@ private fun buildSelectionInfo(activity: ComponentActivity, uris: Set<Uri>): Sel
             details = if (isDir) "Directory" else (doc.type ?: "Document"),
         )
     }
-    val names = uris.take(3).mapNotNull { uri -> DocumentFile.fromSingleUri(activity, uri)?.name ?: uri.lastPathSegment }
+    val names = uris.take(3).mapNotNull { uri -> getDocumentFile(activity, uri)?.name ?: uri.lastPathSegment }
     return SelectionInfo(
         title = "${uris.size} items selected",
         kind = "Multi-select",
@@ -877,6 +901,146 @@ private fun ConfirmDeleteDialog(
 }
 
 @Composable
+private fun FolderPickerDialog(
+    onFolderSelected: (Uri) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current as ComponentActivity
+    var rootUri by remember { mutableStateOf<Uri?>(null) }
+    var currentUri by remember { mutableStateOf<Uri?>(null) }
+    var selectedUri by remember { mutableStateOf<Uri?>(null) }
+
+    fun takeUriPermissionSafely(uri: Uri) {
+        if (uri.scheme != "content") return
+        val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+        try {
+            context.contentResolver.takePersistableUriPermission(uri, flags)
+        } catch (_: SecurityException) {
+        }
+    }
+
+    val hasAllFilesAccess = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        Environment.isExternalStorageManager()
+    } else {
+        true
+    }
+
+    val pickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        uri?.let {
+            takeUriPermissionSafely(it)
+            onFolderSelected(it)
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Select Default Folder") },
+        text = {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                if (rootUri == null) {
+                    Text("Choose a starting location.")
+                    Spacer(modifier = Modifier.size(12.dp))
+                    Button(onClick = { pickerLauncher.launch(null) }, modifier = Modifier.fillMaxWidth()) {
+                        Text("Select Folder (via SAF)")
+                    }
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !hasAllFilesAccess) {
+                        Spacer(modifier = Modifier.size(8.dp))
+                        Button(
+                            onClick = {
+                                val intent = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                                context.startActivity(intent)
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Grant All Files Access")
+                        }
+                    }
+                    if (hasAllFilesAccess) {
+                        Spacer(modifier = Modifier.size(8.dp))
+                        Button(
+                            onClick = {
+                                val root = Environment.getExternalStorageDirectory()
+                                val uri = Uri.fromFile(root)
+                                rootUri = uri
+                                currentUri = uri
+                                selectedUri = uri
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Use Device Root (/sdcard)")
+                        }
+                    }
+                } else {
+                    val currentDoc = getDocumentFile(context, currentUri!!)
+                    val folders = currentDoc?.listFiles()?.filter { it.isDirectory } ?: emptyList()
+
+                    Text(
+                        text = "Browsing: ${resolveDisplayPath(context, currentUri!!)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(modifier = Modifier.size(8.dp))
+
+                    LazyColumn(modifier = Modifier.height(300.dp)) {
+                        if (currentUri != rootUri) {
+                            item {
+                                TextButton(
+                                    onClick = { currentUri = currentDoc?.parentFile?.uri ?: rootUri },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(".. [Up to parent]")
+                                }
+                            }
+                        }
+                        items(folders) { folder ->
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { currentUri = folder.uri }
+                                    .padding(vertical = 4.dp)
+                            ) {
+                                Checkbox(
+                                    checked = selectedUri == folder.uri,
+                                    onCheckedChange = { if (it) selectedUri = folder.uri }
+                                )
+                                Text(
+                                    text = folder.name ?: "Folder",
+                                    modifier = Modifier.padding(start = 8.dp),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                        if (folders.isEmpty()) {
+                            item {
+                                Text(
+                                    "No subfolders here",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    modifier = Modifier.padding(16.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                enabled = selectedUri != null,
+                onClick = { selectedUri?.let { onFolderSelected(it) } }
+            ) {
+                Text("Select")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
+}
+
+@Composable
 private fun ConfirmTransferDialog(
     request: TransferRequest,
     onDismiss: () -> Unit,
@@ -927,8 +1091,9 @@ private fun ImageViewerScreen(
     startingUri: Uri,
     onClose: () -> Unit,
 ) {
-    val parentDir = DocumentFile.fromSingleUri(activity, startingUri)?.parentFile?.uri ?: startingUri
-    val directoryDoc = DocumentFile.fromTreeUri(activity, parentDir) ?: DocumentFile.fromSingleUri(activity, parentDir)
+    val currentFile = getDocumentFile(activity, startingUri)
+    val parentDir = if (currentFile?.isDirectory == true) startingUri else (currentFile?.parentFile?.uri ?: startingUri)
+    val directoryDoc = getDocumentFile(activity, parentDir)
     val images = directoryDoc?.listFiles()?.filter { file ->
         file.isFile && isImageMimeType(resolveMimeType(activity.contentResolver, file.uri))
     } ?: emptyList()
@@ -1109,7 +1274,7 @@ private fun ImageViewerScreen(
                                 imageActionUri = null
                             }) { Text("Edit in external editor") }
                             Button(onClick = {
-                                DocumentFile.fromSingleUri(activity, imageActionUri!!)?.delete()
+                                getDocumentFile(activity, imageActionUri!!)?.delete()
                                 imageActionUri = null
                                 val remaining = images.filterNot { it.uri == imageActionUri }
                                 if (remaining.isNotEmpty()) {
@@ -1181,7 +1346,7 @@ private fun DirectoryPane(
     val listing by produceState<DirectoryListing?>(initialValue = null, currentUri, state.refreshKey) {
         value = currentUri?.let { uri ->
             withContext(Dispatchers.IO) {
-                val dir = DocumentFile.fromTreeUri(context, uri)
+                val dir = getDocumentFile(context, uri)
                 DirectoryListing(
                     name = dir?.name,
                     files = (dir?.listFiles()?.filter { file -> shouldDisplayDocument(file, showHiddenFiles, showTrashFiles) }
@@ -1196,21 +1361,6 @@ private fun DirectoryPane(
     val isLoading = currentUri != null && listing == null
 
     Column(modifier = modifier.clickable(onClick = onActivate).fillMaxHeight()) {
-        if (currentUri == null && state.root == null) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(16.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = "Choose a root folder to begin",
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            return
-        }
         FlowRow(
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 10.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
