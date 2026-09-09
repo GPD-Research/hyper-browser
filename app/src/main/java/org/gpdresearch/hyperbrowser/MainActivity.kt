@@ -27,6 +27,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -35,6 +36,7 @@ import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.layout.Arrangement
@@ -69,6 +71,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Deselect
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
@@ -80,6 +83,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalContentColor
@@ -133,6 +138,43 @@ import java.io.File
 private enum class Pane { LEFT, RIGHT }
 private enum class TransferDirection { LEFT_TO_RIGHT, RIGHT_TO_LEFT }
 private enum class TransferMode { COPY, MOVE }
+
+private enum class AppTheme(val label: String) {
+    LIGHT("Light"),
+    INVERTED("Inverted"),
+    HACKER("Hacker"),
+}
+
+private val MATRIX_GREEN = Color(0xFF00FF41)
+
+private fun colorSchemeFor(theme: AppTheme) = when (theme) {
+    AppTheme.LIGHT -> lightColorScheme()
+    AppTheme.INVERTED -> darkColorScheme(
+        background = Color.Black,
+        surface = Color.Black,
+        onBackground = Color.White,
+        onSurface = Color.White,
+        primary = Color.White,
+        onPrimary = Color.Black,
+    )
+    AppTheme.HACKER -> darkColorScheme(
+        background = Color.Black,
+        surface = Color.Black,
+        onBackground = MATRIX_GREEN,
+        onSurface = MATRIX_GREEN,
+        primary = MATRIX_GREEN,
+        onPrimary = Color.Black,
+        secondary = MATRIX_GREEN,
+        onSecondary = Color.Black,
+    )
+}
+
+/** Selection is marked with an outline rather than a fill so it never relies on hue alone. */
+private fun selectionOutlineColor(theme: AppTheme) = when (theme) {
+    AppTheme.LIGHT -> Color(0xFFD32F2F)
+    AppTheme.INVERTED -> Color.White
+    AppTheme.HACKER -> MATRIX_GREEN
+}
 
 /**
  * Gallery detail levels. Only [SINGLE] decodes the file at its native resolution; the grids trade
@@ -201,6 +243,7 @@ private data class BrowserPaneState(
 private const val PANE_PREFS = "hyper_browser_panes"
 private const val PANE_LEFT = "left"
 private const val PANE_RIGHT = "right"
+private const val THEME_PREF = "app_theme"
 
 private fun loadPaneState(prefs: SharedPreferences, key: String): BrowserPaneState {
     val root = prefs.getString("${key}_root", null)?.let(Uri::parse) ?: return BrowserPaneState()
@@ -314,6 +357,10 @@ private fun HyperBrowserApp() {
 
     var showLeftPicker by remember { mutableStateOf(false) }
     var showRightPicker by remember { mutableStateOf(false) }
+    var appTheme by remember {
+        val stored = prefs.getString(THEME_PREF, null)
+        mutableStateOf(AppTheme.entries.firstOrNull { it.name == stored } ?: AppTheme.LIGHT)
+    }
 
     val sourcePane = if (transferDirection == TransferDirection.LEFT_TO_RIGHT) Pane.LEFT else Pane.RIGHT
     val destinationPane = if (sourcePane == Pane.LEFT) Pane.RIGHT else Pane.LEFT
@@ -436,7 +483,7 @@ private fun HyperBrowserApp() {
         }
     }
 
-    MaterialTheme {
+    MaterialTheme(colorScheme = colorSchemeFor(appTheme)) {
         Scaffold { contentPadding ->
             Box(
                 modifier = Modifier
@@ -493,6 +540,11 @@ private fun HyperBrowserApp() {
                                     }
                                 },
                                 onSelectMulti = { activePane = sourcePane },
+                                selectionActive = leftPane.selected.isNotEmpty() || rightPane.selected.isNotEmpty(),
+                                onDeselect = {
+                                    leftPane = leftPane.copy(selected = emptySet())
+                                    rightPane = rightPane.copy(selected = emptySet())
+                                },
                                 onOpenSettings = { showLayoutSettings = true },
                             )
 
@@ -513,6 +565,7 @@ private fun HyperBrowserApp() {
                                     }
                                 },
                                 onSelectionChange = { selectedSet -> leftPane = leftPane.copy(selected = selectedSet) },
+                                selectionOutline = selectionOutlineColor(appTheme),
                                 showHiddenFiles = fileDisplayOptions.showHiddenFiles,
                                 showTrashFiles = fileDisplayOptions.showTrashFiles,
                                 sortOptions = sortOptions,
@@ -535,6 +588,7 @@ private fun HyperBrowserApp() {
                                     }
                                 },
                                 onSelectionChange = { selectedSet -> rightPane = rightPane.copy(selected = selectedSet) },
+                                selectionOutline = selectionOutlineColor(appTheme),
                                 showHiddenFiles = fileDisplayOptions.showHiddenFiles,
                                 showTrashFiles = fileDisplayOptions.showTrashFiles,
                                 sortOptions = sortOptions,
@@ -641,9 +695,14 @@ private fun HyperBrowserApp() {
             selectedMode = layoutMode,
             showHiddenFiles = fileDisplayOptions.showHiddenFiles,
             showTrashFiles = fileDisplayOptions.showTrashFiles,
+            currentTheme = appTheme,
             onSelect = { mode ->
                 layoutMode = mode
                 showLayoutSettings = false
+            },
+            onThemeSelect = { theme ->
+                appTheme = theme
+                prefs.edit().putString(THEME_PREF, theme.name).apply()
             },
             onToggleHiddenFiles = { fileDisplayOptions = fileDisplayOptions.copy(showHiddenFiles = it) },
             onToggleTrashFiles = { fileDisplayOptions = fileDisplayOptions.copy(showTrashFiles = it) },
@@ -1017,12 +1076,16 @@ private fun MinimalTransferMenu(
 
             IconButton(
                 onClick = onReverse,
-                modifier = Modifier.size(36.dp),
+                modifier = Modifier
+                    .size(40.dp)
+                    .background(MaterialTheme.colorScheme.surfaceVariant, CircleShape)
+                    .border(2.dp, MaterialTheme.colorScheme.primary, CircleShape),
             ) {
                 Icon(
                     imageVector = if (direction == TransferDirection.LEFT_TO_RIGHT) Icons.AutoMirrored.Filled.ArrowForward else Icons.AutoMirrored.Filled.ArrowBack,
                     contentDescription = "Reverse transfer direction",
-                    modifier = Modifier.size(20.dp),
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(24.dp),
                 )
             }
 
@@ -1081,6 +1144,8 @@ private fun CommandStrip(
     onDelete: () -> Unit,
     onGallery: () -> Unit,
     onSelectMulti: () -> Unit,
+    selectionActive: Boolean,
+    onDeselect: () -> Unit,
     onOpenSettings: () -> Unit,
 ) {
     val stripWidth = when (layoutMode) {
@@ -1100,10 +1165,13 @@ private fun CommandStrip(
     ) {
         CommandButton(label = "Copy", icon = Icons.Filled.ContentCopy, onClick = onCopy)
         CommandButton(label = "Paste", icon = Icons.Filled.ContentPaste, onClick = onPaste, enabled = pasteEnabled)
-        CommandButton(label = "Cut", icon = Icons.AutoMirrored.Filled.DriveFileMove, onClick = onMove)
+        CommandButton(label = "Move", icon = Icons.AutoMirrored.Filled.DriveFileMove, onClick = onMove)
         CommandButton(label = "Delete", icon = Icons.Filled.Delete, onClick = onDelete)
         CommandButton(label = "Gallery", icon = Icons.Filled.Image, onClick = onGallery)
         CommandButton(label = "Multi", icon = Icons.Filled.SelectAll, onClick = onSelectMulti)
+        if (selectionActive) {
+            CommandButton(label = "Deselect", icon = Icons.Filled.Deselect, onClick = onDeselect)
+        }
         CommandButton(label = "Settings", icon = Icons.Filled.Settings, onClick = onOpenSettings, showLabel = false)
     }
 }
@@ -1192,7 +1260,9 @@ private fun LayoutSettingsDialog(
     selectedMode: LayoutMode,
     showHiddenFiles: Boolean,
     showTrashFiles: Boolean,
+    currentTheme: AppTheme,
     onSelect: (LayoutMode) -> Unit,
+    onThemeSelect: (AppTheme) -> Unit,
     onToggleHiddenFiles: (Boolean) -> Unit,
     onToggleTrashFiles: (Boolean) -> Unit,
     onOpenSort: () -> Unit,
@@ -1202,7 +1272,10 @@ private fun LayoutSettingsDialog(
         onDismissRequest = onDismiss,
         title = { Text("Layout settings") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+            ) {
                 LayoutMode.entries.forEach { mode ->
                     val label = when (mode) {
                         LayoutMode.PHONE -> "Phone layout"
@@ -1234,6 +1307,26 @@ private fun LayoutSettingsDialog(
                 Text("Sorting", style = MaterialTheme.typography.labelLarge)
                 Button(onClick = onOpenSort, modifier = Modifier.fillMaxWidth()) {
                     Text("Sort options")
+                }
+
+                Text("App theme", style = MaterialTheme.typography.labelLarge)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    AppTheme.entries.forEach { theme ->
+                        Button(
+                            onClick = { onThemeSelect(theme) },
+                            modifier = Modifier.weight(1f),
+                            contentPadding = PaddingValues(4.dp),
+                        ) {
+                            Text(
+                                if (theme == currentTheme) "${theme.label} *" else theme.label,
+                                fontSize = 11.sp,
+                                maxLines = 1,
+                            )
+                        }
+                    }
                 }
             }
         },
@@ -2342,6 +2435,7 @@ private fun DirectoryPane(
     onShowProperties: (Uri) -> Unit,
     onMoveUp: () -> Unit,
     onSelectionChange: (Set<Uri>) -> Unit,
+    selectionOutline: Color,
     showHiddenFiles: Boolean,
     showTrashFiles: Boolean,
     sortOptions: SortOptions,
@@ -2413,7 +2507,14 @@ private fun DirectoryPane(
                             .fillMaxWidth()
                             .padding(horizontal = 6.dp, vertical = 2.dp)
                             .clip(RoundedCornerShape(8.dp))
-                            .background(if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant)
+                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                            .then(
+                                if (selected) {
+                                    Modifier.border(2.dp, selectionOutline, RoundedCornerShape(8.dp))
+                                } else {
+                                    Modifier
+                                }
+                            )
                             .combinedClickable(
                                 onClick = {
                                     onActivate()
@@ -2439,7 +2540,7 @@ private fun DirectoryPane(
                                 imageVector = icon,
                                 contentDescription = if (file.isDirectory) "Folder" else "File",
                                 modifier = Modifier.size(15.dp),
-                                tint = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                             Text(
                                 text = file.name,
@@ -2455,7 +2556,7 @@ private fun DirectoryPane(
                                             if (file.isDirectory) onShowProperties(file.uri) else onOpenWith(file.uri)
                                         },
                                     ),
-                                color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
+                                color = MaterialTheme.colorScheme.onSurface,
                                 fontSize = 12.sp,
                                 lineHeight = 15.sp,
                                 maxLines = 1,
