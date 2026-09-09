@@ -69,6 +69,71 @@ Notes:
 - Drive items use synthetic `gdrive://` URIs and cannot be handed to other apps directly. Copy them
   to local storage first to open them elsewhere.
 
+## Release builds
+
+Release signing is wired up in [app/build.gradle.kts](app/build.gradle.kts). Credentials are read
+from `keystore.properties` in the repo root (git-ignored) or, on CI, from the environment
+(`HB_KEYSTORE_FILE`, `HB_KEYSTORE_PASSWORD`, `HB_KEY_ALIAS`, `HB_KEY_PASSWORD`). When neither is
+present the build still succeeds but prints
+`No release keystore configured - release artifacts will be unsigned.`
+
+Create the upload key once, then never lose it — Play ties the listing to it:
+
+```sh
+keytool -genkeypair -v -keystore hyper-browser-upload.jks -alias upload \
+  -keyalg RSA -keysize 4096 -validity 10000
+```
+
+Then write `keystore.properties` (never commit it):
+
+```properties
+storeFile=hyper-browser-upload.jks
+storePassword=…
+keyAlias=upload
+keyPassword=…
+```
+
+Build the bundle for Play Console:
+
+```sh
+./gradlew :app:bundleRelease
+# app/build/outputs/bundle/release/app-release.aab
+```
+
+R8/resource shrinking is deliberately off: the Drive REST models are bound reflectively by GSON and
+would need a keep-rule audit first.
+
+Register the release key's SHA-1 as a second Android OAuth client (see *Google Drive setup*), or
+Drive sign-in fails with `ApiException: 10` in release builds. If you opt into **Play App Signing**,
+the SHA-1 that matters at runtime is Google's app-signing certificate from the Play Console, not the
+upload key.
+
+## Permissions
+
+| Permission | Why it is needed |
+| --- | --- |
+| `INTERNET` | Google Drive REST API v3 requests. |
+| `ACCESS_NETWORK_STATE` | Fail Drive operations fast with an offline message instead of hanging. |
+| `READ_EXTERNAL_STORAGE` (`maxSdkVersion=32`) | Shared-storage reads before Android 13; replaced by the `READ_MEDIA_*` grants after that. |
+| `WRITE_EXTERNAL_STORAGE` (`maxSdkVersion=28`) | Copy/move/delete targets on Android 9 and older, before scoped storage. |
+| `READ_MEDIA_IMAGES` / `READ_MEDIA_VIDEO` / `READ_MEDIA_AUDIO` | Android 13+ granular media reads for listings, grid thumbnails and the gallery viewer. |
+| `MANAGE_EXTERNAL_STORAGE` | Browsing arbitrary folders (internal storage root, SD card, USB) and transferring files between them. |
+
+All of them are requested at runtime from `missingRuntimePermissions()`; All-files access is an
+opt-in trip to system settings and the app degrades to per-folder SAF grants without it.
+
+`MANAGE_EXTERNAL_STORAGE` is the only one that gates the Play listing. It needs the Play Console
+**permissions declaration form**:
+
+- Use case: **file manager**.
+- Justification: the app is a dual-pane file manager whose whole purpose is moving files between
+  arbitrary locations. SAF cannot grant a tree on the internal-storage root (the system picker
+  blocks that directory), and MediaStore only exposes media files, so neither API can back
+  browsing or transferring non-media files across volumes.
+- Upload a demo video showing browsing, copy, move and delete across two panes.
+
+Direct-APK and F-Droid distribution need no such declaration.
+
 ## Architecture notes
 
 The image browser is intentionally kept simple and separate from the generic file browser. Image files use a lightweight in-app viewing flow with simple thumbnails and a zoomable single-image mode. Non-image files remain in the default-app open flow, while the app stays focused on file organization, selection, and transfer rather than full document editing.

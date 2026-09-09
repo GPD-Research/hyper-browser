@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -26,7 +28,38 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = 1
-        versionName = "0.1.0"
+        versionName = "1.0.0"
+    }
+
+    signingConfigs {
+        create("release") {
+            // Credentials come from keystore.properties (git-ignored) or the environment on CI.
+            val properties = Properties().apply {
+                val file = rootProject.file("keystore.properties")
+                if (file.exists()) file.inputStream().use { load(it) }
+            }
+            fun setting(key: String, variable: String): String? =
+                properties.getProperty(key) ?: System.getenv(variable)
+
+            setting("storeFile", "HB_KEYSTORE_FILE")?.let { path ->
+                storeFile = rootProject.file(path)
+                storePassword = setting("storePassword", "HB_KEYSTORE_PASSWORD")
+                keyAlias = setting("keyAlias", "HB_KEY_ALIAS")
+                keyPassword = setting("keyPassword", "HB_KEY_PASSWORD")
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            // R8 is off: the Drive REST models are bound reflectively by GSON.
+            isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("release").takeIf { it.storeFile != null }
+                ?: run {
+                    logger.warn("No release keystore configured - release artifacts will be unsigned.")
+                    null
+                }
+        }
     }
 
     buildTypes {

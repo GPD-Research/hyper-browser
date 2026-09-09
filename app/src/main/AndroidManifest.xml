@@ -1,17 +1,33 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Google Drive REST API v3 calls. -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Lets Drive browsing fail fast with an offline message instead of hanging. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Pre-Android 13 shared-storage reads; superseded by the READ_MEDIA_* grants below. -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <!-- Pre-scoped-storage writes for copy/move/delete targets on Android 9 and older. -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
+
+    <!-- Android 13+ granular media reads: listings, grid thumbnails and the gallery viewer. -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+
+    <!--
+      Core file-manager capability: browsing arbitrary folders (internal storage root, SD card,
+      USB) and copying/moving/deleting across them. SAF cannot grant a tree on the internal
+      storage root and MediaStore only exposes media files, so neither can back a general
+      purpose dual-pane browser. Requires the Play Console permissions declaration form
+      ("file manager" use case) plus a demo video.
+    -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
     <application
         android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
         android:label="Hyper Browser"
-        android:requestLegacyExternalStorage="true"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:theme="@style/Theme.Hacker">
         <activity
             android:name=".MainActivity"
