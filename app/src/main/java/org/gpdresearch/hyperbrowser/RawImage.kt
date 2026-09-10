@@ -285,8 +285,8 @@ object RawImage {
 
     /** An opened TIFF: cheap to hold onto, and renders any crop at any scale on demand. */
     class TiffImage internal constructor(
-        private val file: TiffFile,
-        private val directory: Directory,
+        internal val file: TiffFile,
+        internal val directory: Directory,
         val width: Int,
         val height: Int,
     ) {

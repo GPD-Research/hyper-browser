@@ -83,6 +83,8 @@ import androidx.compose.material.icons.filled.DriveFileRenameOutline
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.ZoomIn
@@ -2687,12 +2689,12 @@ private fun ImageViewerScreen(
                             if (useTiffFullRes && tiffRegion == null) {
                                 // Default to center region based on viewport size
                                 scope.launch {
-                                    val entry = withContext(Dispatchers.IO) { Storage.entry(activity, currentUri) }
-                                    if (entry != null) {
-                                        val regionWidth = minOf(viewport.width * 2, entry.width)
-                                        val regionHeight = minOf(viewport.height * 2, entry.height)
-                                        val centerX = entry.width / 2
-                                        val centerY = entry.height / 2
+                                    val currentSingle = single
+                                    if (currentSingle != null) {
+                                        val regionWidth = minOf(viewport.width * 2, currentSingle.width)
+                                        val regionHeight = minOf(viewport.height * 2, currentSingle.height)
+                                        val centerX = currentSingle.width / 2
+                                        val centerY = currentSingle.height / 2
                                         tiffRegion = android.graphics.Rect(
                                             centerX - regionWidth / 2,
                                             centerY - regionHeight / 2,
@@ -2724,6 +2726,8 @@ private fun ImageViewerScreen(
             }
 
             if (useTiffFullRes && tiffRegion != null && single != null) {
+                val currentRegion = tiffRegion
+                val currentSingle = single!!
                 Box(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
@@ -2731,68 +2735,66 @@ private fun ImageViewerScreen(
                         .padding(8.dp),
                 ) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        MiniCommandButton(Icons.AutoMirrored.Filled.ArrowBack, "Pan left") {
-                            scope.launch {
-                                val entry = withContext(Dispatchers.IO) { Storage.entry(activity, currentUri) }
-                                if (entry != null) {
-                                    val step = tiffRegion.width() / 4
-                                    tiffRegion = android.graphics.Rect(
-                                        (tiffRegion.left - step).coerceAtLeast(0),
-                                        tiffRegion.top,
-                                        (tiffRegion.right - step).coerceAtMost(entry.width),
-                                        tiffRegion.bottom
-                                    )
-                                }
+                        IconButton(onClick = {
+                            if (currentRegion != null) {
+                                val step = currentRegion.width() / 4
+                                tiffRegion = android.graphics.Rect(
+                                    (currentRegion.left - step).coerceAtLeast(0),
+                                    currentRegion.top,
+                                    (currentRegion.right - step).coerceAtMost(currentSingle.width),
+                                    currentRegion.bottom
+                                )
                             }
+                        }) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Pan left")
                         }
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            MiniCommandButton(Icons.Default.ArrowBack, "Pan up") {
-                                scope.launch {
-                                    val entry = withContext(Dispatchers.IO) { Storage.entry(activity, currentUri) }
-                                    if (entry != null) {
-                                        val step = tiffRegion.height() / 4
-                                        tiffRegion = android.graphics.Rect(
-                                            tiffRegion.left,
-                                            (tiffRegion.top - step).coerceAtLeast(0),
-                                            tiffRegion.right,
-                                            (tiffRegion.bottom - step).coerceAtMost(entry.height)
-                                        )
-                                    }
+                            IconButton(onClick = {
+                                if (currentRegion != null) {
+                                    val step = currentRegion.height() / 4
+                                    tiffRegion = android.graphics.Rect(
+                                        currentRegion.left,
+                                        (currentRegion.top - step).coerceAtLeast(0),
+                                        currentRegion.right,
+                                        (currentRegion.bottom - step).coerceAtMost(currentSingle.height)
+                                    )
                                 }
+                            }) {
+                                Icon(Icons.Default.KeyboardArrowUp, contentDescription = "Pan up")
                             }
-                            MiniCommandButton(Icons.Default.Close, "Exit full res") {
+                            IconButton(onClick = {
                                 useTiffFullRes = false
                                 tiffRegion = null
                                 showTiffGrid = false
+                            }) {
+                                Icon(Icons.Default.Close, contentDescription = "Exit full res")
                             }
-                            MiniCommandButton(Icons.AutoMirrored.Filled.ArrowForward, "Pan down") {
-                                scope.launch {
-                                    val entry = withContext(Dispatchers.IO) { Storage.entry(activity, currentUri) }
-                                    if (entry != null) {
-                                        val step = tiffRegion.height() / 4
-                                        tiffRegion = android.graphics.Rect(
-                                            tiffRegion.left,
-                                            (tiffRegion.top + step).coerceAtLeast(0),
-                                            tiffRegion.right,
-                                            (tiffRegion.bottom + step).coerceAtMost(entry.height)
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                        MiniCommandButton(Icons.AutoMirrored.Filled.ArrowForward, "Pan right") {
-                            scope.launch {
-                                val entry = withContext(Dispatchers.IO) { Storage.entry(activity, currentUri) }
-                                if (entry != null) {
-                                    val step = tiffRegion.width() / 4
+                            IconButton(onClick = {
+                                if (currentRegion != null) {
+                                    val step = currentRegion.height() / 4
                                     tiffRegion = android.graphics.Rect(
-                                        (tiffRegion.left + step).coerceAtLeast(0),
-                                        tiffRegion.top,
-                                        (tiffRegion.right + step).coerceAtMost(entry.width),
-                                        tiffRegion.bottom
+                                        currentRegion.left,
+                                        (currentRegion.top + step).coerceAtLeast(0),
+                                        currentRegion.right,
+                                        (currentRegion.bottom + step).coerceAtMost(currentSingle.height)
                                     )
                                 }
+                            }) {
+                                Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Pan down")
                             }
+                        }
+                        IconButton(onClick = {
+                            if (currentRegion != null) {
+                                val step = currentRegion.width() / 4
+                                tiffRegion = android.graphics.Rect(
+                                    (currentRegion.left + step).coerceAtLeast(0),
+                                    currentRegion.top,
+                                    (currentRegion.right + step).coerceAtMost(currentSingle.width),
+                                    currentRegion.bottom
+                                )
+                            }
+                        }) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = "Pan right")
                         }
                     }
                 }
@@ -2800,8 +2802,11 @@ private fun ImageViewerScreen(
 
             // Grid overlay for TIFF full resolution mode
             if (showTiffGrid && useTiffFullRes && tiffRegion != null && tiffOverview != null && single != null) {
-                val imageWidth = single.width.toFloat()
-                val imageHeight = single.height.toFloat()
+                val currentSingle = single!!
+                val currentRegion = tiffRegion!!
+                val currentOverview = tiffOverview!!
+                val imageWidth = currentSingle.width.toFloat()
+                val imageHeight = currentSingle.height.toFloat()
                 val aspectRatio = imageWidth / imageHeight
                 val maxGridSize = 200.dp
                 val gridWidth = if (aspectRatio > 1f) maxGridSize else maxGridSize * aspectRatio
@@ -2818,7 +2823,7 @@ private fun ImageViewerScreen(
                 ) {
                     // Low-res overview as background
                     Image(
-                        bitmap = tiffOverview,
+                        bitmap = currentOverview,
                         contentDescription = "TIFF overview",
                         modifier = Modifier.fillMaxSize(),
                         contentScale = ContentScale.Fit
@@ -2836,11 +2841,6 @@ private fun ImageViewerScreen(
                         val gridRows = (numSquares.toFloat() / gridCols).toInt().coerceAtLeast(1)
 
                         // Draw grid lines
-                        val gridPaint = androidx.compose.ui.graphics.Paint().apply {
-                            color = Color.White.copy(alpha = 0.3f)
-                            strokeWidth = 1.dp.toPx()
-                            style = androidx.compose.ui.graphics.drawscope.Stroke()
-                        }
                         for (i in 1 until gridCols) {
                             val x = (overviewWidth / gridCols) * i
                             drawLine(
@@ -2861,10 +2861,10 @@ private fun ImageViewerScreen(
                         }
 
                         // Calculate region position on overview
-                        val regionLeft = (tiffRegion.left.toFloat() / imageWidth) * overviewWidth
-                        val regionTop = (tiffRegion.top.toFloat() / imageHeight) * overviewHeight
-                        val regionRight = (tiffRegion.right.toFloat() / imageWidth) * overviewWidth
-                        val regionBottom = (tiffRegion.bottom.toFloat() / imageHeight) * overviewHeight
+                        val regionLeft = (currentRegion.left.toFloat() / imageWidth) * overviewWidth
+                        val regionTop = (currentRegion.top.toFloat() / imageHeight) * overviewHeight
+                        val regionRight = (currentRegion.right.toFloat() / imageWidth) * overviewWidth
+                        val regionBottom = (currentRegion.bottom.toFloat() / imageHeight) * overviewHeight
 
                         // Draw region rectangle
                         drawRect(
