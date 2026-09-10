@@ -533,6 +533,8 @@ private fun HyperBrowserApp() {
     // Saved, so rotating while an image is open comes back to the gallery instead of the file tree.
     var galleryUri by rememberSaveable { mutableStateOf<Uri?>(null) }
     var galleryDirectory by rememberSaveable { mutableStateOf<Uri?>(null) }
+    // A chosen image opens on itself; a chosen folder opens on its contents.
+    var galleryStage by rememberSaveable { mutableStateOf(GalleryStage.SINGLE) }
     var showLayoutSettings by rememberSaveable { mutableStateOf(false) }
     var fileDisplayOptions by rememberSaveable(stateSaver = FileDisplayOptionsSaver) { mutableStateOf(FileDisplayOptions()) }
     var sortOptions by rememberSaveable(stateSaver = SortOptionsSaver) { mutableStateOf(SortOptions()) }
@@ -564,6 +566,11 @@ private fun HyperBrowserApp() {
         value = selectedFile?.let { uri -> withContext(Dispatchers.IO) { Storage.mimeType(activity, uri) } } ?: ""
     }
     val isImageSelected = selectedMimeType.startsWith("image/")
+    val isDirectorySelected by produceState(initialValue = false, selectedFile) {
+        value = selectedFile?.let { uri ->
+            withContext(Dispatchers.IO) { Storage.entry(activity, uri)?.isDirectory == true }
+        } ?: false
+    }
     val idleSelectionInfo = remember { buildSelectionInfo(activity, emptySet()) }
     val selectionInfo by produceState(initialValue = idleSelectionInfo, selected, activity) {
         value = if (selected.isEmpty()) idleSelectionInfo else withContext(Dispatchers.IO) { buildSelectionInfo(activity, selected) }
@@ -680,8 +687,9 @@ private fun HyperBrowserApp() {
         }
     }
 
-    fun openGallery(uri: Uri, directory: Uri?) {
+    fun openGallery(uri: Uri, directory: Uri?, stage: GalleryStage = GalleryStage.SINGLE) {
         galleryDirectory = directory
+        galleryStage = stage
         galleryUri = uri
     }
 
@@ -766,6 +774,7 @@ private fun HyperBrowserApp() {
                         activity = activity,
                         startingUri = galleryUri!!,
                         directoryUri = galleryDirectory,
+                        startStage = galleryStage,
                         sortOrder = gallerySort,
                         onClose = { galleryUri = null },
                     )
@@ -789,9 +798,18 @@ private fun HyperBrowserApp() {
                                 onRename = { startRename() },
                                 renameActive = renameTarget != null,
                                 onGallery = {
-                                    val image = selectedFile?.takeIf { isImageSelected }
-                                    if (image != null) {
-                                        openGallery(image, sourceState.current)
+                                    val target = selectedFile
+                                    when {
+                                        // An image opens in view mode among the rest of its folder.
+                                        target != null && isImageSelected ->
+                                            openGallery(target, sourceState.current)
+                                        // A folder — chosen, or just the one the pane is showing —
+                                        // opens as a grid of what is in it.
+                                        target != null && isDirectorySelected ->
+                                            openGallery(target, target, GalleryStage.GRID_SMALL)
+                                        else -> sourceState.current?.let { directory ->
+                                            openGallery(directory, directory, GalleryStage.GRID_SMALL)
+                                        }
                                     }
                                 },
                                 multiSelect = multiSelect,
@@ -2321,11 +2339,12 @@ private fun ImageViewerScreen(
     activity: ComponentActivity,
     startingUri: Uri,
     directoryUri: Uri?,
+    startStage: GalleryStage,
     sortOrder: SortOrder,
     onClose: () -> Unit,
 ) {
     var currentUri by rememberSaveable(startingUri) { mutableStateOf(startingUri) }
-    var stage by rememberSaveable { mutableStateOf(GalleryStage.SINGLE) }
+    var stage by rememberSaveable(startingUri) { mutableStateOf(startStage) }
     var scale by rememberSaveable { mutableFloatStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
     var showMenu by remember { mutableStateOf(false) }
@@ -2348,7 +2367,16 @@ private fun ImageViewerScreen(
                     .filter { !it.isDirectory && isImageMimeType(it.mimeType ?: Storage.mimeType(activity, it.uri)) }
                     .sortedWith(comparatorFor(sortOrder))
             }?.takeIf { it.isNotEmpty() }
-                ?: listOfNotNull(Storage.entry(activity, startingUri))
+                // The gallery can also be opened on a folder, which is not an image itself.
+                ?: listOfNotNull(Storage.entry(activity, startingUri)?.takeIf { !it.isDirectory })
+        }
+    }
+
+    // Opened on a folder, the gallery starts on nothing in particular; the first image stands in
+    // so leaving the grid has somewhere to go.
+    LaunchedEffect(images) {
+        if (images.none { it.uri == currentUri }) {
+            images.firstOrNull()?.let { currentUri = it.uri }
         }
     }
 
@@ -2381,10 +2409,18 @@ private fun ImageViewerScreen(
     var single by remember { mutableStateOf<SingleImage?>(null) }
     var detail by remember { mutableStateOf<DetailTile?>(null) }
     var viewport by remember { mutableStateOf(IntSize.Zero) }
+    // Sensor data of a 40-megapixel frame takes seconds to decode; without this the previous
+    // image sits there looking as though nothing happened.
+    var loading by remember { mutableStateOf(false) }
     LaunchedEffect(currentUri, stage, viewport, inspect) {
         detail = null
         single = if (stage == GalleryStage.SINGLE) {
-            withContext(Dispatchers.IO) { loadSingleImage(activity, currentUri, viewport, inspect) }
+            loading = true
+            try {
+                withContext(Dispatchers.IO) { loadSingleImage(activity, currentUri, viewport, inspect) }
+            } finally {
+                loading = false
+            }
         } else {
             // A native-resolution bitmap is far too big to hold onto while the grid is showing.
             null
@@ -2820,10 +2856,16 @@ private fun ImageViewerScreen(
                 }
             }
 
-            val notice = single?.notice
-            if (inspect && notice != null && stage == GalleryStage.SINGLE) {
+            // What the inspector is actually showing, so a preview is never taken for the
+            // file's own pixels.
+            val provenance = when {
+                loading && inspect -> "Reading the file's own pixels…"
+                else -> single?.let { listOfNotNull(it.source, it.notice).joinToString(" — ") }
+                    ?.takeIf { it.isNotEmpty() }
+            }
+            if (inspect && provenance != null && stage == GalleryStage.SINGLE) {
                 Text(
-                    text = notice,
+                    text = provenance,
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier
@@ -2961,6 +3003,8 @@ private data class SingleImage(
     val tiff: RawImage.TiffImage? = null,
     /** Set when the inspector is showing undemosaiced sensor data. */
     val sensor: RawImage.SensorImage? = null,
+    /** What the inspector is showing: sensor data, full-resolution TIFF or embedded preview. */
+    val source: String? = null,
     /** Why the inspector could not show the file's own pixels, when it could not. */
     val notice: String? = null,
 )
@@ -2987,6 +3031,21 @@ private fun loadSingleImage(
     inspect: Boolean = false,
 ): SingleImage? {
     val source = imageSource(activity, uri) ?: return null
+
+    // RAW and TIFF: map the file when possible so size is bounded by the crop, not the source.
+    fun sourceBytes(): Pair<ByteSource, ByteArray?>? {
+        val mapped = if (source.seekable) mappedByteSource(activity, uri) else null
+        val bytes = if (mapped == null) source.bytes ?: source.open()?.let { RawImage.readAll(it) } else null
+        val byteSource = mapped ?: bytes?.let { RawImage.arraySource(it) } ?: return null
+        return byteSource to bytes
+    }
+
+    // The inspector runs before any other decode: both the platform decoder and decode() prefer
+    // an embedded preview, and would hand back the very image the gallery already shows.
+    if (inspect) {
+        sourceBytes()?.let { (byteSource, _) -> inspectorImage(byteSource, viewport)?.let { return it } }
+    }
+
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     source.open()?.use { BitmapFactory.decodeStream(it, null, bounds) }
     if (bounds.outWidth > 0 && bounds.outHeight > 0) {
@@ -3001,20 +3060,15 @@ private fun loadSingleImage(
                 sample = sample,
                 // Tiling only pays off once the overview itself had to be downscaled.
                 canTile = sample > 1 && source.seekable,
+                // Reached with the inspector on only when the file's own pixels could not be
+                // read; saying so beats passing a preview off as them.
+                source = if (inspect) "Embedded preview ${bounds.outWidth}\u00d7${bounds.outHeight}" else null,
+                notice = if (inspect) "sensor data in this file cannot be read" else null,
             )
         }
     }
 
-    // RAW and TIFF: map the file when possible so size is bounded by the crop, not the source.
-    val mapped = if (source.seekable) mappedByteSource(activity, uri) else null
-    val bytes = if (mapped == null) source.bytes ?: source.open()?.let { RawImage.readAll(it) } else null
-    val byteSource = mapped ?: bytes?.let { RawImage.arraySource(it) } ?: return null
-
-    // The inspector has to run before the decode() path below, which prefers the embedded
-    // preview and would hand back the same downscaled image the gallery already shows.
-    if (inspect) {
-        inspectorImage(byteSource, viewport)?.let { return it }
-    }
+    val (byteSource, bytes) = sourceBytes() ?: return null
 
     val decoded = RawImage.decode(byteSource, viewport.width, viewport.height, false)
     if (decoded != null) {
@@ -3028,8 +3082,9 @@ private fun loadSingleImage(
             height = rotated.height,
             sample = 1,
             canTile = false,
+            source = if (inspect) "Embedded preview ${rotated.width}\u00d7${rotated.height}" else null,
             // Saying so beats showing the preview as though it were the sensor data.
-            notice = if (inspect) "Sensor data in this file cannot be read; showing embedded preview" else null,
+            notice = if (inspect) "sensor data in this file cannot be read" else null,
         )
     }
 
@@ -3061,6 +3116,7 @@ private fun inspectorImage(byteSource: ByteSource, viewport: IntSize): SingleIma
             sample = ((sensor.width / 2) / overview.width).coerceAtLeast(1),
             canTile = overview.width < sensor.width / 2,
             sensor = sensor,
+            source = "Sensor data ${sensor.width}\u00d7${sensor.height} (${sensor.source})",
         )
     }
     val tiff = RawImage.openTiff(byteSource) ?: return null
@@ -3072,6 +3128,7 @@ private fun inspectorImage(byteSource: ByteSource, viewport: IntSize): SingleIma
         sample = (tiff.width / overview.width).coerceAtLeast(1),
         canTile = overview.width < tiff.width,
         tiff = tiff,
+        source = "Full resolution ${tiff.width}\u00d7${tiff.height}",
     )
 }
 

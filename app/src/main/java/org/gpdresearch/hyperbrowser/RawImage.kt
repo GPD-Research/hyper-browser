@@ -305,12 +305,47 @@ object RawImage {
     private const val TAG_BLACK_LEVEL = 0xC61A
     private const val TAG_WHITE_LEVEL = 0xC61D
     private const val TAG_AS_SHOT_NEUTRAL = 0xC628
+    private const val TAG_MAKE = 0x010F
+    private const val TAG_EXIF_IFD = 0x8769
+    private const val TAG_MAKER_NOTE = 0x927C
+    private const val TAG_DEFAULT_CROP_ORIGIN = 0xC61F
+    private const val TAG_DEFAULT_CROP_SIZE = 0xC620
+    private const val TAG_CR2_SLICE = 0xC640
+    private const val TAG_SONY_TONE_CURVE = 0x7010
+    private const val TAG_SONY_SR2_OFFSET = 0x7200
+    private const val TAG_SONY_SR2_LENGTH = 0x7201
+    private const val TAG_SONY_SR2_KEY = 0x7221
+    private const val TAG_DNG_PRIVATE = 0xC634
+    private const val TAG_SONY_BLACK_LEVEL = 0x7310
+    private const val TAG_SONY_WHITE_LEVEL = 0x787F
+    private const val TAG_SONY_WB_LEVELS = 0x7313
+    private const val TAG_NIKON_WB_LEVELS = 0x000C
+    private const val TAG_NIKON_BLACK_LEVEL = 0x003D
+    private const val TAG_NIKON_LINEARIZATION = 0x0096
+    private const val TAG_CANON_SENSOR_INFO = 0x00E0
+    private const val TAG_CANON_COLOR_DATA = 0x4001
+
+    /** "Nikon\u0000" plus a version and a pad, and then a TIFF header of its own. */
+    private const val NIKON_NOTE_HEADER = 10
+
+    /** Where as-shot levels sit in the Canon colour data blocks whose layout is known. */
+    private val CANON_WHITE_BALANCE_OFFSETS = intArrayOf(63, 71, 55, 583, 727, 479, 384, 58, 62)
+
+    /** Enough rows of the masked border to average out sensor noise. */
+    private const val BLACK_SAMPLE_ROWS = 16
+
+    /** Sony's private directory is a few tens of kilobytes; anything larger is not one. */
+    private const val MAX_SONY_PRIVATE_BYTES = 1 shl 20
 
     private const val COMPRESSION_NONE = 1
     private const val COMPRESSION_LZW = 5
     private const val COMPRESSION_DEFLATE = 8
     private const val COMPRESSION_DEFLATE_ADOBE = 32946
     private const val COMPRESSION_PACKBITS = 32773
+    private const val COMPRESSION_OLD_JPEG = 6
+    private const val COMPRESSION_LOSSLESS_JPEG = 7
+    private const val COMPRESSION_SONY_ARW = 32767
+    private const val COMPRESSION_NIKON = 34713
 
     private const val PHOTOMETRIC_CFA = 32803
 
@@ -331,6 +366,14 @@ object RawImage {
 
         fun first(tag: Int, fallback: Long): Long = values(tag)?.firstOrNull() ?: fallback
 
+        /** An ASCII field, e.g. the camera maker, without its terminator. */
+        fun text(tag: Int): String? {
+            val field = fields[tag] ?: return null
+            val chars = field.values.takeWhile { it in 32..126 }
+            if (chars.isEmpty()) return null
+            return chars.map { it.toInt().toChar() }.joinToString("").trim()
+        }
+
         fun doubles(tag: Int): DoubleArray? {
             val field = fields[tag] ?: return null
             if (field.type != TYPE_RATIONAL && field.type != TYPE_SRATIONAL) {
@@ -341,6 +384,36 @@ object RawImage {
                 if (denominator == 0L) 0.0 else field.values[index * 2].toDouble() / denominator
             }
         }
+    }
+
+    /** A view of a byte source starting part way in, for formats nested inside a file. */
+    internal class SubSource(private val base: ByteSource, private val start: Int) : ByteSource {
+        override val size: Int get() = (base.size - start).coerceAtLeast(0)
+        override fun u8(offset: Int): Int = base.u8(start + offset)
+        override fun copyRange(offset: Int, length: Int): ByteArray? = base.copyRange(start + offset, length)
+        override fun stream(offset: Int, length: Int): InputStream? = base.stream(start + offset, length)
+    }
+
+    /**
+     * A block of bytes read out of a file, addressed by the offsets it had in that file. Sony's
+     * private directory has to be decrypted before it can be parsed, but its offsets still point
+     * at the original file positions.
+     */
+    internal class OffsetSource(private val data: ByteArray, private val start: Int) : ByteSource {
+        override val size: Int get() = start + data.size
+        override fun u8(offset: Int): Int {
+            val at = offset - start
+            return if (at < 0 || at >= data.size) 0 else data[at].toInt() and 0xFF
+        }
+
+        override fun copyRange(offset: Int, length: Int): ByteArray? {
+            val at = offset - start
+            if (at < 0 || length < 0 || at + length > data.size) return null
+            return data.copyOfRange(at, at + length)
+        }
+
+        override fun stream(offset: Int, length: Int): InputStream? =
+            copyRange(offset, length)?.let { ByteArrayInputStream(it) }
     }
 
     internal class TiffFile(val source: ByteSource, val littleEndian: Boolean) {
@@ -364,7 +437,7 @@ object RawImage {
      * cut up, so both are described the same way and read by the same loop; tiles are what make a
      * crop of a huge TIFF cost the crop rather than everything above it.
      */
-    private class Blocks(
+    internal class Blocks(
         val width: Int,
         val height: Int,
         val across: Int,
@@ -740,7 +813,7 @@ object RawImage {
         return step
     }
 
-    private fun readFully(stream: InputStream, buffer: ByteArray, length: Int = buffer.size): Boolean {
+    internal fun readFully(stream: InputStream, buffer: ByteArray, length: Int = buffer.size): Boolean {
         var filled = 0
         while (filled < length) {
             val read = stream.read(buffer, filled, length - filled)
@@ -750,7 +823,7 @@ object RawImage {
         return true
     }
 
-    private fun skipFully(stream: InputStream, count: Long, scratch: ByteArray) {
+    internal fun skipFully(stream: InputStream, count: Long, scratch: ByteArray) {
         var remaining = count
         while (remaining > 0) {
             val skipped = stream.skip(remaining)
@@ -765,7 +838,7 @@ object RawImage {
     }
 
     /** Rows are pulled through a stream, so even a single 500 MB strip costs one row of memory. */
-    private fun blockStream(source: ByteSource, offset: Int, length: Int, compression: Int): InputStream? {
+    internal fun blockStream(source: ByteSource, offset: Int, length: Int, compression: Int): InputStream? {
         if (offset < 0 || length <= 0 || offset + length > source.size) return null
         val base = source.stream(offset, length) ?: return null
         return when (compression) {
@@ -778,7 +851,7 @@ object RawImage {
     }
 
     /** Raw sample [index] of a row, for 8, 16 and the packed 12/14-bit layouts RAW files use. */
-    private fun sampleValue(row: ByteArray, index: Int, bits: Int, littleEndian: Boolean): Int = when (bits) {
+    internal fun sampleValue(row: ByteArray, index: Int, bits: Int, littleEndian: Boolean): Int = when (bits) {
         8 -> {
             if (index >= row.size) 0 else row[index].toInt() and 0xFF
         }
@@ -848,7 +921,7 @@ object RawImage {
         }
     }
 
-    private fun applyHorizontalPredictor(row: ByteArray, width: Int, samples: Int) {
+    internal fun applyHorizontalPredictor(row: ByteArray, width: Int, samples: Int) {
         val end = minOf(width * samples, row.size)
         for (x in samples until end) {
             row[x] = (row[x] + row[x - samples]).toByte()
@@ -863,54 +936,225 @@ object RawImage {
      * to 1:1 on a 60 MP frame without ever holding the whole demosaiced image.
      */
     class SensorImage internal constructor(
-        internal val file: TiffFile,
-        internal val directory: Directory,
-        val width: Int,
-        val height: Int,
+        internal val info: SensorInfo,
     ) {
+        /** The visible frame, in photosites: the masked border a sensor carries is left out. */
+        val width: Int get() = info.width
+        val height: Int get() = info.height
+
+        /** How the sensor data is stored, so the inspector can name what it is showing. */
+        val source: String get() = info.label
+
         fun render(targetWidth: Int, targetHeight: Int, region: Rect?): Bitmap? =
-            renderSensor(file, directory, targetWidth, targetHeight, region)
+            renderSensor(info, targetWidth, targetHeight, region)
     }
 
+    /** Everything needed to decode and develop one RAW file's photosites. */
+    internal class SensorInfo(
+        /** A codec holds decoding state, so each render gets its own. */
+        val open: () -> SensorCodec?,
+        val label: String,
+        val sensorWidth: Int,
+        val sensorHeight: Int,
+        val originX: Int,
+        val originY: Int,
+        val width: Int,
+        val height: Int,
+        val pattern: IntArray,
+        val colour: SensorColour,
+    )
+
     /**
-     * Opens the sensor data of a RAW file. Returns null when the file's sensor data uses a
-     * compression this decoder cannot read (lossless JPEG, proprietary maker formats), so callers
-     * can say so instead of quietly showing the embedded preview again.
+     * Opens the sensor data of a RAW file. Returns null when the sensor data is stored in a way
+     * this decoder cannot read (Canon's CR3 codec, Fujifilm's compressed RAF, …), so callers can
+     * say so instead of quietly showing the embedded preview again.
      */
     fun openSensor(source: ByteSource): SensorImage? {
         val file = tiffHeader(source) ?: return null
         val directories = mutableListOf<Directory>()
         readDirectories(file, file.u32(4).toInt(), directories, depth = 0)
         val best = directories
-            .filter { sensorDirectory(it) }
-            .maxByOrNull { it.first(TAG_IMAGE_WIDTH, 0) * it.first(TAG_IMAGE_LENGTH, 0) }
+            .mapNotNull { sensorInfo(file, directories, it) }
+            .maxByOrNull { it.sensorWidth.toLong() * it.sensorHeight }
             ?: return null
-        return SensorImage(
-            file = file,
-            directory = best,
-            width = best.first(TAG_IMAGE_WIDTH, 0).toInt(),
-            height = best.first(TAG_IMAGE_LENGTH, 0).toInt(),
-        )
+        return SensorImage(best)
     }
 
     /** Kept for callers that only want a whole-frame demosaic. */
     fun demosaic(source: ByteSource, targetWidth: Int, targetHeight: Int): Bitmap? =
         openSensor(source)?.render(targetWidth, targetHeight, null)
 
-    private fun sensorDirectory(directory: Directory): Boolean {
-        val width = directory.first(TAG_IMAGE_WIDTH, 0)
-        val height = directory.first(TAG_IMAGE_LENGTH, 0)
-        if (width < 16 || height < 16) return false
-        if (blocksFor(directory, width.toInt(), height.toInt()) == null) return false
-        if (directory.first(TAG_PLANAR_CONFIGURATION, 1) != 1L) return false
-        if (directory.first(TAG_SAMPLES_PER_PIXEL, 1) != 1L) return false
-        val bits = (directory.values(TAG_BITS_PER_SAMPLE) ?: return false).first()
-        if (bits != 8L && bits != 12L && bits != 14L && bits != 16L) return false
+    /**
+     * Describes one directory's sensor data, or null when it holds something else (a preview, a
+     * thumbnail) or a layout with no codec here.
+     */
+    private fun sensorInfo(file: TiffFile, all: List<Directory>, directory: Directory): SensorInfo? {
+        val width = directory.first(TAG_IMAGE_WIDTH, 0).toInt()
+        val height = directory.first(TAG_IMAGE_LENGTH, 0).toInt()
+        if (width < 16 || height < 16) return null
+        if (directory.first(TAG_PLANAR_CONFIGURATION, 1) != 1L) return null
+        val compression = directory.first(TAG_COMPRESSION, 1).toInt()
         val photometric = directory.first(TAG_PHOTOMETRIC, -1)
         // 1 = BlackIsZero (some backs write plain greyscale), 32803 = colour filter array.
-        if (photometric != 1L && photometric != PHOTOMETRIC_CFA.toLong()) return false
-        return supportedCompression(directory.first(TAG_COMPRESSION, 1).toInt())
+        if (photometric != -1L && photometric != 1L && photometric != PHOTOMETRIC_CFA.toLong()) return null
+
+        val blocks = blocksFor(directory, width, height)
+        val tagBits = directory.values(TAG_BITS_PER_SAMPLE)?.firstOrNull()?.toInt()
+        val maker = makerFor(file, all)
+
+        var bits = tagBits ?: 0
+        val label: String
+        val open: () -> SensorCodec?
+
+        when {
+            supportedCompression(compression) -> {
+                if (blocks == null) return null
+                if (directory.first(TAG_SAMPLES_PER_PIXEL, 1) != 1L) return null
+                if (bits != 8 && bits != 12 && bits != 14 && bits != 16) return null
+                val predictor = directory.first(TAG_PREDICTOR, 1).toInt()
+                val container = containerBits(blocks, bits, compression)
+                label = if (compression == COMPRESSION_NONE) "uncompressed sensor data" else "sensor data"
+                open = {
+                    PackedSensorCodec(
+                        source = file.source,
+                        blocks = blocks,
+                        width = width,
+                        height = height,
+                        bits = container,
+                        compression = compression,
+                        littleEndian = file.littleEndian,
+                        predictor = predictor,
+                        label = label,
+                    )
+                }
+            }
+            compression == COMPRESSION_SONY_ARW -> {
+                if (blocks == null || blocks.across != 1) return null
+                // Sony packs sixteen photosites into sixteen bytes, so a row is one byte wide
+                // per photosite whatever the sensor's bit depth is.
+                val offset = blocks.offsets.firstOrNull()?.toInt() ?: return null
+                val stored = blocks.counts.firstOrNull() ?: return null
+                if (stored < width.toLong() * height) return null
+                if (offset < 0 || offset.toLong() + stored > file.source.size) return null
+                if (bits <= 0) bits = 14
+                val curve = sonyToneCurve(directory)
+                label = "Sony compressed RAW"
+                open = { Arw2SensorCodec(file.source, offset, width, height, curve) }
+            }
+            compression == COMPRESSION_NIKON -> {
+                if (blocks == null || blocks.across != 1) return null
+                val offset = blocks.offsets.firstOrNull()?.toInt() ?: return null
+                val length = blocks.counts.firstOrNull()?.toInt() ?: return null
+                if (bits != 12 && bits != 14) return null
+                val nikon = maker?.let { nikonCompression(it, bits) } ?: return null
+                label = "Nikon compressed RAW"
+                open = {
+                    NikonSensorCodec(
+                        source = file.source,
+                        offset = offset,
+                        length = length,
+                        width = width,
+                        height = height,
+                        bits = bits,
+                        curve = nikon.curve,
+                        vertical = nikon.vertical,
+                        tree = nikon.tree,
+                        split = nikon.split,
+                    )
+                }
+            }
+            compression == COMPRESSION_LOSSLESS_JPEG || compression == COMPRESSION_OLD_JPEG -> {
+                // An ordinary JPEG preview is stored the same way; only a lossless frame whose
+                // samples cover the whole sensor is sensor data.
+                if (blocks == null || blocks.across != 1) return null
+                val offset = blocks.offsets.firstOrNull()?.toInt() ?: return null
+                val length = blocks.counts.firstOrNull()?.toInt() ?: return null
+                val slices = directory.values(TAG_CR2_SLICE)
+                    ?.takeIf { it.size >= 3 }
+                    ?.let { intArrayOf(it[0].toInt(), it[1].toInt(), it[2].toInt()) }
+                val codec = LosslessJpegSensorCodec.open(
+                    file.source, offset, length, width, height, slices, "lossless JPEG RAW",
+                ) ?: return null
+                // Canon writes 16 in the tag whatever the sensor's depth is; the frame's own
+                // precision is the one the samples are actually coded at.
+                bits = codec.bits
+                if (bits !in 8..16) return null
+                label = "lossless JPEG RAW"
+                open = {
+                    LosslessJpegSensorCodec.open(
+                        file.source, offset, length, width, height, slices, label,
+                    )
+                }
+            }
+            else -> return null
+        }
+
+        val crop = visibleFrame(directory, maker, width, height)
+        val colour = sensorColour(directory, maker, bits, open, crop.left)
+        return SensorInfo(
+            open = open,
+            label = label,
+            sensorWidth = width,
+            sensorHeight = height,
+            originX = crop.left,
+            originY = crop.top,
+            width = crop.width(),
+            height = crop.height(),
+            pattern = cfaPattern(directory),
+            colour = colour,
+        )
     }
+
+    /**
+     * How wide the container holding each sample is. A camera that calls its RAW "14-bit
+     * uncompressed" usually means 14 bits of data in a 16 bit word, which the block's byte count
+     * gives away: it is twice as long as packed samples would need.
+     */
+    private fun containerBits(blocks: Blocks, bits: Int, compression: Int): Int {
+        if (compression != COMPRESSION_NONE || bits >= 16) return bits
+        val stored = blocks.counts.firstOrNull() ?: return bits
+        val rows = blocks.height.toLong().coerceAtLeast(1L)
+        val packedRow = (blocks.width.toLong() * bits + 7) / 8
+        val storedRow = stored / rows
+        return if (storedRow >= blocks.width.toLong() * 2 && storedRow > packedRow) 16 else bits
+    }
+
+    /**
+     * The part of the sensor the camera actually images. Sensors carry masked and optically
+     * black borders which are not part of the photograph, and Canon's are wide enough to be
+     * obvious in the inspector.
+     */
+    private fun visibleFrame(directory: Directory, maker: MakerNote?, width: Int, height: Int): Rect {
+        val origin = directory.values(TAG_DEFAULT_CROP_ORIGIN)
+        val size = directory.values(TAG_DEFAULT_CROP_SIZE)
+        if (origin != null && origin.size >= 2 && size != null && size.size >= 2) {
+            val rect = Rect(
+                origin[0].toInt(),
+                origin[1].toInt(),
+                origin[0].toInt() + size[0].toInt(),
+                origin[1].toInt() + size[1].toInt(),
+            )
+            if (rect.intersect(0, 0, width, height) && rect.width() >= 16 && rect.height() >= 16) {
+                return alignToFilterCell(rect)
+            }
+        }
+        val borders = maker?.canonSensorBorders()
+        if (borders != null) {
+            val rect = Rect(borders[0], borders[1], borders[2] + 1, borders[3] + 1)
+            if (rect.intersect(0, 0, width, height) && rect.width() >= 16 && rect.height() >= 16) {
+                return alignToFilterCell(rect)
+            }
+        }
+        return Rect(0, 0, width, height)
+    }
+
+    /** A crop that starts mid-cell would swap the colours of every pixel in the frame. */
+    private fun alignToFilterCell(rect: Rect): Rect = Rect(
+        rect.left and 1.inv(),
+        rect.top and 1.inv(),
+        rect.right and 1.inv(),
+        rect.bottom and 1.inv(),
+    )
 
     /** Colour of each photosite in the 2x2 filter cell: 0 red, 1 green, 2 blue. */
     private fun cfaPattern(directory: Directory): IntArray {
@@ -922,7 +1166,7 @@ object RawImage {
         return if (colours.any { it !in 0..2 }) intArrayOf(0, 1, 1, 2) else colours
     }
 
-    private class SensorColour(
+    internal class SensorColour(
         val black: Float,
         val white: Float,
         val gains: FloatArray,
@@ -942,21 +1186,360 @@ object RawImage {
         }
     }
 
-    private fun sensorColour(directory: Directory, bits: Int): SensorColour {
+    /**
+     * Black point, white point and white balance. DNG records all three in ordinary tags;
+     * every camera maker records them somewhere of its own, and without them a RAW develops
+     * as a flat green frame, so each maker's own location is read too.
+     */
+    private fun sensorColour(
+        directory: Directory,
+        maker: MakerNote?,
+        bits: Int,
+        open: () -> SensorCodec?,
+        maskedColumns: Int,
+    ): SensorColour {
         val maximum = ((1 shl bits) - 1).toFloat()
-        val black = directory.doubles(TAG_BLACK_LEVEL)?.firstOrNull()?.toFloat() ?: 0f
-        val white = directory.doubles(TAG_WHITE_LEVEL)?.firstOrNull()?.toFloat() ?: maximum
-        val neutral = directory.doubles(TAG_AS_SHOT_NEUTRAL)
-        val gains = FloatArray(3) { 1f }
-        if (neutral != null && neutral.size >= 3 && neutral.all { it > 0.0 }) {
-            // Green is left at unity so exposure is unchanged and only the cast is removed.
-            for (colour in 0..2) gains[colour] = (neutral[1] / neutral[colour]).toFloat().coerceIn(0.25f, 8f)
+        var black = directory.doubles(TAG_BLACK_LEVEL)?.firstOrNull()?.toFloat()
+        var white = directory.doubles(TAG_WHITE_LEVEL)?.firstOrNull()?.toFloat()
+        var gains = gainsFrom(directory.doubles(TAG_AS_SHOT_NEUTRAL)?.let { neutral ->
+            if (neutral.size >= 3 && neutral.all { it > 0.0 }) {
+                floatArrayOf(
+                    (neutral[1] / neutral[0]).toFloat(),
+                    1f,
+                    (neutral[1] / neutral[2]).toFloat(),
+                )
+            } else {
+                null
+            }
+        })
+
+        if (maker != null) {
+            when {
+                maker.isSony -> maker.sonyPrivate()?.let { sony ->
+                    if (black == null) black = sony.black
+                    // Sony clips its sensor below the bit depth's maximum.
+                    if (sony.white != null) white = sony.white
+                    if (gains == null) gains = gainsFrom(sony.gains)
+                }
+                maker.isNikon -> {
+                    if (black == null) black = maker.shorts(TAG_NIKON_BLACK_LEVEL)?.firstOrNull()?.toFloat()
+                    if (gains == null) gains = gainsFrom(maker.nikonWhiteBalance())
+                }
+                maker.isCanon -> if (gains == null) gains = gainsFrom(maker.canonWhiteBalance())
+            }
         }
+        // Canon states its black point nowhere a decoder can rely on, but leaves a masked
+        // border on the sensor: what those photosites read is the black point by definition.
+        if (black == null && maskedColumns >= 32) black = estimateBlack(open, maskedColumns)
+
+        val resolved = (black ?: 0f).coerceIn(0f, maximum)
         return SensorColour(
-            black = black.coerceIn(0f, maximum),
-            white = white.coerceIn(1f, maximum).coerceAtLeast(black + 1f),
-            gains = gains,
+            black = resolved,
+            white = (white ?: maximum).coerceIn(1f, maximum).coerceAtLeast(resolved + 1f),
+            gains = gains ?: FloatArray(3) { 1f },
         )
+    }
+
+    /** Green is left at unity so only the cast is removed and the exposure is unchanged. */
+    private fun gainsFrom(multipliers: FloatArray?): FloatArray? {
+        if (multipliers == null || multipliers.size < 3) return null
+        if (multipliers.any { !it.isFinite() || it <= 0f }) return null
+        return FloatArray(3) { multipliers[it].coerceIn(0.25f, 8f) }
+    }
+
+    /** Averages the optically black columns of the first rows of the frame. */
+    private fun estimateBlack(open: () -> SensorCodec?, maskedColumns: Int): Float? {
+        val codec = open() ?: return null
+        val from = 4
+        val to = (maskedColumns - 8).coerceAtMost(from + 64)
+        if (to <= from) return null
+        var total = 0L
+        var count = 0
+        val sink = SensorRowSink { y, xStart, samples, samplesCount ->
+            if (y < BLACK_SAMPLE_ROWS) {
+                for (x in maxOf(from, xStart) until minOf(to, xStart + samplesCount)) {
+                    total += samples[x - xStart].toLong()
+                    count += 1
+                }
+            }
+        }
+        runCatching { codec.scan({ y -> y < BLACK_SAMPLE_ROWS }, sink) }
+        return if (count < 64) null else (total.toDouble() / count).toFloat()
+    }
+
+    // ---- Maker notes --------------------------------------------------------------------------
+
+    /**
+     * A camera maker's private metadata. It is a TIFF directory like any other, but Nikon keeps
+     * it in its own little TIFF with its own byte order and offsets, and Sony encrypts the block
+     * holding the values that matter, so each is reached differently.
+     */
+    internal class MakerNote(
+        val make: String,
+        private val file: TiffFile,
+        private val notes: Directory?,
+        private val notesOffset: Int,
+        private val rootFile: TiffFile,
+        private val directories: List<Directory>,
+    ) {
+        val isSony: Boolean get() = make.startsWith("SONY", ignoreCase = true)
+        val isNikon: Boolean get() = make.startsWith("NIKON", ignoreCase = true)
+        val isCanon: Boolean get() = make.startsWith("CANON", ignoreCase = true)
+
+        fun shorts(tag: Int): LongArray? = notes?.values(tag)
+
+        /** Where a maker note tag's data starts, for values this decoder parses itself. */
+        fun dataOffset(tag: Int): Int? = fieldOffset(file, notesOffset, tag)
+
+        fun notesFile(): TiffFile = file
+
+        fun canonSensorBorders(): IntArray? {
+            val info = shorts(TAG_CANON_SENSOR_INFO) ?: return null
+            if (info.size < 9) return null
+            val borders = IntArray(4) { info[5 + it].toInt() }
+            if (borders[2] <= borders[0] || borders[3] <= borders[1]) return null
+            return borders
+        }
+
+        /**
+         * Canon's as-shot levels live inside its colour data block at an offset that depends on
+         * the block's version. Only the versions with a known offset are read, and the values
+         * are checked for the shape white balance levels have before they are believed.
+         */
+        fun canonWhiteBalance(): FloatArray? {
+            val data = shorts(TAG_CANON_COLOR_DATA) ?: return null
+            if (data.isEmpty()) return null
+            for (at in CANON_WHITE_BALANCE_OFFSETS) {
+                if (at + 3 >= data.size) continue
+                val red = data[at].toInt()
+                val greenOne = data[at + 1].toInt()
+                val greenTwo = data[at + 2].toInt()
+                val blue = data[at + 3].toInt()
+                if (greenOne != greenTwo || greenOne !in 512..4096) continue
+                if (red !in 256..16384 || blue !in 256..16384) continue
+                return floatArrayOf(
+                    red.toFloat() / greenOne,
+                    1f,
+                    blue.toFloat() / greenOne,
+                )
+            }
+            return null
+        }
+
+        /** Nikon stores the red and blue multipliers directly, already relative to green. */
+        fun nikonWhiteBalance(): FloatArray? {
+            val levels = notes?.doubles(TAG_NIKON_WB_LEVELS) ?: return null
+            if (levels.size < 2 || levels[0] <= 0.0 || levels[1] <= 0.0) return null
+            return floatArrayOf(levels[0].toFloat(), 1f, levels[1].toFloat())
+        }
+
+        /**
+         * Sony hides its levels in an encrypted directory whose location is written into the
+         * DNG private data tag, so it is reached through the file rather than the maker note.
+         */
+        fun sonyPrivate(): SonyPrivate? {
+            val root = directories.firstOrNull() ?: return null
+            if (root.fields[TAG_DNG_PRIVATE] == null) return null
+            val pointer = fieldOffset(rootFile, rootFile.u32(4).toInt(), TAG_DNG_PRIVATE) ?: return null
+            val privateOffset = rootFile.u32(pointer).toInt()
+            val privateIfd = readSingleDirectory(rootFile, privateOffset) ?: return null
+            val offset = privateIfd.first(TAG_SONY_SR2_OFFSET, 0).toInt()
+            val length = privateIfd.first(TAG_SONY_SR2_LENGTH, 0).toInt()
+            val keyAt = fieldOffset(rootFile, privateOffset, TAG_SONY_SR2_KEY) ?: return null
+            val key = rootFile.u32(keyAt).toInt()
+            if (offset <= 0 || length <= 16 || length > MAX_SONY_PRIVATE_BYTES) return null
+            if (offset.toLong() + length > rootFile.source.size) return null
+            val encrypted = rootFile.source.copyRange(offset, length) ?: return null
+            sonyDecrypt(encrypted, key)
+            val decrypted = TiffFile(OffsetSource(encrypted, offset), rootFile.littleEndian)
+            val directory = readSingleDirectory(decrypted, offset) ?: return null
+            val black = directory.values(TAG_SONY_BLACK_LEVEL)?.firstOrNull()?.toFloat()
+            val white = directory.values(TAG_SONY_WHITE_LEVEL)?.firstOrNull()?.toFloat()
+            val levels = directory.values(TAG_SONY_WB_LEVELS)
+            val gains = if (levels != null && levels.size >= 4 && levels[1] > 0) {
+                floatArrayOf(
+                    levels[0].toFloat() / levels[1],
+                    1f,
+                    levels[3].toFloat() / levels[1],
+                )
+            } else {
+                null
+            }
+            if (black == null && gains == null && white == null) return null
+            return SonyPrivate(black, white, gains)
+        }
+    }
+
+    internal class SonyPrivate(val black: Float?, val white: Float?, val gains: FloatArray?)
+
+    private fun makerFor(file: TiffFile, directories: List<Directory>): MakerNote? {
+        val root = directories.firstOrNull() ?: return null
+        val make = root.text(TAG_MAKE) ?: return null
+        var notes: Directory? = null
+        var notesFile = file
+        var notesOffset = 0
+        val exif = root.first(TAG_EXIF_IFD, 0).toInt()
+        if (exif > 0) {
+            val at = fieldOffset(file, exif, TAG_MAKER_NOTE)
+            if (at != null && at > 0) {
+                if (make.startsWith("NIKON", ignoreCase = true) && looksLikeNikonNote(file, at)) {
+                    // Nikon's note is a TIFF of its own: its offsets count from its own header.
+                    val inner = tiffHeader(SubSource(file.source, at + NIKON_NOTE_HEADER))
+                    if (inner != null) {
+                        notesFile = inner
+                        notesOffset = inner.u32(4).toInt()
+                        notes = readSingleDirectory(inner, notesOffset)
+                    }
+                } else {
+                    notesOffset = at
+                    notes = readSingleDirectory(file, at)
+                }
+            }
+        }
+        return MakerNote(make, notesFile, notes, notesOffset, file, directories)
+    }
+
+    private fun looksLikeNikonNote(file: TiffFile, at: Int): Boolean {
+        if (at + NIKON_NOTE_HEADER + 8 > file.source.size) return false
+        return file.u8(at) == 'N'.code && file.u8(at + 1) == 'i'.code && file.u8(at + 2) == 'k'.code
+    }
+
+    /** Reads one directory without following its chain, for notes that are not part of one. */
+    private fun readSingleDirectory(file: TiffFile, offset: Int): Directory? {
+        if (offset <= 0 || offset + 2 > file.source.size) return null
+        val count = file.u16(offset)
+        if (count <= 0 || count > 1024) return null
+        if (offset + 2 + count * 12 > file.source.size) return null
+        val fields = HashMap<Int, Field>(count)
+        for (i in 0 until count) {
+            val entry = offset + 2 + i * 12
+            val field = readField(file, entry) ?: continue
+            fields[file.u16(entry)] = field
+        }
+        return Directory(fields)
+    }
+
+    /** The file offset of a field's data, which is what a nested parser needs. */
+    private fun fieldOffset(file: TiffFile, ifd: Int, tag: Int): Int? {
+        if (ifd <= 0 || ifd + 2 > file.source.size) return null
+        val count = file.u16(ifd)
+        if (count <= 0 || count > 1024) return null
+        if (ifd + 2 + count * 12 > file.source.size) return null
+        for (i in 0 until count) {
+            val entry = ifd + 2 + i * 12
+            if (file.u16(entry) != tag) continue
+            val type = file.u16(entry + 2)
+            val length = file.u32(entry + 4) * when (type) {
+                1, 2, 6, 7 -> 1
+                3, 8 -> 2
+                4, 9, 11 -> 4
+                else -> 8
+            }
+            return if (length <= 4) entry + 8 else file.u32(entry + 8).toInt()
+        }
+        return null
+    }
+
+    /**
+     * Sony's block cipher: a 128 word pad generated from a key in the file, XORed over the data
+     * a word at a time. The pad's own words are folded together as it is consumed.
+     */
+    private fun sonyDecrypt(data: ByteArray, key: Int) {
+        val pad = IntArray(128)
+        var seed = key
+        for (p in 0 until 4) {
+            seed = seed * 48828125 + 1
+            pad[p] = seed
+        }
+        pad[3] = (pad[3] shl 1) or ((pad[0] xor pad[2]) ushr 31)
+        for (p in 4 until 127) {
+            pad[p] = ((pad[p - 4] xor pad[p - 2]) shl 1) or ((pad[p - 3] xor pad[p - 1]) ushr 31)
+        }
+        for (p in 0 until 127) pad[p] = Integer.reverseBytes(pad[p])
+        // The pad is consumed from where its generation left off, not from its start.
+        var p = 127
+        var at = 0
+        while (at + 4 <= data.size) {
+            pad[p and 127] = pad[(p + 1) and 127] xor pad[(p + 65) and 127]
+            val word = (data[at].toInt() and 0xFF) or
+                ((data[at + 1].toInt() and 0xFF) shl 8) or
+                ((data[at + 2].toInt() and 0xFF) shl 16) or
+                ((data[at + 3].toInt() and 0xFF) shl 24)
+            val plain = word xor pad[p and 127]
+            data[at] = plain.toByte()
+            data[at + 1] = (plain shr 8).toByte()
+            data[at + 2] = (plain shr 16).toByte()
+            data[at + 3] = (plain shr 24).toByte()
+            p += 1
+            at += 4
+        }
+    }
+
+    /** Sony's tone curve: the five segments that put 11-bit compressed values back on scale. */
+    private fun sonyToneCurve(directory: Directory): IntArray? {
+        val points = directory.values(TAG_SONY_TONE_CURVE) ?: return null
+        if (points.size < 4) return null
+        val breaks = IntArray(6)
+        for (i in 0 until 4) breaks[i + 1] = ((points[i] shr 2) and 0xFFF).toInt()
+        breaks[5] = 0xFFF
+        if (breaks.toList() != breaks.sorted()) return null
+        val curve = IntArray(0x1000)
+        for (segment in 0 until 5) {
+            for (i in (breaks[segment] + 1)..breaks[segment + 1]) {
+                curve[i] = curve[i - 1] + (1 shl segment)
+            }
+        }
+        return curve
+    }
+
+    /** Nikon's Huffman tree choice, linearisation curve and the row its tree changes on. */
+    internal class NikonMeta(val curve: IntArray, val vertical: IntArray, val tree: Int, val split: Int)
+
+    private fun nikonCompression(maker: MakerNote, bits: Int): NikonMeta? {
+        if (!maker.isNikon) return null
+        val file = maker.notesFile()
+        val start = maker.dataOffset(TAG_NIKON_LINEARIZATION) ?: return null
+        if (start <= 0 || start + 16 > file.source.size) return null
+        var at = start
+        val version = file.u8(at)
+        val revision = file.u8(at + 1)
+        at += 2
+        if (version == 0x49 || revision == 0x58) at += 2110
+        var tree = if (version == 0x46) 2 else 0
+        if (bits == 14) tree += 3
+        if (at + 10 > file.source.size) return null
+        val vertical = IntArray(4) { file.u16(at + it * 2) }
+        at += 8
+        var max = (1 shl bits) and 0x7FFF
+        val size = file.u16(at)
+        at += 2
+        // As wide as a sample index can be, so the curve's last point lands inside it.
+        val curve = IntArray(1 shl 16) { it }
+        var split = 0
+        val step = if (size > 1) max / (size - 1) else 0
+        if (version == 0x44 && revision == 0x20 && step > 0) {
+            if (at + size * 2 > file.source.size) return null
+            for (i in 0 until size) {
+                val index = i * step
+                if (index < curve.size) curve[index] = file.u16(at + i * 2)
+            }
+            for (i in 0 until minOf(max, curve.size)) {
+                val base = i - i % step
+                val next = minOf(base + step, curve.size - 1)
+                curve[i] = (curve[base] * (step - i % step) + curve[next] * (i % step)) / step
+            }
+            split = file.u16(start + 562)
+        } else if (version != 0x46 && size in 1..0x4001) {
+            if (at + size * 2 > file.source.size) return null
+            max = minOf(size, curve.size)
+            for (i in 0 until max) curve[i] = file.u16(at + i * 2)
+        }
+        max = max.coerceIn(2, curve.size)
+        while (max > 2 && curve[max - 2] == curve[max - 1]) max -= 1
+        // Everything above the curve's last meaningful entry is clipped, not extrapolated.
+        for (i in max until curve.size) curve[i] = curve[max - 1]
+        if (split !in 0 until (1 shl 16)) split = 0
+        return NikonMeta(curve, vertical, tree, split)
     }
 
     /**
@@ -965,29 +1548,21 @@ object RawImage {
      * edges and without ever materialising the full frame.
      */
     private fun renderSensor(
-        file: TiffFile,
-        directory: Directory,
+        info: SensorInfo,
         targetWidth: Int,
         targetHeight: Int,
         region: Rect?,
     ): Bitmap? {
-        val width = directory.first(TAG_IMAGE_WIDTH, 0).toInt()
-        val height = directory.first(TAG_IMAGE_LENGTH, 0).toInt()
-        val bits = (directory.values(TAG_BITS_PER_SAMPLE) ?: longArrayOf(16)).first().toInt()
-        val compression = directory.first(TAG_COMPRESSION, 1).toInt()
-        val predictor = directory.first(TAG_PREDICTOR, 1).toInt()
-        val blocks = blocksFor(directory, width, height) ?: return null
-        val pattern = cfaPattern(directory)
-        val colour = sensorColour(directory, bits)
-
-        val crop = Rect(0, 0, width, height)
-        if (region != null && !crop.setIntersect(region, Rect(0, 0, width, height))) return null
+        // The caller works in the visible frame; the codec works in whole-sensor coordinates.
+        val crop = Rect(0, 0, info.width, info.height)
+        if (region != null && !crop.setIntersect(region, Rect(0, 0, info.width, info.height))) return null
+        crop.offset(info.originX, info.originY)
         // Filter cells are 2x2, so a crop that starts mid-cell would swap the colours.
         crop.left = crop.left and 1.inv()
         crop.top = crop.top and 1.inv()
         crop.right = (crop.right + 1) and 1.inv()
         crop.bottom = (crop.bottom + 1) and 1.inv()
-        if (!crop.intersect(0, 0, width and 1.inv(), height and 1.inv())) return null
+        if (!crop.intersect(0, 0, info.sensorWidth and 1.inv(), info.sensorHeight and 1.inv())) return null
         if (crop.width() < 2 || crop.height() < 2) return null
 
         // One output pixel per filter cell at 1:1; coarser scales average whole cells.
@@ -1006,80 +1581,43 @@ object RawImage {
         val pixels = IntArray(outWidth * outHeight)
         val sums = IntArray(outWidth * outHeight * 3)
         val hits = IntArray(outWidth * outHeight * 3)
+        val colour = info.colour
+        val pattern = info.pattern
 
-        val rowBytes = ((blocks.width.toLong() * bits + 7) / 8)
-        if (rowBytes <= 0 || rowBytes > Int.MAX_VALUE / 2) return null
-        val row = ByteArray(rowBytes.toInt())
-        val scratch = ByteArray(minOf(rowBytes, 128L * 1024L).toInt().coerceAtLeast(1))
-
-        for (blockY in 0 until blocks.down) {
-            val blockTop = blockY * blocks.height
-            if (blockTop >= crop.bottom) break
-            if (blockTop + blocks.height <= crop.top) continue
-            for (blockX in 0 until blocks.across) {
-                val blockLeft = blockX * blocks.width
-                if (blockLeft >= crop.right) break
-                if (blockLeft + blocks.width <= crop.left) continue
-                val index = blockY * blocks.across + blockX
-                if (index >= blocks.offsets.size) break
-                val rowsInBlock = if (blocks.padded) blocks.height else minOf(blocks.height, height - blockTop)
-                // Skipped blocks cost as much to decompress as drawn ones, so they are not opened.
-                if (
-                    !blockHasWantedRow(
-                        blockTop, rowsInBlock, crop.top, crop.bottom, step, tapOffset, effectiveTaps, cellRows = 2,
-                    )
-                ) {
-                    continue
-                }
-                val stream = blockStream(
-                    file.source,
-                    blocks.offsets[index].toInt(),
-                    blocks.counts[index].toInt(),
-                    compression,
-                ) ?: continue
-                stream.use { input ->
-                    for (offsetY in 0 until rowsInBlock) {
-                        val y = blockTop + offsetY
-                        if (y >= crop.bottom) return@use
-                        val cellRow = (y - crop.top) / 2
-                        val inCell = cellRow % step
-                        val wanted = y >= crop.top && inCell >= tapOffset && inCell < tapOffset + effectiveTaps
-                        if (!wanted) {
-                            skipFully(input, rowBytes, scratch)
-                            continue
-                        }
-                        if (!readFully(input, row)) return@use
-                        if (predictor == 2 && bits == 8) applyHorizontalPredictor(row, blocks.width, 1)
-                        val outY = cellRow / step
-                        if (outY >= outHeight) return@use
-                        // Both rows of a cell are read, so red, green and blue all contribute.
-                        val patternRow = (y - crop.top) and 1
-                        val firstOutX = ((maxOf(crop.left, blockLeft) - crop.left) / 2 / step).coerceAtLeast(0)
-                        val lastOutX = ((minOf(crop.right, blockLeft + blocks.width) - 1 - crop.left) / 2 / step)
-                            .coerceAtMost(outWidth - 1)
-                        for (outX in firstOutX..lastOutX) {
-                            val baseCell = outX * step + tapOffset
-                            var tap = 0
-                            while (tap < effectiveTaps) {
-                                val cell = baseCell + tap
-                                tap += 1
-                                if (cell >= cellsWide) continue
-                                for (patternColumn in 0..1) {
-                                    val x = crop.left + cell * 2 + patternColumn
-                                    if (x < blockLeft || x >= blockLeft + blocks.width) continue
-                                    if (x >= crop.right || x >= width) continue
-                                    val channel = pattern[patternRow * 2 + patternColumn]
-                                    val raw = sampleValue(row, x - blockLeft, bits, file.littleEndian)
-                                    val at = (outY * outWidth + outX) * 3 + channel
-                                    sums[at] += colour.encode(raw, channel)
-                                    hits[at] += 1
-                                }
-                            }
+        val wanted = { y: Int ->
+            if (y < crop.top || y >= crop.bottom) {
+                false
+            } else {
+                val inCell = ((y - crop.top) / 2) % step
+                inCell >= tapOffset && inCell < tapOffset + effectiveTaps
+            }
+        }
+        val sink = SensorRowSink { y, xStart, samples, count ->
+            val outY = ((y - crop.top) / 2) / step
+            if (outY in 0 until outHeight) {
+                val patternRow = (y - crop.top) and 1
+                val from = maxOf(crop.left, xStart)
+                val to = minOf(crop.right, xStart + count)
+                var x = from
+                while (x < to) {
+                    val cell = (x - crop.left) / 2
+                    val inCell = cell % step
+                    if (inCell >= tapOffset && inCell < tapOffset + effectiveTaps) {
+                        val outX = cell / step
+                        if (outX < outWidth) {
+                            val channel = pattern[patternRow * 2 + ((x - crop.left) and 1)]
+                            val at = (outY * outWidth + outX) * 3 + channel
+                            sums[at] += colour.encode(samples[x - xStart], channel)
+                            hits[at] += 1
                         }
                     }
+                    x += 1
                 }
             }
         }
+
+        val codec = info.open() ?: return null
+        codec.scan(wanted, sink)
 
         for (at in pixels.indices) {
             val red = if (hits[at * 3] > 0) sums[at * 3] / hits[at * 3] else 0
