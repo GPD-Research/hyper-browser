@@ -2409,10 +2409,18 @@ private fun ImageViewerScreen(
     var single by remember { mutableStateOf<SingleImage?>(null) }
     var detail by remember { mutableStateOf<DetailTile?>(null) }
     var viewport by remember { mutableStateOf(IntSize.Zero) }
+    // Sensor data of a 40-megapixel frame takes seconds to decode; without this the previous
+    // image sits there looking as though nothing happened.
+    var loading by remember { mutableStateOf(false) }
     LaunchedEffect(currentUri, stage, viewport, inspect) {
         detail = null
         single = if (stage == GalleryStage.SINGLE) {
-            withContext(Dispatchers.IO) { loadSingleImage(activity, currentUri, viewport, inspect) }
+            loading = true
+            try {
+                withContext(Dispatchers.IO) { loadSingleImage(activity, currentUri, viewport, inspect) }
+            } finally {
+                loading = false
+            }
         } else {
             // A native-resolution bitmap is far too big to hold onto while the grid is showing.
             null
@@ -2850,8 +2858,11 @@ private fun ImageViewerScreen(
 
             // What the inspector is actually showing, so a preview is never taken for the
             // file's own pixels.
-            val provenance = single?.let { listOfNotNull(it.source, it.notice).joinToString(" — ") }
-                ?.takeIf { it.isNotEmpty() }
+            val provenance = when {
+                loading && inspect -> "Reading the file's own pixels…"
+                else -> single?.let { listOfNotNull(it.source, it.notice).joinToString(" — ") }
+                    ?.takeIf { it.isNotEmpty() }
+            }
             if (inspect && provenance != null && stage == GalleryStage.SINGLE) {
                 Text(
                     text = provenance,
@@ -3020,6 +3031,21 @@ private fun loadSingleImage(
     inspect: Boolean = false,
 ): SingleImage? {
     val source = imageSource(activity, uri) ?: return null
+
+    // RAW and TIFF: map the file when possible so size is bounded by the crop, not the source.
+    fun sourceBytes(): Pair<ByteSource, ByteArray?>? {
+        val mapped = if (source.seekable) mappedByteSource(activity, uri) else null
+        val bytes = if (mapped == null) source.bytes ?: source.open()?.let { RawImage.readAll(it) } else null
+        val byteSource = mapped ?: bytes?.let { RawImage.arraySource(it) } ?: return null
+        return byteSource to bytes
+    }
+
+    // The inspector runs before any other decode: both the platform decoder and decode() prefer
+    // an embedded preview, and would hand back the very image the gallery already shows.
+    if (inspect) {
+        sourceBytes()?.let { (byteSource, _) -> inspectorImage(byteSource, viewport)?.let { return it } }
+    }
+
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     source.open()?.use { BitmapFactory.decodeStream(it, null, bounds) }
     if (bounds.outWidth > 0 && bounds.outHeight > 0) {
@@ -3034,20 +3060,15 @@ private fun loadSingleImage(
                 sample = sample,
                 // Tiling only pays off once the overview itself had to be downscaled.
                 canTile = sample > 1 && source.seekable,
+                // Reached with the inspector on only when the file's own pixels could not be
+                // read; saying so beats passing a preview off as them.
+                source = if (inspect) "Embedded preview ${bounds.outWidth}\u00d7${bounds.outHeight}" else null,
+                notice = if (inspect) "sensor data in this file cannot be read" else null,
             )
         }
     }
 
-    // RAW and TIFF: map the file when possible so size is bounded by the crop, not the source.
-    val mapped = if (source.seekable) mappedByteSource(activity, uri) else null
-    val bytes = if (mapped == null) source.bytes ?: source.open()?.let { RawImage.readAll(it) } else null
-    val byteSource = mapped ?: bytes?.let { RawImage.arraySource(it) } ?: return null
-
-    // The inspector has to run before the decode() path below, which prefers the embedded
-    // preview and would hand back the same downscaled image the gallery already shows.
-    if (inspect) {
-        inspectorImage(byteSource, viewport)?.let { return it }
-    }
+    val (byteSource, bytes) = sourceBytes() ?: return null
 
     val decoded = RawImage.decode(byteSource, viewport.width, viewport.height, false)
     if (decoded != null) {
