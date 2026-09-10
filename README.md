@@ -2,6 +2,46 @@
 
 Lean Android dual-pane file browser built with Kotlin and Jetpack Compose.
 
+## Version 2.0.1 (September 2026)
+
+### Major Image Quality Improvements
+
+**TIFF Rendering Quality Fix**
+- Fixed aggressive downsampling that was destroying TIFF image quality
+- TIFF files now render at 2x viewport size for better zooming capability
+- Small TIFF files render at full resolution instead of being unnecessarily downscaled
+- Memory limits (16MP max, 8192px edge max) still prevent crashes on huge files
+
+**TIFF Full Resolution Mode**
+- New "Use full resolution (region)" mode for viewing massive TIFF files (e.g., 400MB Hubble images)
+- Renders only a selected region at full quality instead of downsampling the entire image
+- Automatic grid overlay shows current region position within the full image
+- Grid matches image aspect ratio with subdivisions based on file size (16MB per square)
+- Navigation controls (arrow buttons) to pan around the TIFF in 25% increments
+- Allows photographers to view truly massive TIFF files at full quality without memory issues
+
+**RAW File Full Sensor Data Mode**
+- New "Use full RAW (slow)" toggle for RAW files (ARW, CR2, NEF, DNG, RAF, etc.)
+- Implements bilinear demosaicing to convert RAW sensor data to full RGB
+- Allows photographers to view the full sensor data instead of embedded JPEG preview
+- Memory check: requires 512MB+ RAM to enable (prevents crashes on low-memory devices)
+- Computationally expensive - intended for flagship Android devices with powerful processors
+- Supports 16-bit single-channel RAW data with standard RGGB Bayer pattern
+
+### Technical Details
+
+**TIFF Downsampling Logic**
+- Overview renders at 2x viewport size (allows zooming without pixelation)
+- Thumbnails render at 2x target size for grid display
+- Safety ceiling: 16MP pixel limit and 8192px edge limit enforced for all renders
+- Region-based rendering for full resolution mode bypasses viewport downsampling
+
+**RAW Demosaicing**
+- Bilinear interpolation for Bayer pattern conversion
+- Handles edge cases and boundary conditions
+- Scales 16-bit sensor data to 8-bit for display
+- Loads entire RAW data into memory (required for demosaicing algorithm)
+
 ## Current status
 
 This repo now contains a buildable Android project scaffold for a lean dual-pane SAF browser. The app has been verified with:

@@ -138,8 +138,13 @@ object RawImage {
         }
     }.getOrNull()
 
-    fun decode(bytes: ByteArray, targetWidth: Int, targetHeight: Int, lowQuality: Boolean): Bitmap? {
+    fun decode(bytes: ByteArray, targetWidth: Int, targetHeight: Int, lowQuality: Boolean, useFullRaw: Boolean = false): Bitmap? {
         val source = ArraySource(bytes)
+        if (useFullRaw) {
+            return openTiff(source)?.let { tiff ->
+                demosaicTiff(tiff, targetWidth, targetHeight)
+            }
+        }
         return embeddedPreview(source, targetWidth, targetHeight, lowQuality)
             ?: openTiff(source)?.render(targetWidth, targetHeight, null)
     }
@@ -573,6 +578,163 @@ object RawImage {
         for (x in samples until end) {
             row[x] = (row[x] + row[x - samples]).toByte()
         }
+    }
+
+    /**
+     * Demosaics RAW sensor data using bilinear interpolation.
+     * This converts Bayer pattern sensor data to full RGB, allowing photographers to view
+     * the full sensor data instead of just the embedded JPEG preview.
+     * Note: This is computationally expensive and may be slow on older devices.
+     */
+    private fun demosaicTiff(tiff: TiffImage, targetWidth: Int, targetHeight: Int): Bitmap? {
+        val directory = tiff.directory
+        val width = directory.first(TAG_IMAGE_WIDTH, 0).toInt()
+        val height = directory.first(TAG_IMAGE_LENGTH, 0).toInt()
+        val bits = (directory.values(TAG_BITS_PER_SAMPLE) ?: longArrayOf(16)).first().toInt()
+        val samples = directory.first(TAG_SAMPLES_PER_PIXEL, 1).toInt()
+        val photometric = directory.first(TAG_PHOTOMETRIC, 1).toInt()
+        val predictor = directory.first(TAG_PREDICTOR, 1).toInt()
+        val compression = directory.first(TAG_COMPRESSION, 1).toInt()
+        val rowsPerStrip = directory.first(TAG_ROWS_PER_STRIP, height.toLong())
+            .coerceIn(1L, height.toLong()).toInt()
+        val offsets = directory.values(TAG_STRIP_OFFSETS) ?: return null
+        val counts = directory.values(TAG_STRIP_BYTE_COUNTS) ?: return null
+        if (offsets.size != counts.size) return null
+
+        // Only support 16-bit single-channel RAW data (Bayer pattern)
+        if (bits != 16 || samples != 1 || photometric != 1) return null
+
+        val bytesPerSample = 2
+        val bytesPerRow = width.toLong() * samples * bytesPerSample
+        if (bytesPerRow <= 0 || bytesPerRow > Int.MAX_VALUE / 2) return null
+
+        // Apply downsampling if target dimensions are specified
+        var step = 1
+        while (
+            (width / step).toLong() * (height / step).toLong() > MAX_OUTPUT_PIXELS ||
+            width / step > MAX_OUTPUT_EDGE ||
+            height / step > MAX_OUTPUT_EDGE ||
+            (targetWidth > 0 && targetHeight > 0 && width / (step * 2) >= targetWidth && height / (step * 2) >= targetHeight)
+        ) {
+            step *= 2
+            if (step > 4096) return null
+        }
+
+        val outWidth = (width + step - 1) / step
+        val outHeight = (height + step - 1) / step
+        if (outWidth <= 0 || outHeight <= 0) return null
+
+        // Read all RAW sensor data into memory (required for demosaicing)
+        val rawData = ByteArray(width * height * bytesPerSample)
+        val row = ByteArray(bytesPerRow.toInt())
+        val scratch = ByteArray(minOf(bytesPerRow, 128L * 1024L).toInt().coerceAtLeast(1))
+
+        var rawDataOffset = 0
+        for (strip in offsets.indices) {
+            val firstRow = strip * rowsPerStrip
+            if (firstRow >= height) break
+            val rowsInStrip = minOf(rowsPerStrip, height - firstRow)
+            if (rowsInStrip <= 0) break
+
+            val stream = stripStream(tiff.file.source, offsets[strip].toInt(), counts[strip].toInt(), compression)
+                ?: continue
+            stream.use { input ->
+                for (index in 0 until rowsInStrip) {
+                    if (!readFully(input, row)) break
+                    if (predictor == 2) applyHorizontalPredictor(row, width, samples)
+                    val copyLen = minOf(row.size, rawData.size - rawDataOffset)
+                    System.arraycopy(row, 0, rawData, rawDataOffset, copyLen)
+                    rawDataOffset += copyLen
+                }
+            }
+        }
+
+        // Demosaic using bilinear interpolation
+        val pixels = IntArray(outWidth * outHeight)
+        val littleEndian = tiff.file.littleEndian
+
+        for (y in 0 until outHeight) {
+            for (x in 0 until outWidth) {
+                val srcX = x * step
+                val srcY = y * step
+                val pixel = demosaicPixel(rawData, srcX, srcY, width, height, littleEndian)
+                pixels[y * outWidth + x] = pixel
+            }
+        }
+
+        return runCatching {
+            Bitmap.createBitmap(pixels, outWidth, outHeight, Bitmap.Config.ARGB_8888)
+        }.getOrNull()
+    }
+
+    /**
+     * Demosaics a single pixel using bilinear interpolation.
+     * Assumes RGGB Bayer pattern (common for most cameras).
+     */
+    private fun demosaicPixel(
+        rawData: ByteArray,
+        x: Int,
+        y: Int,
+        width: Int,
+        height: Int,
+        littleEndian: Boolean,
+    ): Int {
+        fun getSample(sx: Int, sy: Int): Int {
+            if (sx < 0 || sx >= width || sy < 0 || sy >= height) return 0
+            val offset = (sy * width + sx) * 2
+            val low = rawData[offset].toInt() and 0xFF
+            val high = rawData[offset + 1].toInt() and 0xFF
+            return if (littleEndian) (high shl 8) or low else (low shl 8) or high
+        }
+
+        // Determine which color this pixel is in the Bayer pattern (RGGB)
+        val isRed = (x % 2 == 0) && (y % 2 == 0)
+        val isGreen = ((x % 2) != (y % 2))
+        val isBlue = (x % 2 != 0) && (y % 2 != 0)
+
+        var red: Int
+        var green: Int
+        var blue: Int
+
+        if (isRed) {
+            red = getSample(x, y)
+            // Green: average of 4 neighboring green pixels
+            green = (getSample(x - 1, y) + getSample(x + 1, y) +
+                    getSample(x, y - 1) + getSample(x, y + 1)) / 4
+            // Blue: average of 4 diagonal blue pixels
+            blue = (getSample(x - 1, y - 1) + getSample(x + 1, y - 1) +
+                    getSample(x - 1, y + 1) + getSample(x + 1, y + 1)) / 4
+        } else if (isGreen) {
+            red = if (x % 2 == 0) {
+                // Green at even x, odd y - average of left/right red
+                (getSample(x - 1, y) + getSample(x + 1, y)) / 2
+            } else {
+                // Green at odd x, even y - average of top/bottom red
+                (getSample(x, y - 1) + getSample(x, y + 1)) / 2
+            }
+            green = getSample(x, y)
+            blue = if (x % 2 == 0) {
+                // Green at even x, odd y - average of top/bottom blue
+                (getSample(x, y - 1) + getSample(x, y + 1)) / 2
+            } else {
+                // Green at odd x, even y - average of left/right blue
+                (getSample(x - 1, y) + getSample(x + 1, y)) / 2
+            }
+        } else { // isBlue
+            // Red: average of 4 diagonal red pixels
+            red = (getSample(x - 1, y - 1) + getSample(x + 1, y - 1) +
+                    getSample(x - 1, y + 1) + getSample(x + 1, y + 1)) / 4
+            // Green: average of 4 neighboring green pixels
+            green = (getSample(x - 1, y) + getSample(x + 1, y) +
+                    getSample(x, y - 1) + getSample(x, y + 1)) / 4
+            blue = getSample(x, y)
+        }
+
+        // Scale 16-bit to 8-bit and pack into ARGB
+        val r8 = (red shr 8).coerceIn(0, 255)
+        val g8 = (green shr 8).coerceIn(0, 255)
+        val b8 = (blue shr 8).coerceIn(0, 255)
+        return (0xFF shl 24) or (r8 shl 16) or (g8 shl 8) or b8
     }
 }
 
