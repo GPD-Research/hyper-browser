@@ -74,17 +74,17 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.DriveFileMove
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
+import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ContentPaste
+import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Deselect
 import androidx.compose.material.icons.filled.DriveFileRenameOutline
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.ZoomIn
@@ -542,6 +542,7 @@ private fun HyperBrowserApp() {
     var selectionPreviewOffset by remember { mutableStateOf(Offset.Zero) }
     var renameTarget by rememberSaveable { mutableStateOf<Uri?>(null) }
     var renameValue by rememberSaveable { mutableStateOf("") }
+    var newFolderParent by rememberSaveable { mutableStateOf<Uri?>(null) }
 
     var showLeftPicker by rememberSaveable { mutableStateOf(false) }
     var showRightPicker by rememberSaveable { mutableStateOf(false) }
@@ -601,6 +602,29 @@ private fun HyperBrowserApp() {
             )
             leftPane = follow(leftPane)
             rightPane = follow(rightPane)
+        }
+    }
+
+    fun startNewFolder() {
+        val active = if (activePane == Pane.LEFT) leftPane else rightPane
+        val parent = active.current ?: active.root
+        if (parent == null) {
+            Toast.makeText(activity, "Choose a folder first", Toast.LENGTH_SHORT).show()
+            return
+        }
+        newFolderParent = parent
+    }
+
+    fun createFolder(parent: Uri, name: String) {
+        scope.launch {
+            val created = withContext(Dispatchers.IO) { Storage.createFolder(activity, parent, name) }
+            if (created == null) {
+                Toast.makeText(activity, "Could not create \"$name\"", Toast.LENGTH_LONG).show()
+                return@launch
+            }
+            // Either pane can be showing the parent, so both are refreshed.
+            leftPane = leftPane.copy(refreshKey = leftPane.refreshKey + 1)
+            rightPane = rightPane.copy(refreshKey = rightPane.refreshKey + 1)
         }
     }
 
@@ -761,6 +785,7 @@ private fun HyperBrowserApp() {
                                         pendingDelete = items
                                     }
                                 },
+                                onNewFolder = { startNewFolder() },
                                 onRename = { startRename() },
                                 renameActive = renameTarget != null,
                                 onGallery = {
@@ -954,6 +979,17 @@ private fun HyperBrowserApp() {
                             Toast.makeText(activity, failureMessage(failures, "deleted"), Toast.LENGTH_LONG).show()
                         }
                     }
+                },
+            )
+        }
+
+        val folderParent = newFolderParent
+        if (folderParent != null) {
+            NewFolderDialog(
+                onDismiss = { newFolderParent = null },
+                onConfirm = { name ->
+                    newFolderParent = null
+                    createFolder(folderParent, name)
                 },
             )
         }
@@ -1448,6 +1484,7 @@ private fun CommandStrip(
     onCopy: () -> Unit,
     onMove: () -> Unit,
     onDelete: () -> Unit,
+    onNewFolder: () -> Unit,
     onRename: () -> Unit,
     renameActive: Boolean,
     onGallery: () -> Unit,
@@ -1469,6 +1506,7 @@ private fun CommandStrip(
         CommandButton(metrics, "Copy", Icons.Filled.ContentCopy, onCopy)
         CommandButton(metrics, "Move", Icons.AutoMirrored.Filled.DriveFileMove, onMove)
         CommandButton(metrics, "Delete", Icons.Filled.Delete, onDelete)
+        CommandButton(metrics, "New Folder", Icons.Filled.CreateNewFolder, onNewFolder)
         CommandButton(
             metrics = metrics,
             label = if (renameActive) "Save" else "Rename",
@@ -1730,6 +1768,36 @@ private fun ConfirmDeleteDialog(
         title = { Text("Delete") },
         text = { Text(if (count == 1) "Delete this item permanently?" else "Delete $count items permanently?") },
         confirmButton = { TextButton(onClick = onConfirm) { Text("Delete") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
+private fun NewFolderDialog(
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit,
+) {
+    var name by rememberSaveable { mutableStateOf("") }
+    val trimmed = name.trim()
+    // Separators would be read as a path by some providers and silently create nothing.
+    val valid = trimmed.isNotEmpty() && '/' !in trimmed && '\\' !in trimmed
+    HyperDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("New folder") },
+        text = {
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                label = { Text("Folder name") },
+                singleLine = true,
+                isError = name.isNotEmpty() && !valid,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { if (valid) onConfirm(trimmed) }),
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(trimmed) }, enabled = valid) { Text("Create") }
+        },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
@@ -2267,10 +2335,10 @@ private fun ImageViewerScreen(
     var selectionMode by rememberSaveable { mutableStateOf(false) }
     var selectedImages by remember { mutableStateOf(emptySet<Uri>()) }
     var pendingGalleryDelete by remember { mutableStateOf<Set<Uri>?>(null) }
-    var useFullRaw by rememberSaveable { mutableStateOf(false) }
-    var useTiffFullRes by rememberSaveable { mutableStateOf(false) }
-    var tiffRegion by rememberSaveable { mutableStateOf<android.graphics.Rect?>(null) }
-    var showTiffGrid by rememberSaveable { mutableStateOf(false) }
+    // The inspector shows the file's own pixels — TIFF at full resolution, RAW as sensor data —
+    // instead of the embedded preview browsing uses.
+    var inspect by rememberSaveable { mutableStateOf(false) }
+    var showMinimap by rememberSaveable { mutableStateOf(true) }
     val scope = rememberCoroutineScope()
 
     val images by produceState(initialValue = emptyList<FileEntry>(), directoryUri, startingUri, listingRefresh, sortOrder) {
@@ -2306,35 +2374,27 @@ private fun ImageViewerScreen(
         "image/x-minolta-mrw",
         "image/x-sigma-x3f",
     )
+    // Only these two carry pixels the platform decoder will not show as they were recorded.
+    val inspectable = isTiffFile || isRawFile
     // The previous image stays on screen until the next one is ready, so a swipe never flashes an
     // empty frame.
     var single by remember { mutableStateOf<SingleImage?>(null) }
     var detail by remember { mutableStateOf<DetailTile?>(null) }
     var viewport by remember { mutableStateOf(IntSize.Zero) }
-    var tiffOverview by remember { mutableStateOf<ImageBitmap?>(null) }
-    LaunchedEffect(currentUri, stage, viewport, useFullRaw, useTiffFullRes, tiffRegion) {
+    LaunchedEffect(currentUri, stage, viewport, inspect) {
         detail = null
         single = if (stage == GalleryStage.SINGLE) {
-            withContext(Dispatchers.IO) { loadSingleImage(activity, currentUri, viewport, useFullRaw, useTiffFullRes, tiffRegion) }
+            withContext(Dispatchers.IO) { loadSingleImage(activity, currentUri, viewport, inspect) }
         } else {
             // A native-resolution bitmap is far too big to hold onto while the grid is showing.
             null
         }
     }
 
-    // Load low-res overview for grid background when in TIFF full resolution mode
-    LaunchedEffect(currentUri, useTiffFullRes) {
-        if (useTiffFullRes && isTiffFile) {
-            tiffOverview = withContext(Dispatchers.IO) {
-                loadBitmap(activity, currentUri, 512, 512, false)
-            }
-        } else {
-            tiffOverview = null
-        }
-    }
-
     // Images too large to decode whole are shown downscaled, then refined a tile at a time as the
-    // viewport settles. This is what keeps gigapixel files inside a fixed memory budget.
+    // viewport settles. This is what keeps gigapixel files inside a fixed memory budget, and what
+    // the inspector navigates with: panning redraws the coarse pixels immediately and the sharp
+    // crop arrives behind it, instead of blocking on a whole new region per move.
     LaunchedEffect(single, viewport) {
         val image = single
         if (image == null || !image.canTile || viewport == IntSize.Zero) {
@@ -2346,7 +2406,7 @@ private fun ImageViewerScreen(
                 detail = null
                 return@collectLatest
             }
-            delay(200)
+            delay(120)
             val region = visibleSourceRect(image, viewport, currentScale, currentOffset)
                 ?: return@collectLatest
             val sample = tileSampleSize(region, viewport)
@@ -2354,6 +2414,8 @@ private fun ImageViewerScreen(
                 detail = null
                 return@collectLatest
             }
+            // The previous tile stays on screen while this one decodes; a null here would drop
+            // back to the overview and flash.
             val tile = withContext(Dispatchers.IO) {
                 decodeRegion(activity, currentUri, image, region, sample, viewport)
             }
@@ -2371,6 +2433,16 @@ private fun ImageViewerScreen(
         }
     }
 
+    // A gigapixel TIFF needs far more than the 64x a normal photo does before its own pixels are
+    // on screen one for one, so the ceiling follows the source.
+    val maxZoom = single?.let { image ->
+        if (viewport.width <= 0) {
+            MAX_SINGLE_ZOOM
+        } else {
+            (image.width.toFloat() / viewport.width * 2f).coerceIn(MAX_SINGLE_ZOOM, 1024f)
+        }
+    } ?: MAX_SINGLE_ZOOM
+
     fun resetTransform() {
         scale = 1f
         offset = Offset.Zero
@@ -2383,15 +2455,22 @@ private fun ImageViewerScreen(
                 stage = GalleryStage.SINGLE
                 resetTransform()
             }
-            GalleryStage.SINGLE -> scale = (scale * 2f).coerceAtMost(MAX_SINGLE_ZOOM)
+            GalleryStage.SINGLE -> {
+                val next = (scale * 2f).coerceAtMost(maxZoom)
+                // Pan is applied after the zoom, so it has to track it or the view jumps to a
+                // different part of the image on every step.
+                offset *= next / scale
+                scale = next
+            }
         }
     }
 
     fun zoomOut() {
         when (stage) {
             GalleryStage.SINGLE -> if (scale > 1.05f) {
-                scale = (scale / 2f).coerceAtLeast(1f)
-                offset = Offset.Zero
+                val next = (scale / 2f).coerceAtLeast(1f)
+                offset = if (next <= 1f) Offset.Zero else offset * (next / scale)
+                scale = next
             } else {
                 stage = GalleryStage.GRID_MEDIUM
                 resetTransform()
@@ -2471,6 +2550,16 @@ private fun ImageViewerScreen(
                     if (targets.isNotEmpty()) pendingGalleryDelete = targets
                 }
                 if (stage == GalleryStage.SINGLE) {
+                    if (inspectable) {
+                        GalleryAction(
+                            icon = Icons.Filled.CenterFocusStrong,
+                            description = if (inspect) "Leave inspector" else "Inspect at full resolution",
+                            tint = if (inspect) MaterialTheme.colorScheme.primary else LocalContentColor.current,
+                        ) {
+                            inspect = !inspect
+                            resetTransform()
+                        }
+                    }
                     GalleryAction(Icons.Filled.ZoomOut, "Zoom out") { zoomOut() }
                     GalleryAction(Icons.Filled.ZoomIn, "Zoom in") { zoomIn() }
                     GalleryAction(Icons.Filled.Info, "Image information") { showExif = true }
@@ -2519,7 +2608,7 @@ private fun ImageViewerScreen(
                                         scale = 1f
                                         offset = Offset.Zero
                                     } else {
-                                        scale = next.coerceIn(1f, MAX_SINGLE_ZOOM)
+                                        scale = next.coerceIn(1f, maxZoom)
                                         if (scale > 1f) offset += pan
                                     }
                                 },
@@ -2667,50 +2756,18 @@ private fun ImageViewerScreen(
                 ) {
                     Button(onClick = onClose) { Text("Back to file browser") }
                     Button(onClick = { stage = GalleryStage.GRID_SMALL; resetTransform(); showMenu = false }) { Text("Show thumbnails") }
-                    if (isRawFile) {
-                        val hasEnoughMemory = Runtime.getRuntime().maxMemory() >= 512 * 1024 * 1024 // 512MB minimum
-                        Button(
-                            onClick = {
-                                if (!useFullRaw && !hasEnoughMemory) {
-                                    Toast.makeText(activity, "Full RAW requires more memory (512MB+)", Toast.LENGTH_LONG).show()
-                                } else {
-                                    useFullRaw = !useFullRaw
-                                }
-                                showMenu = false
-                            },
-                            enabled = hasEnoughMemory || useFullRaw
-                        ) {
-                            Text(if (useFullRaw) "Use embedded preview" else "Use full RAW (slow)")
-                        }
-                    }
-                    if (isTiffFile) {
+                    if (inspectable) {
                         Button(onClick = {
-                            useTiffFullRes = !useTiffFullRes
-                            if (useTiffFullRes && tiffRegion == null) {
-                                // Default to center region based on viewport size
-                                scope.launch {
-                                    val currentSingle = single
-                                    if (currentSingle != null) {
-                                        val regionWidth = minOf(viewport.width * 2, currentSingle.width)
-                                        val regionHeight = minOf(viewport.height * 2, currentSingle.height)
-                                        val centerX = currentSingle.width / 2
-                                        val centerY = currentSingle.height / 2
-                                        tiffRegion = android.graphics.Rect(
-                                            centerX - regionWidth / 2,
-                                            centerY - regionHeight / 2,
-                                            centerX + regionWidth / 2,
-                                            centerY + regionHeight / 2
-                                        )
-                                        showTiffGrid = true
-                                    }
-                                }
-                            } else if (!useTiffFullRes) {
-                                tiffRegion = null
-                                showTiffGrid = false
-                            }
+                            inspect = !inspect
+                            resetTransform()
                             showMenu = false
                         }) {
-                            Text(if (useTiffFullRes) "Use overview mode" else "Use full resolution (region)")
+                            Text(if (inspect) "Leave inspector" else "Inspect at full resolution")
+                        }
+                    }
+                    if (inspect) {
+                        Button(onClick = { showMinimap = !showMinimap; showMenu = false }) {
+                            Text(if (showMinimap) "Hide locator" else "Show locator")
                         }
                     }
                 }
@@ -2725,163 +2782,56 @@ private fun ImageViewerScreen(
                 )
             }
 
-            if (useTiffFullRes && tiffRegion != null && single != null) {
-                val currentRegion = tiffRegion
-                val currentSingle = single!!
+            // Locator: the whole frame with the part currently on screen marked, which is the
+            // only orientation cue once the view sits deep inside a gigapixel image.
+            val locator = single
+            if (inspect && showMinimap && stage == GalleryStage.SINGLE && locator != null) {
+                val aspect = locator.width.toFloat() / locator.height.toFloat()
+                val locatorSize = 132.dp
                 Box(
                     modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.9f))
-                        .padding(8.dp),
+                        .align(Alignment.TopEnd)
+                        .padding(12.dp)
+                        .width(if (aspect > 1f) locatorSize else locatorSize * aspect)
+                        .height(if (aspect > 1f) locatorSize / aspect else locatorSize)
+                        .background(Color.Black)
+                        .border(1.dp, MaterialTheme.colorScheme.primary),
                 ) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        IconButton(onClick = {
-                            if (currentRegion != null) {
-                                val step = currentRegion.width() / 4
-                                tiffRegion = android.graphics.Rect(
-                                    (currentRegion.left - step).coerceAtLeast(0),
-                                    currentRegion.top,
-                                    (currentRegion.right - step).coerceAtMost(currentSingle.width),
-                                    currentRegion.bottom
-                                )
-                            }
-                        }) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Pan left")
-                        }
-                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            IconButton(onClick = {
-                                if (currentRegion != null) {
-                                    val step = currentRegion.height() / 4
-                                    tiffRegion = android.graphics.Rect(
-                                        currentRegion.left,
-                                        (currentRegion.top - step).coerceAtLeast(0),
-                                        currentRegion.right,
-                                        (currentRegion.bottom - step).coerceAtMost(currentSingle.height)
-                                    )
-                                }
-                            }) {
-                                Icon(Icons.Default.KeyboardArrowUp, contentDescription = "Pan up")
-                            }
-                            IconButton(onClick = {
-                                useTiffFullRes = false
-                                tiffRegion = null
-                                showTiffGrid = false
-                            }) {
-                                Icon(Icons.Default.Close, contentDescription = "Exit full res")
-                            }
-                            IconButton(onClick = {
-                                if (currentRegion != null) {
-                                    val step = currentRegion.height() / 4
-                                    tiffRegion = android.graphics.Rect(
-                                        currentRegion.left,
-                                        (currentRegion.top + step).coerceAtLeast(0),
-                                        currentRegion.right,
-                                        (currentRegion.bottom + step).coerceAtMost(currentSingle.height)
-                                    )
-                                }
-                            }) {
-                                Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Pan down")
-                            }
-                        }
-                        IconButton(onClick = {
-                            if (currentRegion != null) {
-                                val step = currentRegion.width() / 4
-                                tiffRegion = android.graphics.Rect(
-                                    (currentRegion.left + step).coerceAtLeast(0),
-                                    currentRegion.top,
-                                    (currentRegion.right + step).coerceAtMost(currentSingle.width),
-                                    currentRegion.bottom
-                                )
-                            }
-                        }) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = "Pan right")
-                        }
+                    Image(
+                        bitmap = locator.overview,
+                        contentDescription = "Image locator",
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Fit,
+                    )
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        val visible = visibleSourceRect(locator, viewport, scale, offset) ?: return@Canvas
+                        val across = size.width / locator.width
+                        val down = size.height / locator.height
+                        drawRect(
+                            color = Color.Red,
+                            topLeft = Offset(visible.left * across, visible.top * down),
+                            size = androidx.compose.ui.geometry.Size(
+                                (visible.width() * across).coerceAtLeast(2f),
+                                (visible.height() * down).coerceAtLeast(2f),
+                            ),
+                            style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.5.dp.toPx()),
+                        )
                     }
                 }
             }
 
-            // Grid overlay for TIFF full resolution mode
-            if (showTiffGrid && useTiffFullRes && tiffRegion != null && tiffOverview != null && single != null) {
-                val currentSingle = single!!
-                val currentRegion = tiffRegion!!
-                val currentOverview = tiffOverview!!
-                val imageWidth = currentSingle.width.toFloat()
-                val imageHeight = currentSingle.height.toFloat()
-                val aspectRatio = imageWidth / imageHeight
-                val maxGridSize = 200.dp
-                val gridWidth = if (aspectRatio > 1f) maxGridSize else maxGridSize * aspectRatio
-                val gridHeight = if (aspectRatio > 1f) maxGridSize / aspectRatio else maxGridSize
-
-                Box(
+            val notice = single?.notice
+            if (inspect && notice != null && stage == GalleryStage.SINGLE) {
+                Text(
+                    text = notice,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(16.dp)
-                        .width(gridWidth)
-                        .height(gridHeight)
-                        .background(Color.Black)
-                        .border(2.dp, MaterialTheme.colorScheme.primary)
-                ) {
-                    // Low-res overview as background
-                    Image(
-                        bitmap = currentOverview,
-                        contentDescription = "TIFF overview",
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Fit
-                    )
-                    // Grid lines and current region highlight
-                    Canvas(modifier = Modifier.fillMaxSize()) {
-                        val overviewWidth = size.width
-                        val overviewHeight = size.height
-
-                        // Calculate grid subdivisions based on file size (16MB per square)
-                        val entry = currentDoc
-                        val fileSizeMB = entry?.size?.toFloat()?.div(1024f * 1024f) ?: 1f
-                        val numSquares = (fileSizeMB / 16f).coerceAtLeast(1f).toInt()
-                        val gridCols = kotlin.math.sqrt(numSquares.toFloat()).toInt().coerceAtLeast(1)
-                        val gridRows = (numSquares.toFloat() / gridCols).toInt().coerceAtLeast(1)
-
-                        // Draw grid lines
-                        for (i in 1 until gridCols) {
-                            val x = (overviewWidth / gridCols) * i
-                            drawLine(
-                                color = Color.White.copy(alpha = 0.3f),
-                                start = androidx.compose.ui.geometry.Offset(x, 0f),
-                                end = androidx.compose.ui.geometry.Offset(x, overviewHeight),
-                                strokeWidth = 1.dp.toPx()
-                            )
-                        }
-                        for (i in 1 until gridRows) {
-                            val y = (overviewHeight / gridRows) * i
-                            drawLine(
-                                color = Color.White.copy(alpha = 0.3f),
-                                start = androidx.compose.ui.geometry.Offset(0f, y),
-                                end = androidx.compose.ui.geometry.Offset(overviewWidth, y),
-                                strokeWidth = 1.dp.toPx()
-                            )
-                        }
-
-                        // Calculate region position on overview
-                        val regionLeft = (currentRegion.left.toFloat() / imageWidth) * overviewWidth
-                        val regionTop = (currentRegion.top.toFloat() / imageHeight) * overviewHeight
-                        val regionRight = (currentRegion.right.toFloat() / imageWidth) * overviewWidth
-                        val regionBottom = (currentRegion.bottom.toFloat() / imageHeight) * overviewHeight
-
-                        // Draw region rectangle
-                        drawRect(
-                            color = Color.Red,
-                            topLeft = androidx.compose.ui.geometry.Offset(regionLeft, regionTop),
-                            size = androidx.compose.ui.geometry.Size(regionRight - regionLeft, regionBottom - regionTop),
-                            style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2.dp.toPx())
-                        )
-                    }
-                    // Close button
-                    IconButton(
-                        onClick = { showTiffGrid = false },
-                        modifier = Modifier.align(Alignment.TopEnd)
-                    ) {
-                        Icon(Icons.Default.Close, contentDescription = "Close grid", tint = Color.White)
-                    }
-                }
+                        .align(Alignment.BottomCenter)
+                        .padding(12.dp)
+                        .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.9f))
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                )
             }
 
             if (imageActionUri != null) {
@@ -3009,6 +2959,10 @@ private data class SingleImage(
     val canTile: Boolean,
     /** Set for TIFF, which no platform region decoder can read. */
     val tiff: RawImage.TiffImage? = null,
+    /** Set when the inspector is showing undemosaiced sensor data. */
+    val sensor: RawImage.SensorImage? = null,
+    /** Why the inspector could not show the file's own pixels, when it could not. */
+    val notice: String? = null,
 )
 
 /** A sharper crop of the source, drawn over the overview at [source] (in source pixels). */
@@ -3021,7 +2975,17 @@ private fun mappedByteSource(activity: ComponentActivity, uri: Uri): ByteSource?
     }
 }.getOrNull()
 
-private fun loadSingleImage(activity: ComponentActivity, uri: Uri, viewport: IntSize = IntSize.Zero, useFullRaw: Boolean = false, useTiffFullRes: Boolean = false, tiffRegion: android.graphics.Rect? = null): SingleImage? {
+/**
+ * Loads the image for the single-image stage. With [inspect] set the file's own pixels are
+ * decoded — TIFF at full resolution, RAW as sensor data — as an overview plus the handle that
+ * lets the viewer pull sharper crops; otherwise the embedded preview browsing uses is decoded.
+ */
+private fun loadSingleImage(
+    activity: ComponentActivity,
+    uri: Uri,
+    viewport: IntSize = IntSize.Zero,
+    inspect: Boolean = false,
+): SingleImage? {
     val source = imageSource(activity, uri) ?: return null
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     source.open()?.use { BitmapFactory.decodeStream(it, null, bounds) }
@@ -3046,30 +3010,59 @@ private fun loadSingleImage(activity: ComponentActivity, uri: Uri, viewport: Int
     val bytes = if (mapped == null) source.bytes ?: source.open()?.let { RawImage.readAll(it) } else null
     val byteSource = mapped ?: bytes?.let { RawImage.arraySource(it) } ?: return null
 
-    // Full-resolution TIFF mode renders just the selected region. It has to run before the
-    // decode() path below, which would otherwise return the same overview every time.
-    if (useTiffFullRes && tiffRegion != null) {
-        val tiff = RawImage.openTiff(byteSource) ?: return null
-        val overview = tiff.render(0, 0, tiffRegion) ?: return null
-        return SingleImage(
-            overview = overview.asImageBitmap(),
-            width = tiff.width,
-            height = tiff.height,
-            sample = 1,
-            canTile = false,
-            tiff = tiff,
-        )
+    // The inspector has to run before the decode() path below, which prefers the embedded
+    // preview and would hand back the same downscaled image the gallery already shows.
+    if (inspect) {
+        inspectorImage(byteSource, viewport)?.let { return it }
     }
 
-    val decoded = RawImage.decode(byteSource, viewport.width, viewport.height, false, useFullRaw)
+    val decoded = RawImage.decode(byteSource, viewport.width, viewport.height, false)
     if (decoded != null) {
         // Mapped sources have no byte array; orientation is read from the source itself.
         val degrees = bytes?.let { RawImage.orientationDegrees(it) }
             ?: RawImage.orientationDegrees(byteSource)
         val rotated = RawImage.rotate(decoded, degrees)
-        return SingleImage(rotated.asImageBitmap(), rotated.width, rotated.height, sample = 1, canTile = false)
+        return SingleImage(
+            overview = rotated.asImageBitmap(),
+            width = rotated.width,
+            height = rotated.height,
+            sample = 1,
+            canTile = false,
+            // Saying so beats showing the preview as though it were the sensor data.
+            notice = if (inspect) "Sensor data in this file cannot be read; showing embedded preview" else null,
+        )
     }
 
+    val tiff = RawImage.openTiff(byteSource) ?: return null
+    val overview = tiff.render(viewport.width, viewport.height, null) ?: return null
+    return SingleImage(
+        overview = overview.asImageBitmap(),
+        width = tiff.width,
+        height = tiff.height,
+        sample = (tiff.width / overview.width).coerceAtLeast(1),
+        canTile = overview.width < tiff.width,
+        tiff = tiff,
+    )
+}
+
+/**
+ * The unfiltered view of a file: sensor data for RAW, the full-resolution directory for TIFF.
+ * The overview is only ever decoded to viewport size; everything sharper arrives as tiles.
+ */
+private fun inspectorImage(byteSource: ByteSource, viewport: IntSize): SingleImage? {
+    RawImage.openSensor(byteSource)?.let { sensor ->
+        val overview = sensor.render(viewport.width, viewport.height, null) ?: return@let
+        return SingleImage(
+            overview = overview.asImageBitmap(),
+            // A filter cell is 2x2 photosites and becomes one pixel, so the inspector's
+            // coordinate space is half the sensor's.
+            width = sensor.width / 2,
+            height = sensor.height / 2,
+            sample = ((sensor.width / 2) / overview.width).coerceAtLeast(1),
+            canTile = overview.width < sensor.width / 2,
+            sensor = sensor,
+        )
+    }
     val tiff = RawImage.openTiff(byteSource) ?: return null
     val overview = tiff.render(viewport.width, viewport.height, null) ?: return null
     return SingleImage(
@@ -3139,8 +3132,21 @@ private fun decodeRegion(
     sample: Int,
     viewport: IntSize,
 ): ImageBitmap? {
+    image.sensor?.let { sensor ->
+        // The inspector's coordinates are filter cells; the sensor renders photosites.
+        val sensorRegion = android.graphics.Rect(
+            region.left * 2,
+            region.top * 2,
+            region.right * 2,
+            region.bottom * 2,
+        )
+        return runCatching {
+            sensor.render(viewport.width, viewport.height, sensorRegion)
+        }.getOrNull()?.asImageBitmap()
+    }
     image.tiff?.let { tiff ->
-        return runCatching { tiff.render(0, 0, region) }.getOrNull()?.asImageBitmap()
+        return runCatching { tiff.render(viewport.width, viewport.height, region) }
+            .getOrNull()?.asImageBitmap()
     }
     return runCatching {
         activity.contentResolver.openFileDescriptor(uri, "r")?.use { descriptor ->
@@ -3200,9 +3206,13 @@ private fun loadBitmap(
     }
 
     // RAW and TIFF are invisible to BitmapFactory and go through the embedded preview decoder.
-    val bytes = remoteBytes ?: open()?.let { RawImage.readAll(it) } ?: return null
-    val decoded = RawImage.decode(bytes, width, height, lowQuality) ?: return null
-    return RawImage.rotate(decoded, RawImage.orientationDegrees(bytes)).asImageBitmap()
+    // Local files are mapped rather than read: a scientific TIFF can be hundreds of megabytes.
+    val mapped = if (remoteBytes == null && exportType == null) mappedByteSource(activity, uri) else null
+    val bytes = if (mapped == null) remoteBytes ?: open()?.let { RawImage.readAll(it) } else null
+    val byteSource = mapped ?: bytes?.let { RawImage.arraySource(it) } ?: return null
+    val decoded = RawImage.decode(byteSource, width, height, lowQuality) ?: return null
+    val degrees = bytes?.let { RawImage.orientationDegrees(it) } ?: RawImage.orientationDegrees(byteSource)
+    return RawImage.rotate(decoded, degrees).asImageBitmap()
 }
 
 /** Keeps decoded grid thumbnails around so scrolling back over them costs nothing. */
