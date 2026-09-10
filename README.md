@@ -2,6 +2,44 @@
 
 Lean Android dual-pane file browser built with Kotlin and Jetpack Compose.
 
+## Version 3.1.0 (September 2026)
+
+### Camera RAW sensor decoding
+
+The inspector reads the photosites of compressed RAW files rather than falling back to the
+embedded JPEG preview. Every decoder below was checked photosite-for-photosite against LibRaw on
+real camera files and matches exactly:
+
+- Sony ARW: uncompressed (14-bit samples in 16-bit words, which were previously read as packed
+  bits and produced wrong values) and Sony's compressed 11+7-bit format.
+- Canon CR2: lossless JPEG (SOF3) sensor data, including multi-slice frames.
+- Nikon NEF: compressed and lossless-compressed Huffman data with the camera's linearization
+  curve.
+- Sony's encrypted metadata block is now decrypted correctly, so Sony files use the camera's own
+  black point, saturation point and white balance instead of neutral defaults.
+
+Canon's CR3 is not a TIFF and its sensor data is still not decoded; such files are labelled as
+embedded preview rather than presented as sensor data.
+
+### Inspector provenance
+
+- The inspector states what it is showing: `Sensor data 7952×5304 (Sony compressed RAW)`,
+  `Full resolution 29566×14321`, or `Embedded preview 6720×4480 — sensor data in this file cannot
+  be read`.
+
+### Gallery button
+
+- Opens a selected image in view mode within its folder, a selected folder as a thumbnail grid,
+  and the pane's current folder as a grid when nothing is selected. Previously it did nothing
+  unless a single image file was selected.
+
+### Verification
+
+`app/src/androidTest/.../RawSensorDecodeTest.kt` decodes Sony (uncompressed and compressed), Canon
+CR2 and Nikon NEF fixtures on device and asserts the visible frame, the source label and that the
+frame carries real tonal range; a test skips itself unless its fixture is pushed to the app's
+external-files directory.
+
 ## Version 3.0.0 (September 2026)
 
 ### Full-resolution inspector for TIFF and RAW
