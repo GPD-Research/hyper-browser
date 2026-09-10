@@ -45,6 +45,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.foundation.layout.Arrangement
@@ -2548,81 +2549,89 @@ private fun ImageViewerScreen(
     // The system back gesture returns to the browser rather than leaving the app.
     BackHandler(enabled = true) { onClose() }
 
+    // A single image is shown on its own; the chrome is summoned by a tap, like the menu.
+    val immersive = stage == GalleryStage.SINGLE && !showMenu
+
     Column(modifier = Modifier.fillMaxSize()) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 6.dp, vertical = 2.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            AssistChip(
-                onClick = onClose,
-                label = { Text("File browser", fontSize = 10.sp) },
-                leadingIcon = { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null, Modifier.size(14.dp)) },
-                modifier = Modifier.height(28.dp),
-            )
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                if (stage == GalleryStage.SINGLE && images.size > 1) {
-                    GalleryAction(Icons.AutoMirrored.Filled.ArrowBack, "Previous image") { showRelative(-1) }
-                    GalleryAction(Icons.AutoMirrored.Filled.ArrowForward, "Next image") { showRelative(1) }
-                }
-                if (stage != GalleryStage.SINGLE) {
-                    GalleryAction(
-                        icon = Icons.Filled.SelectAll,
-                        description = "Select images",
-                        tint = if (selectionMode) MaterialTheme.colorScheme.primary else LocalContentColor.current,
-                    ) {
-                        selectionMode = !selectionMode
-                        if (!selectionMode) selectedImages = emptySet()
+        if (!immersive) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 6.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                AssistChip(
+                    onClick = onClose,
+                    label = { Text("File browser", fontSize = 10.sp) },
+                    leadingIcon = { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null, Modifier.size(14.dp)) },
+                    modifier = Modifier.height(28.dp),
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (stage == GalleryStage.SINGLE && images.size > 1) {
+                        GalleryAction(Icons.AutoMirrored.Filled.ArrowBack, "Previous image") { showRelative(-1) }
+                        GalleryAction(Icons.AutoMirrored.Filled.ArrowForward, "Next image") { showRelative(1) }
                     }
-                }
-                GalleryAction(Icons.Filled.Delete, "Delete") {
-                    val targets = when {
-                        selectionMode && selectedImages.isNotEmpty() -> selectedImages
-                        stage == GalleryStage.SINGLE -> setOf(currentUri)
-                        else -> emptySet()
-                    }
-                    if (targets.isNotEmpty()) pendingGalleryDelete = targets
-                }
-                if (stage == GalleryStage.SINGLE) {
-                    if (inspectable) {
+                    if (stage != GalleryStage.SINGLE) {
                         GalleryAction(
-                            icon = Icons.Filled.CenterFocusStrong,
-                            description = if (inspect) "Leave inspector" else "Inspect at full resolution",
-                            tint = if (inspect) MaterialTheme.colorScheme.primary else LocalContentColor.current,
+                            icon = Icons.Filled.SelectAll,
+                            description = "Select images",
+                            tint = if (selectionMode) MaterialTheme.colorScheme.primary else LocalContentColor.current,
                         ) {
-                            inspect = !inspect
-                            resetTransform()
+                            selectionMode = !selectionMode
+                            if (!selectionMode) selectedImages = emptySet()
                         }
                     }
-                    GalleryAction(Icons.Filled.ZoomOut, "Zoom out") { zoomOut() }
-                    GalleryAction(Icons.Filled.ZoomIn, "Zoom in") { zoomIn() }
-                    GalleryAction(Icons.Filled.Info, "Image information") { showExif = true }
-                }
-                GalleryAction(Icons.Filled.Image, "Toggle gallery view") {
-                    stage = if (stage == GalleryStage.SINGLE) GalleryStage.GRID_SMALL else GalleryStage.SINGLE
-                    resetTransform()
+                    GalleryAction(Icons.Filled.Delete, "Delete") {
+                        val targets = when {
+                            selectionMode && selectedImages.isNotEmpty() -> selectedImages
+                            stage == GalleryStage.SINGLE -> setOf(currentUri)
+                            else -> emptySet()
+                        }
+                        if (targets.isNotEmpty()) pendingGalleryDelete = targets
+                    }
+                    if (stage == GalleryStage.SINGLE) {
+                        if (inspectable) {
+                            GalleryAction(
+                                icon = Icons.Filled.CenterFocusStrong,
+                                description = if (inspect) "Leave inspector" else "Inspect at full resolution",
+                                tint = if (inspect) MaterialTheme.colorScheme.primary else LocalContentColor.current,
+                            ) {
+                                inspect = !inspect
+                                resetTransform()
+                            }
+                        }
+                        GalleryAction(Icons.Filled.ZoomOut, "Zoom out") { zoomOut() }
+                        GalleryAction(Icons.Filled.ZoomIn, "Zoom in") { zoomIn() }
+                        GalleryAction(Icons.Filled.Info, "Image information") { showExif = true }
+                    }
+                    GalleryAction(Icons.Filled.Image, "Toggle gallery view") {
+                        stage = if (stage == GalleryStage.SINGLE) GalleryStage.GRID_SMALL else GalleryStage.SINGLE
+                        resetTransform()
+                    }
                 }
             }
-        }
 
-        Text(
-            text = if (selectionMode) {
-                "${selectedImages.size} selected"
-            } else {
-                currentDoc?.name ?: currentUri.lastPathSegment ?: "Image viewer"
-            },
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            style = MaterialTheme.typography.labelSmall,
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 1.dp),
-        )
+            Text(
+                text = if (selectionMode) {
+                    "${selectedImages.size} selected"
+                } else {
+                    currentDoc?.name ?: currentUri.lastPathSegment ?: "Image viewer"
+                },
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 1.dp),
+            )
+        }
 
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
+                // A zoomed image is drawn beyond the viewport and would otherwise paint over
+                // whatever sits above it.
+                .clipToBounds()
                 // An opened image sits on black in every theme; the controls stay themed.
                 .background(if (stage == GalleryStage.SINGLE) Color.Black else MaterialTheme.colorScheme.background)
                 .then(if (stage == GalleryStage.SINGLE) Modifier else Modifier.padding(horizontal = 8.dp)),
@@ -2682,6 +2691,22 @@ private fun ImageViewerScreen(
 
                     draw(singleImage.overview, Rect(0f, 0f, singleImage.width.toFloat(), singleImage.height.toFloat()))
                     detail?.let { draw(it.bitmap, it.source) }
+                }
+            }
+
+            // With the toolbar out of the way, zoom stays reachable without a pinch.
+            if (immersive) {
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(6.dp)
+                        .clip(RoundedCornerShape(topStart = 14.dp))
+                        .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.6f))
+                        .padding(horizontal = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    GalleryAction(Icons.Filled.ZoomOut, "Zoom out") { zoomOut() }
+                    GalleryAction(Icons.Filled.ZoomIn, "Zoom in") { zoomIn() }
                 }
             }
 
