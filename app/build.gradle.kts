@@ -27,8 +27,9 @@ android {
         applicationId = "org.gpdresearch.hyperbrowser"
         minSdk = 26
         targetSdk = 35
-        versionCode = 5
-        versionName = "2.0.2"
+        versionCode = 6
+        versionName = "3.0.0"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     signingConfigs {
@@ -104,4 +105,7 @@ dependencies {
     implementation("com.google.http-client:google-http-client-gson:1.45.0") {
         exclude(group = "org.apache.httpcomponents")
     }
+
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
 }

@@ -12,6 +12,7 @@ import java.io.InputStream
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.util.zip.InflaterInputStream
+import kotlin.math.pow
 
 /**
  * Random access to an image's bytes. A memory-mapped source lets a 500 MB TIFF be decoded without
@@ -93,9 +94,9 @@ private class BufferInputStream(
 
 /**
  * Decoder for the formats [BitmapFactory] cannot read: camera RAW (ARW, CR2, NEF, DNG, RAF …) and
- * TIFF. RAW files are served from their embedded full-size JPEG preview, which is what every RAW
- * viewer shows until a full demosaic is requested; TIFF is decoded from its strips, pulling one
- * row at a time so the source size never dictates memory use.
+ * TIFF. Both are exposed twice: as a whole-frame overview for browsing, and as [TiffImage] /
+ * [SensorImage] handles that render an arbitrary crop at an arbitrary scale, which is what lets a
+ * gigapixel TIFF or a full sensor frame be inspected at 1:1 inside a fixed memory budget.
  *
  * Everything here parses untrusted bytes, so every offset and length is bounds checked and every
  * allocation is capped.
@@ -114,6 +115,17 @@ object RawImage {
      */
     private const val MAX_OUTPUT_PIXELS = 16_000_000L
     private const val MAX_OUTPUT_EDGE = 8192
+
+    /** Beyond this the accumulator for box filtering costs more than the sharper result is worth. */
+    private const val MAX_FILTERED_PIXELS = 4_000_000L
+
+    /**
+     * Taps per axis inside one output pixel's source block. The taps are adjacent and centred in
+     * the block rather than spread across it: a compressed strip has to be decoded in full to
+     * reach any row inside it, so clustering the sampled rows is what decides how much of a
+     * 500 MB file is touched, and 4x4 is already visually indistinguishable from a full box.
+     */
+    private const val MAX_TAPS = 4
 
     fun readAll(stream: InputStream): ByteArray? = runCatching {
         stream.buffered().use { input ->
@@ -141,16 +153,16 @@ object RawImage {
         }
     }.getOrNull()
 
-    fun decode(bytes: ByteArray, targetWidth: Int, targetHeight: Int, lowQuality: Boolean, useFullRaw: Boolean = false): Bitmap? =
-        decode(arraySource(bytes), targetWidth, targetHeight, lowQuality, useFullRaw)
+    fun decode(bytes: ByteArray, targetWidth: Int, targetHeight: Int, lowQuality: Boolean): Bitmap? =
+        decode(arraySource(bytes), targetWidth, targetHeight, lowQuality)
 
-    fun decode(source: ByteSource, targetWidth: Int, targetHeight: Int, lowQuality: Boolean, useFullRaw: Boolean = false): Bitmap? {
-        if (useFullRaw) {
-            demosaic(source, targetWidth, targetHeight)?.let { return it }
-        }
-        return embeddedPreview(source, targetWidth, targetHeight, lowQuality)
+    /**
+     * The browsing view of a file: the embedded preview when there is one, and a downscaled
+     * render of the image itself for TIFF. Sensor data is the inspector's job, not this one's.
+     */
+    fun decode(source: ByteSource, targetWidth: Int, targetHeight: Int, lowQuality: Boolean): Bitmap? =
+        embeddedPreview(source, targetWidth, targetHeight, lowQuality)
             ?: openTiff(source)?.render(targetWidth, targetHeight, null)
-    }
 
     fun orientationDegrees(bytes: ByteArray): Int {
         val exif = runCatching { ExifInterface(ByteArrayInputStream(bytes)) }.getOrNull() ?: return 0
@@ -267,8 +279,9 @@ object RawImage {
         return sample
     }
 
-    // ---- Baseline TIFF ------------------------------------------------------------------------
+    // ---- TIFF containers ----------------------------------------------------------------------
 
+    private const val TAG_NEW_SUBFILE_TYPE = 0x00FE
     private const val TAG_IMAGE_WIDTH = 0x0100
     private const val TAG_IMAGE_LENGTH = 0x0101
     private const val TAG_BITS_PER_SAMPLE = 0x0102
@@ -282,7 +295,16 @@ object RawImage {
     private const val TAG_PREDICTOR = 0x013D
     private const val TAG_ORIENTATION = 0x0112
     private const val TAG_COLOR_MAP = 0x0140
+    private const val TAG_TILE_WIDTH = 0x0142
+    private const val TAG_TILE_LENGTH = 0x0143
+    private const val TAG_TILE_OFFSETS = 0x0144
+    private const val TAG_TILE_BYTE_COUNTS = 0x0145
     private const val TAG_SUB_IFDS = 0x014A
+    private const val TAG_CFA_REPEAT_DIM = 0x828D
+    private const val TAG_CFA_PATTERN = 0x828E
+    private const val TAG_BLACK_LEVEL = 0xC61A
+    private const val TAG_WHITE_LEVEL = 0xC61D
+    private const val TAG_AS_SHOT_NEUTRAL = 0xC628
 
     private const val COMPRESSION_NONE = 1
     private const val COMPRESSION_LZW = 5
@@ -290,9 +312,35 @@ object RawImage {
     private const val COMPRESSION_DEFLATE_ADOBE = 32946
     private const val COMPRESSION_PACKBITS = 32773
 
-    internal class Directory(val entries: Map<Int, LongArray>) {
-        fun first(tag: Int, fallback: Long): Long = entries[tag]?.firstOrNull() ?: fallback
-        fun values(tag: Int): LongArray? = entries[tag]
+    private const val PHOTOMETRIC_CFA = 32803
+
+    private const val TYPE_RATIONAL = 5
+    private const val TYPE_SRATIONAL = 10
+
+    internal class Field(val type: Int, val values: LongArray)
+
+    internal class Directory(val fields: Map<Int, Field>) {
+        fun values(tag: Int): LongArray? {
+            val field = fields[tag] ?: return null
+            if (field.type != TYPE_RATIONAL && field.type != TYPE_SRATIONAL) return field.values
+            return LongArray(field.values.size / 2) { index ->
+                val denominator = field.values[index * 2 + 1]
+                if (denominator == 0L) 0L else field.values[index * 2] / denominator
+            }
+        }
+
+        fun first(tag: Int, fallback: Long): Long = values(tag)?.firstOrNull() ?: fallback
+
+        fun doubles(tag: Int): DoubleArray? {
+            val field = fields[tag] ?: return null
+            if (field.type != TYPE_RATIONAL && field.type != TYPE_SRATIONAL) {
+                return DoubleArray(field.values.size) { field.values[it].toDouble() }
+            }
+            return DoubleArray(field.values.size / 2) { index ->
+                val denominator = field.values[index * 2 + 1]
+                if (denominator == 0L) 0.0 else field.values[index * 2].toDouble() / denominator
+            }
+        }
     }
 
     internal class TiffFile(val source: ByteSource, val littleEndian: Boolean) {
@@ -311,16 +359,55 @@ object RawImage {
         }
     }
 
-    /** An opened TIFF: cheap to hold onto, and renders any crop at any scale on demand. */
+    /**
+     * Where the pixels of one directory live. Strips and tiles differ only in how the image is
+     * cut up, so both are described the same way and read by the same loop; tiles are what make a
+     * crop of a huge TIFF cost the crop rather than everything above it.
+     */
+    private class Blocks(
+        val width: Int,
+        val height: Int,
+        val across: Int,
+        val down: Int,
+        val offsets: LongArray,
+        val counts: LongArray,
+        /** Tiles pad their last row/column, strips do not. */
+        val padded: Boolean,
+    )
+
+    /**
+     * An opened TIFF. Sub-resolution directories (the pyramid many large TIFFs carry) are kept
+     * alongside the full-resolution one, so an overview is read from a small level instead of
+     * decoding the whole frame.
+     */
     class TiffImage internal constructor(
         internal val file: TiffFile,
-        internal val directory: Directory,
+        internal val levels: List<Directory>,
         val width: Int,
         val height: Int,
     ) {
-        /** [region] is in source pixels; null renders the whole frame. */
-        fun render(targetWidth: Int, targetHeight: Int, region: Rect?): Bitmap? =
-            renderDirectory(file, directory, targetWidth, targetHeight, region)
+        /** [region] is in full-resolution pixels; null renders the whole frame. */
+        fun render(targetWidth: Int, targetHeight: Int, region: Rect?): Bitmap? {
+            val crop = Rect(0, 0, width, height)
+            if (region != null && !crop.setIntersect(region, Rect(0, 0, width, height))) return null
+            val level = chooseLevel(crop, targetWidth)
+            val scale = level.first(TAG_IMAGE_WIDTH, width.toLong()).toDouble() / width
+            val scaled = Rect(
+                (crop.left * scale).toInt(),
+                (crop.top * scale).toInt(),
+                (crop.right * scale).toInt().coerceAtLeast((crop.left * scale).toInt() + 1),
+                (crop.bottom * scale).toInt().coerceAtLeast((crop.top * scale).toInt() + 1),
+            )
+            return renderDirectory(file, level, targetWidth, targetHeight, scaled)
+        }
+
+        /** The smallest level that still has a source pixel for every pixel that will be drawn. */
+        private fun chooseLevel(crop: Rect, targetWidth: Int): Directory {
+            val full = levels.first()
+            if (targetWidth <= 0 || crop.width() <= 0) return full
+            val wanted = targetWidth.toLong() * width / crop.width()
+            return levels.lastOrNull { it.first(TAG_IMAGE_WIDTH, 0) >= wanted } ?: full
+        }
     }
 
     fun openTiff(source: ByteSource): TiffImage? {
@@ -330,15 +417,15 @@ object RawImage {
 
         // RAW files also parse as TIFF, but their full-resolution IFD holds undemosaiced sensor
         // data; only directories this decoder understands are considered.
-        val best = directories
+        val supported = directories
             .filter { supportedDirectory(it) }
-            .maxByOrNull { it.first(TAG_IMAGE_WIDTH, 0) * it.first(TAG_IMAGE_LENGTH, 0) }
-            ?: return null
+            .sortedByDescending { it.first(TAG_IMAGE_WIDTH, 0) * it.first(TAG_IMAGE_LENGTH, 0) }
+        val full = supported.firstOrNull() ?: return null
         return TiffImage(
             file = file,
-            directory = best,
-            width = best.first(TAG_IMAGE_WIDTH, 0).toInt(),
-            height = best.first(TAG_IMAGE_LENGTH, 0).toInt(),
+            levels = supported,
+            width = full.first(TAG_IMAGE_WIDTH, 0).toInt(),
+            height = full.first(TAG_IMAGE_LENGTH, 0).toInt(),
         )
     }
 
@@ -365,14 +452,14 @@ object RawImage {
             val count = file.u16(next)
             val end = next + 2 + count * 12
             if (count <= 0 || end + 4 > file.source.size) return
-            val entries = HashMap<Int, LongArray>(count)
+            val fields = HashMap<Int, Field>(count)
             for (i in 0 until count) {
                 val entry = next + 2 + i * 12
                 val tag = file.u16(entry)
-                val values = readValues(file, entry) ?: continue
-                entries[tag] = values
+                val field = readField(file, entry) ?: continue
+                fields[tag] = field
             }
-            val directory = Directory(entries)
+            val directory = Directory(fields)
             into += directory
             if (depth < 3) {
                 directory.values(TAG_SUB_IFDS)?.forEach { sub ->
@@ -383,7 +470,7 @@ object RawImage {
         }
     }
 
-    private fun readValues(file: TiffFile, entry: Int): LongArray? {
+    private fun readField(file: TiffFile, entry: Int): Field? {
         val type = file.u16(entry + 2)
         val count = file.u32(entry + 4)
         val unit = when (type) {
@@ -398,23 +485,28 @@ object RawImage {
         val total = count * unit
         val start = if (total <= 4) entry + 8 else file.u32(entry + 8).toInt()
         if (start < 0 || start + total > file.source.size) return null
-        val values = LongArray(count.toInt())
-        for (i in values.indices) {
+        val components = if (unit == 8) 2 else 1
+        val values = LongArray(count.toInt() * components)
+        for (i in 0 until count.toInt()) {
             val at = start + i * unit
-            values[i] = when (unit) {
-                1 -> file.u8(at).toLong()
-                2 -> file.u16(at).toLong()
-                else -> file.u32(at)
+            when (unit) {
+                1 -> values[i] = file.u8(at).toLong()
+                2 -> values[i] = file.u16(at).toLong()
+                4 -> values[i] = file.u32(at)
+                else -> {
+                    values[i * 2] = file.u32(at)
+                    values[i * 2 + 1] = file.u32(at + 4)
+                }
             }
         }
-        return values
+        return Field(type, values)
     }
 
     private fun supportedDirectory(directory: Directory): Boolean {
         val width = directory.first(TAG_IMAGE_WIDTH, 0)
         val height = directory.first(TAG_IMAGE_LENGTH, 0)
         if (width <= 0 || height <= 0) return false
-        if (directory.values(TAG_STRIP_OFFSETS) == null) return false
+        if (blocksFor(directory, width.toInt(), height.toInt()) == null) return false
         if (directory.first(TAG_PLANAR_CONFIGURATION, 1) != 1L) return false
         val bits = directory.values(TAG_BITS_PER_SAMPLE) ?: longArrayOf(1)
         if (bits.any { it != 8L && it != 16L }) return false
@@ -425,13 +517,40 @@ object RawImage {
         if (photometric == 3L && directory.values(TAG_COLOR_MAP) == null) return false
         // Horizontal differencing is only unwound for 8-bit samples.
         if (directory.first(TAG_PREDICTOR, 1) == 2L && bits.any { it != 8L }) return false
-        return when (directory.first(TAG_COMPRESSION, 1).toInt()) {
-            COMPRESSION_NONE, COMPRESSION_LZW, COMPRESSION_PACKBITS,
-            COMPRESSION_DEFLATE, COMPRESSION_DEFLATE_ADOBE -> true
-            else -> false
-        }
+        return supportedCompression(directory.first(TAG_COMPRESSION, 1).toInt())
     }
 
+    private fun supportedCompression(compression: Int): Boolean = when (compression) {
+        COMPRESSION_NONE, COMPRESSION_LZW, COMPRESSION_PACKBITS,
+        COMPRESSION_DEFLATE, COMPRESSION_DEFLATE_ADOBE -> true
+        else -> false
+    }
+
+    private fun blocksFor(directory: Directory, width: Int, height: Int): Blocks? {
+        val tileWidth = directory.first(TAG_TILE_WIDTH, 0).toInt()
+        val tileHeight = directory.first(TAG_TILE_LENGTH, 0).toInt()
+        val tileOffsets = directory.values(TAG_TILE_OFFSETS)
+        val tileCounts = directory.values(TAG_TILE_BYTE_COUNTS)
+        if (tileOffsets != null && tileCounts != null && tileWidth > 0 && tileHeight > 0) {
+            val across = (width + tileWidth - 1) / tileWidth
+            val down = (height + tileHeight - 1) / tileHeight
+            if (tileOffsets.size < across * down || tileCounts.size < tileOffsets.size) return null
+            return Blocks(tileWidth, tileHeight, across, down, tileOffsets, tileCounts, padded = true)
+        }
+        val offsets = directory.values(TAG_STRIP_OFFSETS) ?: return null
+        val counts = directory.values(TAG_STRIP_BYTE_COUNTS) ?: return null
+        if (offsets.size != counts.size) return null
+        val rowsPerStrip = directory.first(TAG_ROWS_PER_STRIP, height.toLong())
+            .coerceIn(1L, height.toLong()).toInt()
+        val down = (height + rowsPerStrip - 1) / rowsPerStrip
+        if (offsets.size < down) return null
+        return Blocks(width, rowsPerStrip, 1, down, offsets, counts, padded = false)
+    }
+
+    /**
+     * Renders [region] of one directory. Output pixels are box filtered over up to [MAX_TAPS] taps
+     * per axis, which is what stops a downscaled TIFF from looking like a nearest-neighbour mess.
+     */
     private fun renderDirectory(
         file: TiffFile,
         directory: Directory,
@@ -441,75 +560,134 @@ object RawImage {
     ): Bitmap? {
         val width = directory.first(TAG_IMAGE_WIDTH, 0).toInt()
         val height = directory.first(TAG_IMAGE_LENGTH, 0).toInt()
-        val bits = (directory.values(TAG_BITS_PER_SAMPLE) ?: longArrayOf(8)).first().toInt()
+        val bitsPerSample = (directory.values(TAG_BITS_PER_SAMPLE) ?: longArrayOf(8)).first().toInt()
         val samples = directory.first(TAG_SAMPLES_PER_PIXEL, 1).toInt()
         val photometric = directory.first(TAG_PHOTOMETRIC, 1).toInt()
         val predictor = directory.first(TAG_PREDICTOR, 1).toInt()
         val compression = directory.first(TAG_COMPRESSION, 1).toInt()
-        val rowsPerStrip = directory.first(TAG_ROWS_PER_STRIP, height.toLong())
-            .coerceIn(1L, height.toLong()).toInt()
-        val offsets = directory.values(TAG_STRIP_OFFSETS) ?: return null
-        val counts = directory.values(TAG_STRIP_BYTE_COUNTS) ?: return null
-        if (offsets.size != counts.size) return null
+        val blocks = blocksFor(directory, width, height) ?: return null
         val palette = if (photometric == 3) directory.values(TAG_COLOR_MAP) else null
-
-        val bytesPerSample = bits / 8
-        val bytesPerRow = width.toLong() * samples * bytesPerSample
-        if (bytesPerRow <= 0 || bytesPerRow > Int.MAX_VALUE / 2) return null
 
         val crop = Rect(0, 0, width, height)
         if (region != null && !crop.setIntersect(region, Rect(0, 0, width, height))) return null
-        val cropWidth = crop.width()
-        val cropHeight = crop.height()
-        if (cropWidth <= 0 || cropHeight <= 0) return null
+        if (crop.width() <= 0 || crop.height() <= 0) return null
 
-        var step = 1
-        while (
-            (cropWidth / step).toLong() * (cropHeight / step).toLong() > MAX_OUTPUT_PIXELS ||
-            cropWidth / step > MAX_OUTPUT_EDGE ||
-            cropHeight / step > MAX_OUTPUT_EDGE ||
-            (targetWidth > 0 && targetHeight > 0 && cropWidth / (step * 2) >= targetWidth && cropHeight / (step * 2) >= targetHeight)
-        ) {
-            step *= 2
-            if (step > 4096) return null
+        val step = stepFor(crop.width(), crop.height(), targetWidth, targetHeight) ?: return null
+        val outWidth = (crop.width() + step - 1) / step
+        val outHeight = (crop.height() + step - 1) / step
+        if (outWidth <= 0 || outHeight <= 0) return null
+
+        val taps = if (step > 1) minOf(step, MAX_TAPS) else 1
+        val filtered = taps > 1 && outWidth.toLong() * outHeight <= MAX_FILTERED_PIXELS
+        val effectiveTaps = if (filtered) taps else 1
+        val tapOffset = (step - effectiveTaps) / 2
+
+        val pixels = IntArray(outWidth * outHeight)
+        val sums = if (filtered) IntArray(outWidth * outHeight * 3) else null
+        val hits = if (filtered) IntArray(outWidth * outHeight) else null
+
+        val rowBytes = ((blocks.width.toLong() * samples * bitsPerSample + 7) / 8)
+        if (rowBytes <= 0 || rowBytes > Int.MAX_VALUE / 2) return null
+        val row = ByteArray(rowBytes.toInt())
+        val scratch = ByteArray(minOf(rowBytes, 128L * 1024L).toInt().coerceAtLeast(1))
+
+        for (blockY in 0 until blocks.down) {
+            val blockTop = blockY * blocks.height
+            if (blockTop >= crop.bottom) break
+            if (blockTop + blocks.height <= crop.top) continue
+            for (blockX in 0 until blocks.across) {
+                val blockLeft = blockX * blocks.width
+                if (blockLeft >= crop.right) break
+                if (blockLeft + blocks.width <= crop.left) continue
+                val index = blockY * blocks.across + blockX
+                if (index >= blocks.offsets.size) break
+                val rowsInBlock = if (blocks.padded) blocks.height else minOf(blocks.height, height - blockTop)
+                // A strip TIFF this size runs to thousands of strips, and decompressing one
+                // whose rows are all skipped costs as much as one that is drawn.
+                if (!blockHasWantedRow(blockTop, rowsInBlock, crop.top, crop.bottom, step, tapOffset, effectiveTaps)) {
+                    continue
+                }
+                val stream = blockStream(
+                    file.source,
+                    blocks.offsets[index].toInt(),
+                    blocks.counts[index].toInt(),
+                    compression,
+                ) ?: continue
+                // Strips run the full width of the image, so a crop on the left of a gigapixel
+                // frame is not worth decompressing all the way to the right edge.
+                val columns = (minOf(crop.right, blockLeft + blocks.width) - blockLeft)
+                    .coerceIn(1, blocks.width)
+                val prefix = (((columns.toLong() * samples * bitsPerSample + 7) / 8).toInt())
+                    .coerceIn(1, row.size)
+                stream.use { input ->
+                    for (offsetY in 0 until rowsInBlock) {
+                        val y = blockTop + offsetY
+                        if (y >= crop.bottom) return@use
+                        val fromTop = y - crop.top
+                        val inCell = fromTop % step
+                        val wanted = y >= crop.top && inCell >= tapOffset && inCell < tapOffset + effectiveTaps
+                        if (!wanted) {
+                            skipFully(input, rowBytes, scratch)
+                            continue
+                        }
+                        if (!readFully(input, row, prefix)) return@use
+                        if (predictor == 2) applyHorizontalPredictor(row, columns, samples)
+                        val outY = fromTop / step
+                        if (outY >= outHeight) return@use
+                        val firstOutX = ((maxOf(crop.left, blockLeft) - crop.left) / step).coerceAtLeast(0)
+                        val lastOutX = ((minOf(crop.right, blockLeft + blocks.width) - 1 - crop.left) / step)
+                            .coerceAtMost(outWidth - 1)
+                        for (outX in firstOutX..lastOutX) {
+                            val baseX = crop.left + outX * step + tapOffset
+                            var tap = 0
+                            while (tap < effectiveTaps) {
+                                val x = baseX + tap
+                                tap += 1
+                                if (x < blockLeft || x >= blockLeft + blocks.width) continue
+                                if (x >= crop.right || x >= width) continue
+                                val colour = pixelAt(
+                                    row,
+                                    (x - blockLeft) * samples,
+                                    samples,
+                                    bitsPerSample,
+                                    photometric,
+                                    file.littleEndian,
+                                    palette,
+                                )
+                                val at = outY * outWidth + outX
+                                if (sums == null || hits == null) {
+                                    pixels[at] = colour
+                                } else {
+                                    sums[at * 3] += (colour shr 16) and 0xFF
+                                    sums[at * 3 + 1] += (colour shr 8) and 0xFF
+                                    sums[at * 3 + 2] += colour and 0xFF
+                                    hits[at] += 1
+                                }
+                            }
+                        }
+                        val remaining = rowsInBlock - offsetY - 1
+                        if (
+                            remaining <= 0 ||
+                            !blockHasWantedRow(y + 1, remaining, crop.top, crop.bottom, step, tapOffset, effectiveTaps)
+                        ) {
+                            return@use
+                        }
+                        skipFully(input, rowBytes - prefix, scratch)
+                    }
+                }
+            }
         }
 
-        val outWidth = (cropWidth + step - 1) / step
-        val outHeight = (cropHeight + step - 1) / step
-        if (outWidth <= 0 || outHeight <= 0) return null
-        val pixels = IntArray(outWidth * outHeight)
-        val row = ByteArray(bytesPerRow.toInt())
-        val scratch = ByteArray(minOf(bytesPerRow, 128L * 1024L).toInt().coerceAtLeast(1))
-
-        for (strip in offsets.indices) {
-            val firstRow = strip * rowsPerStrip
-            if (firstRow >= crop.bottom) break
-            val rowsInStrip = minOf(rowsPerStrip, height - firstRow)
-            if (rowsInStrip <= 0) break
-            if (firstRow + rowsInStrip <= crop.top) continue
-
-            val stream = stripStream(file.source, offsets[strip].toInt(), counts[strip].toInt(), compression)
-                ?: continue
-            stream.use { input ->
-                for (index in 0 until rowsInStrip) {
-                    val y = firstRow + index
-                    if (y >= crop.bottom) break
-                    if (y < crop.top || (y - crop.top) % step != 0) {
-                        // Compressed rows still have to be consumed to stay in sync.
-                        skipFully(input, bytesPerRow, scratch)
-                        continue
-                    }
-                    if (!readFully(input, row)) return@use
-                    if (predictor == 2) applyHorizontalPredictor(row, width, samples)
-                    val outY = (y - crop.top) / step
-                    if (outY >= outHeight) break
-                    for (outX in 0 until outWidth) {
-                        val x = crop.left + outX * step
-                        val at = (x.toLong() * samples * bytesPerSample).toInt()
-                        if (at + samples * bytesPerSample > row.size) break
-                        pixels[outY * outWidth + outX] =
-                            pixelAt(row, at, samples, bytesPerSample, photometric, file.littleEndian, palette)
-                    }
+        if (sums != null && hits != null) {
+            for (at in pixels.indices) {
+                val count = hits[at]
+                pixels[at] = if (count == 0) {
+                    0xFF000000.toInt()
+                } else {
+                    0xFF000000.toInt() or
+                        ((sums[at * 3] / count) shl 16) or
+                        ((sums[at * 3 + 1] / count) shl 8) or
+                        (sums[at * 3 + 2] / count)
                 }
             }
         }
@@ -519,10 +697,53 @@ object RawImage {
         }.getOrNull()
     }
 
-    private fun readFully(stream: InputStream, buffer: ByteArray): Boolean {
+    /**
+     * Whether any row of a block survives the subsampling, and so is worth decompressing.
+     * [cellRows] is how many source rows make up one output row of the sampling grid: one for
+     * ordinary images, two for sensor data where a filter cell spans two photosite rows.
+     */
+    private fun blockHasWantedRow(
+        blockTop: Int,
+        rows: Int,
+        cropTop: Int,
+        cropBottom: Int,
+        step: Int,
+        tapOffset: Int,
+        taps: Int,
+        cellRows: Int = 1,
+    ): Boolean {
+        for (offsetY in 0 until rows) {
+            val y = blockTop + offsetY
+            if (y < cropTop) continue
+            if (y >= cropBottom) return false
+            val inCell = ((y - cropTop) / cellRows) % step
+            if (inCell >= tapOffset && inCell < tapOffset + taps) return true
+        }
+        return false
+    }
+
+    /** Coarsest power-of-two subsampling that still fills the target and fits in a bitmap. */
+    private fun stepFor(cropWidth: Int, cropHeight: Int, targetWidth: Int, targetHeight: Int): Int? {
+        var step = 1
+        while (
+            (cropWidth / step).toLong() * (cropHeight / step).toLong() > MAX_OUTPUT_PIXELS ||
+            cropWidth / step > MAX_OUTPUT_EDGE ||
+            cropHeight / step > MAX_OUTPUT_EDGE ||
+            // The crop is drawn fitted, so it is the axis that fills the target first that
+            // decides how many source pixels are actually worth reading.
+            (targetWidth > 0 && targetHeight > 0 &&
+                (cropWidth / (step * 2) >= targetWidth || cropHeight / (step * 2) >= targetHeight))
+        ) {
+            step *= 2
+            if (step > 4096) return null
+        }
+        return step
+    }
+
+    private fun readFully(stream: InputStream, buffer: ByteArray, length: Int = buffer.size): Boolean {
         var filled = 0
-        while (filled < buffer.size) {
-            val read = stream.read(buffer, filled, buffer.size - filled)
+        while (filled < length) {
+            val read = stream.read(buffer, filled, length - filled)
             if (read <= 0) return false
             filled += read
         }
@@ -544,7 +765,7 @@ object RawImage {
     }
 
     /** Rows are pulled through a stream, so even a single 500 MB strip costs one row of memory. */
-    private fun stripStream(source: ByteSource, offset: Int, length: Int, compression: Int): InputStream? {
+    private fun blockStream(source: ByteSource, offset: Int, length: Int, compression: Int): InputStream? {
         if (offset < 0 || length <= 0 || offset + length > source.size) return null
         val base = source.stream(offset, length) ?: return null
         return when (compression) {
@@ -556,29 +777,55 @@ object RawImage {
         }
     }
 
+    /** Raw sample [index] of a row, for 8, 16 and the packed 12/14-bit layouts RAW files use. */
+    private fun sampleValue(row: ByteArray, index: Int, bits: Int, littleEndian: Boolean): Int = when (bits) {
+        8 -> {
+            if (index >= row.size) 0 else row[index].toInt() and 0xFF
+        }
+        16 -> {
+            val at = index * 2
+            if (at + 1 >= row.size) {
+                0
+            } else {
+                val low = row[at].toInt() and 0xFF
+                val high = row[at + 1].toInt() and 0xFF
+                if (littleEndian) (high shl 8) or low else (low shl 8) or high
+            }
+        }
+        else -> {
+            // Packed samples are written most-significant bit first, whatever the file's byte order.
+            var bit = index * bits
+            var got = 0
+            var value = 0
+            while (got < bits) {
+                val at = bit ushr 3
+                if (at >= row.size) break
+                val free = 8 - (bit and 7)
+                val take = minOf(free, bits - got)
+                val chunk = ((row[at].toInt() and 0xFF) shr (free - take)) and ((1 shl take) - 1)
+                value = (value shl take) or chunk
+                got += take
+                bit += take
+            }
+            value
+        }
+    }
+
     private fun pixelAt(
-        raw: ByteArray,
+        row: ByteArray,
         at: Int,
         samples: Int,
-        bytesPerSample: Int,
+        bits: Int,
         photometric: Int,
         littleEndian: Boolean,
         palette: LongArray?,
     ): Int {
-        fun sample(index: Int): Int {
-            val offset = at + index * bytesPerSample
-            return if (bytesPerSample == 1) {
-                raw[offset].toInt() and 0xFF
-            } else {
-                val low = raw[offset].toInt() and 0xFF
-                val high = raw[offset + 1].toInt() and 0xFF
-                if (littleEndian) high else low
-            }
-        }
+        val shift = if (bits > 8) bits - 8 else 0
+        fun sample(index: Int): Int = sampleValue(row, at + index, bits, littleEndian) shr shift
 
         return when {
             palette != null -> {
-                val index = sample(0)
+                val index = sampleValue(row, at, bits, littleEndian)
                 val entries = palette.size / 3
                 if (index >= entries) {
                     0xFF000000.toInt()
@@ -608,194 +855,242 @@ object RawImage {
         }
     }
 
+    // ---- Undemosaiced sensor data -------------------------------------------------------------
+
     /**
-     * Finds the IFD holding raw sensor data — photometric 32803 (CFA) or a single-channel
-     * 16-bit image — and demosaics it. [openTiff] cannot be used here because it only accepts
-     * directories [supportedDirectory] understands, which excludes the CFA data entirely.
-     * Returns null when the sensor data uses a compression this decoder cannot read (lossless
-     * JPEG, proprietary maker formats), so callers can fall back to the embedded preview.
+     * The full-resolution sensor image behind a RAW file: one sample per photosite, arranged in a
+     * colour filter array. Like [TiffImage] it renders a crop at a scale, so the inspector can go
+     * to 1:1 on a 60 MP frame without ever holding the whole demosaiced image.
      */
-    fun demosaic(source: ByteSource, targetWidth: Int, targetHeight: Int): Bitmap? {
+    class SensorImage internal constructor(
+        internal val file: TiffFile,
+        internal val directory: Directory,
+        val width: Int,
+        val height: Int,
+    ) {
+        fun render(targetWidth: Int, targetHeight: Int, region: Rect?): Bitmap? =
+            renderSensor(file, directory, targetWidth, targetHeight, region)
+    }
+
+    /**
+     * Opens the sensor data of a RAW file. Returns null when the file's sensor data uses a
+     * compression this decoder cannot read (lossless JPEG, proprietary maker formats), so callers
+     * can say so instead of quietly showing the embedded preview again.
+     */
+    fun openSensor(source: ByteSource): SensorImage? {
         val file = tiffHeader(source) ?: return null
         val directories = mutableListOf<Directory>()
         readDirectories(file, file.u32(4).toInt(), directories, depth = 0)
         val best = directories
-            .filter { rawCandidate(it) }
+            .filter { sensorDirectory(it) }
             .maxByOrNull { it.first(TAG_IMAGE_WIDTH, 0) * it.first(TAG_IMAGE_LENGTH, 0) }
             ?: return null
-        return demosaicDirectory(file, best, targetWidth, targetHeight)
+        return SensorImage(
+            file = file,
+            directory = best,
+            width = best.first(TAG_IMAGE_WIDTH, 0).toInt(),
+            height = best.first(TAG_IMAGE_LENGTH, 0).toInt(),
+        )
     }
 
-    private fun rawCandidate(directory: Directory): Boolean {
+    /** Kept for callers that only want a whole-frame demosaic. */
+    fun demosaic(source: ByteSource, targetWidth: Int, targetHeight: Int): Bitmap? =
+        openSensor(source)?.render(targetWidth, targetHeight, null)
+
+    private fun sensorDirectory(directory: Directory): Boolean {
         val width = directory.first(TAG_IMAGE_WIDTH, 0)
         val height = directory.first(TAG_IMAGE_LENGTH, 0)
-        if (width <= 0 || height <= 0) return false
-        if (directory.values(TAG_STRIP_OFFSETS) == null) return false
-        if (directory.values(TAG_STRIP_BYTE_COUNTS) == null) return false
+        if (width < 16 || height < 16) return false
+        if (blocksFor(directory, width.toInt(), height.toInt()) == null) return false
         if (directory.first(TAG_PLANAR_CONFIGURATION, 1) != 1L) return false
-        // Sensor data is one 16-bit sample per pixel; packed 12/14-bit rows are not readable
-        // with the two-bytes-per-pixel path below.
-        val bits = (directory.values(TAG_BITS_PER_SAMPLE) ?: return false).first()
-        if (bits != 16L) return false
         if (directory.first(TAG_SAMPLES_PER_PIXEL, 1) != 1L) return false
+        val bits = (directory.values(TAG_BITS_PER_SAMPLE) ?: return false).first()
+        if (bits != 8L && bits != 12L && bits != 14L && bits != 16L) return false
         val photometric = directory.first(TAG_PHOTOMETRIC, -1)
-        // 1 = BlackIsZero, 32803 = CFA (color filter array).
-        if (photometric != 1L && photometric != 32803L) return false
-        return when (directory.first(TAG_COMPRESSION, 1).toInt()) {
-            COMPRESSION_NONE, COMPRESSION_LZW, COMPRESSION_PACKBITS,
-            COMPRESSION_DEFLATE, COMPRESSION_DEFLATE_ADOBE -> true
-            else -> false
+        // 1 = BlackIsZero (some backs write plain greyscale), 32803 = colour filter array.
+        if (photometric != 1L && photometric != PHOTOMETRIC_CFA.toLong()) return false
+        return supportedCompression(directory.first(TAG_COMPRESSION, 1).toInt())
+    }
+
+    /** Colour of each photosite in the 2x2 filter cell: 0 red, 1 green, 2 blue. */
+    private fun cfaPattern(directory: Directory): IntArray {
+        val dim = directory.values(TAG_CFA_REPEAT_DIM)
+        val pattern = directory.values(TAG_CFA_PATTERN)
+        if (pattern == null || pattern.size < 4) return intArrayOf(0, 1, 1, 2)
+        if (dim != null && dim.size >= 2 && (dim[0] != 2L || dim[1] != 2L)) return intArrayOf(0, 1, 1, 2)
+        val colours = IntArray(4) { pattern[it].toInt() }
+        return if (colours.any { it !in 0..2 }) intArrayOf(0, 1, 1, 2) else colours
+    }
+
+    private class SensorColour(
+        val black: Float,
+        val white: Float,
+        val gains: FloatArray,
+    ) {
+        /** Normalised, white balanced and gamma encoded, which is the minimum a sensor value
+         * needs before it looks like a photograph rather than a dark green cast. */
+        fun encode(raw: Int, colour: Int): Int {
+            val range = (white - black).coerceAtLeast(1f)
+            val linear = ((raw - black) / range).coerceIn(0f, 1f) * gains[colour]
+            val clamped = linear.coerceIn(0f, 1f)
+            val encoded = if (clamped <= 0.0031308f) {
+                clamped * 12.92f
+            } else {
+                1.055f * clamped.pow(1f / 2.4f) - 0.055f
+            }
+            return (encoded * 255f + 0.5f).toInt().coerceIn(0, 255)
         }
     }
 
-    private fun demosaicDirectory(file: TiffFile, directory: Directory, targetWidth: Int, targetHeight: Int): Bitmap? {
+    private fun sensorColour(directory: Directory, bits: Int): SensorColour {
+        val maximum = ((1 shl bits) - 1).toFloat()
+        val black = directory.doubles(TAG_BLACK_LEVEL)?.firstOrNull()?.toFloat() ?: 0f
+        val white = directory.doubles(TAG_WHITE_LEVEL)?.firstOrNull()?.toFloat() ?: maximum
+        val neutral = directory.doubles(TAG_AS_SHOT_NEUTRAL)
+        val gains = FloatArray(3) { 1f }
+        if (neutral != null && neutral.size >= 3 && neutral.all { it > 0.0 }) {
+            // Green is left at unity so exposure is unchanged and only the cast is removed.
+            for (colour in 0..2) gains[colour] = (neutral[1] / neutral[colour]).toFloat().coerceIn(0.25f, 8f)
+        }
+        return SensorColour(
+            black = black.coerceIn(0f, maximum),
+            white = white.coerceIn(1f, maximum).coerceAtLeast(black + 1f),
+            gains = gains,
+        )
+    }
+
+    /**
+     * Demosaics [region] of the sensor. Each output pixel averages the photosites of one or more
+     * complete filter cells, so colour is reconstructed without interpolating across the crop's
+     * edges and without ever materialising the full frame.
+     */
+    private fun renderSensor(
+        file: TiffFile,
+        directory: Directory,
+        targetWidth: Int,
+        targetHeight: Int,
+        region: Rect?,
+    ): Bitmap? {
         val width = directory.first(TAG_IMAGE_WIDTH, 0).toInt()
         val height = directory.first(TAG_IMAGE_LENGTH, 0).toInt()
         val bits = (directory.values(TAG_BITS_PER_SAMPLE) ?: longArrayOf(16)).first().toInt()
-        val samples = directory.first(TAG_SAMPLES_PER_PIXEL, 1).toInt()
-        val photometric = directory.first(TAG_PHOTOMETRIC, 1).toInt()
-        val predictor = directory.first(TAG_PREDICTOR, 1).toInt()
         val compression = directory.first(TAG_COMPRESSION, 1).toInt()
-        val rowsPerStrip = directory.first(TAG_ROWS_PER_STRIP, height.toLong())
-            .coerceIn(1L, height.toLong()).toInt()
-        val offsets = directory.values(TAG_STRIP_OFFSETS) ?: return null
-        val counts = directory.values(TAG_STRIP_BYTE_COUNTS) ?: return null
-        if (offsets.size != counts.size) return null
+        val predictor = directory.first(TAG_PREDICTOR, 1).toInt()
+        val blocks = blocksFor(directory, width, height) ?: return null
+        val pattern = cfaPattern(directory)
+        val colour = sensorColour(directory, bits)
 
-        // Only 16-bit single-channel RAW data (Bayer pattern) can be demosaiced.
-        if (bits != 16 || samples != 1) return null
+        val crop = Rect(0, 0, width, height)
+        if (region != null && !crop.setIntersect(region, Rect(0, 0, width, height))) return null
+        // Filter cells are 2x2, so a crop that starts mid-cell would swap the colours.
+        crop.left = crop.left and 1.inv()
+        crop.top = crop.top and 1.inv()
+        crop.right = (crop.right + 1) and 1.inv()
+        crop.bottom = (crop.bottom + 1) and 1.inv()
+        if (!crop.intersect(0, 0, width and 1.inv(), height and 1.inv())) return null
+        if (crop.width() < 2 || crop.height() < 2) return null
 
-        val bytesPerSample = 2
-        val bytesPerRow = width.toLong() * samples * bytesPerSample
-        if (bytesPerRow <= 0 || bytesPerRow > Int.MAX_VALUE / 2) return null
-
-        // Apply downsampling if target dimensions are specified
-        var step = 1
-        while (
-            (width / step).toLong() * (height / step).toLong() > MAX_OUTPUT_PIXELS ||
-            width / step > MAX_OUTPUT_EDGE ||
-            height / step > MAX_OUTPUT_EDGE ||
-            (targetWidth > 0 && targetHeight > 0 && width / (step * 2) >= targetWidth && height / (step * 2) >= targetHeight)
-        ) {
-            step *= 2
-            if (step > 4096) return null
-        }
-
-        val outWidth = (width + step - 1) / step
-        val outHeight = (height + step - 1) / step
+        // One output pixel per filter cell at 1:1; coarser scales average whole cells.
+        val cellsWide = crop.width() / 2
+        val cellsHigh = crop.height() / 2
+        val step = stepFor(cellsWide, cellsHigh, targetWidth, targetHeight) ?: return null
+        val outWidth = (cellsWide + step - 1) / step
+        val outHeight = (cellsHigh + step - 1) / step
         if (outWidth <= 0 || outHeight <= 0) return null
 
-        // Read all RAW sensor data into memory (required for demosaicing)
-        val rawData = ByteArray(width * height * bytesPerSample)
-        val row = ByteArray(bytesPerRow.toInt())
-        val scratch = ByteArray(minOf(bytesPerRow, 128L * 1024L).toInt().coerceAtLeast(1))
+        val taps = if (step > 1) minOf(step, MAX_TAPS) else 1
+        val filtered = taps > 1 && outWidth.toLong() * outHeight <= MAX_FILTERED_PIXELS
+        val effectiveTaps = if (filtered) taps else 1
+        val tapOffset = (step - effectiveTaps) / 2
 
-        var rawDataOffset = 0
-        for (strip in offsets.indices) {
-            val firstRow = strip * rowsPerStrip
-            if (firstRow >= height) break
-            val rowsInStrip = minOf(rowsPerStrip, height - firstRow)
-            if (rowsInStrip <= 0) break
+        val pixels = IntArray(outWidth * outHeight)
+        val sums = IntArray(outWidth * outHeight * 3)
+        val hits = IntArray(outWidth * outHeight * 3)
 
-            val stream = stripStream(file.source, offsets[strip].toInt(), counts[strip].toInt(), compression)
-                ?: continue
-            stream.use { input ->
-                for (index in 0 until rowsInStrip) {
-                    if (!readFully(input, row)) break
-                    if (predictor == 2) applyHorizontalPredictor(row, width, samples)
-                    val copyLen = minOf(row.size, rawData.size - rawDataOffset)
-                    System.arraycopy(row, 0, rawData, rawDataOffset, copyLen)
-                    rawDataOffset += copyLen
+        val rowBytes = ((blocks.width.toLong() * bits + 7) / 8)
+        if (rowBytes <= 0 || rowBytes > Int.MAX_VALUE / 2) return null
+        val row = ByteArray(rowBytes.toInt())
+        val scratch = ByteArray(minOf(rowBytes, 128L * 1024L).toInt().coerceAtLeast(1))
+
+        for (blockY in 0 until blocks.down) {
+            val blockTop = blockY * blocks.height
+            if (blockTop >= crop.bottom) break
+            if (blockTop + blocks.height <= crop.top) continue
+            for (blockX in 0 until blocks.across) {
+                val blockLeft = blockX * blocks.width
+                if (blockLeft >= crop.right) break
+                if (blockLeft + blocks.width <= crop.left) continue
+                val index = blockY * blocks.across + blockX
+                if (index >= blocks.offsets.size) break
+                val rowsInBlock = if (blocks.padded) blocks.height else minOf(blocks.height, height - blockTop)
+                // Skipped blocks cost as much to decompress as drawn ones, so they are not opened.
+                if (
+                    !blockHasWantedRow(
+                        blockTop, rowsInBlock, crop.top, crop.bottom, step, tapOffset, effectiveTaps, cellRows = 2,
+                    )
+                ) {
+                    continue
+                }
+                val stream = blockStream(
+                    file.source,
+                    blocks.offsets[index].toInt(),
+                    blocks.counts[index].toInt(),
+                    compression,
+                ) ?: continue
+                stream.use { input ->
+                    for (offsetY in 0 until rowsInBlock) {
+                        val y = blockTop + offsetY
+                        if (y >= crop.bottom) return@use
+                        val cellRow = (y - crop.top) / 2
+                        val inCell = cellRow % step
+                        val wanted = y >= crop.top && inCell >= tapOffset && inCell < tapOffset + effectiveTaps
+                        if (!wanted) {
+                            skipFully(input, rowBytes, scratch)
+                            continue
+                        }
+                        if (!readFully(input, row)) return@use
+                        if (predictor == 2 && bits == 8) applyHorizontalPredictor(row, blocks.width, 1)
+                        val outY = cellRow / step
+                        if (outY >= outHeight) return@use
+                        // Both rows of a cell are read, so red, green and blue all contribute.
+                        val patternRow = (y - crop.top) and 1
+                        val firstOutX = ((maxOf(crop.left, blockLeft) - crop.left) / 2 / step).coerceAtLeast(0)
+                        val lastOutX = ((minOf(crop.right, blockLeft + blocks.width) - 1 - crop.left) / 2 / step)
+                            .coerceAtMost(outWidth - 1)
+                        for (outX in firstOutX..lastOutX) {
+                            val baseCell = outX * step + tapOffset
+                            var tap = 0
+                            while (tap < effectiveTaps) {
+                                val cell = baseCell + tap
+                                tap += 1
+                                if (cell >= cellsWide) continue
+                                for (patternColumn in 0..1) {
+                                    val x = crop.left + cell * 2 + patternColumn
+                                    if (x < blockLeft || x >= blockLeft + blocks.width) continue
+                                    if (x >= crop.right || x >= width) continue
+                                    val channel = pattern[patternRow * 2 + patternColumn]
+                                    val raw = sampleValue(row, x - blockLeft, bits, file.littleEndian)
+                                    val at = (outY * outWidth + outX) * 3 + channel
+                                    sums[at] += colour.encode(raw, channel)
+                                    hits[at] += 1
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
 
-        // Demosaic using bilinear interpolation
-        val pixels = IntArray(outWidth * outHeight)
-        val littleEndian = file.littleEndian
-
-        for (y in 0 until outHeight) {
-            for (x in 0 until outWidth) {
-                val srcX = x * step
-                val srcY = y * step
-                val pixel = demosaicPixel(rawData, srcX, srcY, width, height, littleEndian)
-                pixels[y * outWidth + x] = pixel
-            }
+        for (at in pixels.indices) {
+            val red = if (hits[at * 3] > 0) sums[at * 3] / hits[at * 3] else 0
+            val green = if (hits[at * 3 + 1] > 0) sums[at * 3 + 1] / hits[at * 3 + 1] else 0
+            val blue = if (hits[at * 3 + 2] > 0) sums[at * 3 + 2] / hits[at * 3 + 2] else 0
+            pixels[at] = 0xFF000000.toInt() or (red shl 16) or (green shl 8) or blue
         }
 
         return runCatching {
             Bitmap.createBitmap(pixels, outWidth, outHeight, Bitmap.Config.ARGB_8888)
         }.getOrNull()
-    }
-
-    /**
-     * Demosaics a single pixel using bilinear interpolation.
-     * Assumes RGGB Bayer pattern (common for most cameras).
-     */
-    private fun demosaicPixel(
-        rawData: ByteArray,
-        x: Int,
-        y: Int,
-        width: Int,
-        height: Int,
-        littleEndian: Boolean,
-    ): Int {
-        fun getSample(sx: Int, sy: Int): Int {
-            if (sx < 0 || sx >= width || sy < 0 || sy >= height) return 0
-            val offset = (sy * width + sx) * 2
-            val low = rawData[offset].toInt() and 0xFF
-            val high = rawData[offset + 1].toInt() and 0xFF
-            return if (littleEndian) (high shl 8) or low else (low shl 8) or high
-        }
-
-        // Determine which color this pixel is in the Bayer pattern (RGGB)
-        val isRed = (x % 2 == 0) && (y % 2 == 0)
-        val isGreen = ((x % 2) != (y % 2))
-        val isBlue = (x % 2 != 0) && (y % 2 != 0)
-
-        var red: Int
-        var green: Int
-        var blue: Int
-
-        if (isRed) {
-            red = getSample(x, y)
-            // Green: average of 4 neighboring green pixels
-            green = (getSample(x - 1, y) + getSample(x + 1, y) +
-                    getSample(x, y - 1) + getSample(x, y + 1)) / 4
-            // Blue: average of 4 diagonal blue pixels
-            blue = (getSample(x - 1, y - 1) + getSample(x + 1, y - 1) +
-                    getSample(x - 1, y + 1) + getSample(x + 1, y + 1)) / 4
-        } else if (isGreen) {
-            red = if (x % 2 == 0) {
-                // Green at even x, odd y - average of left/right red
-                (getSample(x - 1, y) + getSample(x + 1, y)) / 2
-            } else {
-                // Green at odd x, even y - average of top/bottom red
-                (getSample(x, y - 1) + getSample(x, y + 1)) / 2
-            }
-            green = getSample(x, y)
-            blue = if (x % 2 == 0) {
-                // Green at even x, odd y - average of top/bottom blue
-                (getSample(x, y - 1) + getSample(x, y + 1)) / 2
-            } else {
-                // Green at odd x, even y - average of left/right blue
-                (getSample(x - 1, y) + getSample(x + 1, y)) / 2
-            }
-        } else { // isBlue
-            // Red: average of 4 diagonal red pixels
-            red = (getSample(x - 1, y - 1) + getSample(x + 1, y - 1) +
-                    getSample(x - 1, y + 1) + getSample(x + 1, y + 1)) / 4
-            // Green: average of 4 neighboring green pixels
-            green = (getSample(x - 1, y) + getSample(x + 1, y) +
-                    getSample(x, y - 1) + getSample(x, y + 1)) / 4
-            blue = getSample(x, y)
-        }
-
-        // Scale 16-bit to 8-bit and pack into ARGB
-        val r8 = (red shr 8).coerceIn(0, 255)
-        val g8 = (green shr 8).coerceIn(0, 255)
-        val b8 = (blue shr 8).coerceIn(0, 255)
-        return (0xFF shl 24) or (r8 shl 16) or (g8 shl 8) or b8
     }
 }
 
