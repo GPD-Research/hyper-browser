@@ -17,6 +17,9 @@ Key behavior implemented:
 - A vertical command strip for Copy, Paste, Move, Delete, and selection handling
 - Image-aware logic with a separate View flow from the generic Open flow
 - Simple in-app image browsing using a single-image viewer and a thumbnail strip for easy navigation
+- Inline rename in the file panes, committed with the Rename button or by selecting another file
+- Camera RAW (ARW, CR2, NEF, DNG, RAF, RW2, ORF …), HEIC/HEIF and TIFF viewing: RAW files are shown
+  from their largest embedded JPEG preview, TIFF is decoded in-app (no full demosaic)
 - Default-app open flow for non-image files, keeping the app focused on file movement and organization
 - Devcontainer support that restores the Android SDK automatically on rebuild
 

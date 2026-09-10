@@ -4,6 +4,7 @@ import android.content.ContentResolver
 import android.content.Context
 import android.net.Uri
 import android.provider.DocumentsContract
+import android.webkit.MimeTypeMap
 import androidx.documentfile.provider.DocumentFile
 import java.io.File
 import java.io.InputStream
@@ -55,15 +56,13 @@ object Storage {
     }
 
     fun mimeType(context: Context, uri: Uri): String {
+        val name = uri.lastPathSegment ?: uri.toString()
         if (DriveUris.isDrive(uri)) {
-            return entry(context, uri)?.mimeType ?: "application/octet-stream"
+            return entry(context, uri)?.let { refineMimeType(it.mimeType, it.name) } ?: GENERIC_MIME
         }
-        return context.contentResolver.getType(uri) ?: when (uri.toString().substringAfterLast('.', "").lowercase()) {
-            "jpg", "jpeg", "png", "gif", "bmp", "webp" -> "image/bitmap"
-            "pdf" -> "application/pdf"
-            "txt" -> "text/plain"
-            else -> "application/octet-stream"
-        }
+        val reported = uri.takeIf { it.scheme == ContentResolver.SCHEME_CONTENT }
+            ?.let { context.contentResolver.getType(it) }
+        return refineMimeType(reported, name)
     }
 
     fun openInput(context: Context, uri: Uri): InputStream? = if (DriveUris.isDrive(uri)) {
@@ -100,6 +99,18 @@ object Storage {
             android.util.Log.d("Storage", "Writing to Drive")
             return DriveClient.upload(DriveUris.idOf(parentUri), name, mimeType, input)
         }
+        if (parentUri.scheme == ContentResolver.SCHEME_FILE) {
+            // RawDocumentFile.createFile() re-appends the MIME extension, turning photo.jpg into photo.jpg.jpg.
+            val parent = parentUri.path?.let(::File) ?: return false
+            val destination = File(parent, safeFileName(name) ?: return false)
+            return runCatching {
+                destination.outputStream().use { output -> input.copyTo(output) }
+                true
+            }.onFailure {
+                android.util.Log.e("Storage", "Failed to write ${destination.path}", it)
+                destination.delete()
+            }.getOrDefault(false)
+        }
         android.util.Log.d("Storage", "Writing to local storage")
         val targetDir = documentFile(context, parentUri) ?: run {
             android.util.Log.e("Storage", "Failed to get target directory for $parentUri")
@@ -135,22 +146,90 @@ object Storage {
         documentFile(context, uri)?.delete() == true
     }
 
+    /** Returns the URI the item lives at after the rename, or null when the backend refused it. */
+    fun rename(context: Context, uri: Uri, newName: String): Uri? {
+        val safeName = safeFileName(newName) ?: return null
+        if (DriveUris.isDrive(uri)) return DriveClient.rename(DriveUris.idOf(uri), safeName)?.uri
+        if (uri.scheme == ContentResolver.SCHEME_FILE) {
+            val source = uri.path?.let(::File) ?: return null
+            val target = File(source.parentFile ?: return null, safeName)
+            if (target.exists()) return null
+            return if (source.renameTo(target)) Uri.fromFile(target) else null
+        }
+        return runCatching { DocumentsContract.renameDocument(context.contentResolver, uri, safeName) }.getOrNull()
+    }
+
     fun childNames(context: Context, uri: Uri): MutableSet<String> =
         children(context, uri).mapTo(mutableSetOf()) { it.name }
 
     private fun DocumentFile.toEntry(): FileEntry {
         val modified = runCatching { lastModified() }.getOrDefault(0L)
+        val entryName = name ?: uri.lastPathSegment ?: "unknown"
         return FileEntry(
             uri = uri,
-            name = name ?: uri.lastPathSegment ?: "unknown",
+            name = entryName,
             isDirectory = isDirectory,
             size = if (isDirectory) 0L else length(),
-            mimeType = type,
+            mimeType = if (isDirectory) type else refineMimeType(type, entryName),
             lastModified = modified,
             createdAt = creationTimeMillis(uri) ?: modified,
         )
     }
 }
+
+const val GENERIC_MIME = "application/octet-stream"
+
+/**
+ * Types the platform [MimeTypeMap] either misses or reports inconsistently across OEMs. Without
+ * them RAW and HEIF files never register as images, so they never reach the viewer.
+ */
+private val EXTRA_MIME_TYPES = mapOf(
+    "arw" to "image/x-sony-arw",
+    "srf" to "image/x-sony-srf",
+    "sr2" to "image/x-sony-sr2",
+    "cr2" to "image/x-canon-cr2",
+    "cr3" to "image/x-canon-cr3",
+    "crw" to "image/x-canon-crw",
+    "nef" to "image/x-nikon-nef",
+    "nrw" to "image/x-nikon-nrw",
+    "dng" to "image/x-adobe-dng",
+    "orf" to "image/x-olympus-orf",
+    "raf" to "image/x-fuji-raf",
+    "rw2" to "image/x-panasonic-rw2",
+    "raw" to "image/x-panasonic-raw",
+    "pef" to "image/x-pentax-pef",
+    "srw" to "image/x-samsung-srw",
+    "dcr" to "image/x-kodak-dcr",
+    "erf" to "image/x-epson-erf",
+    "3fr" to "image/x-hasselblad-3fr",
+    "mef" to "image/x-mamiya-mef",
+    "mrw" to "image/x-minolta-mrw",
+    "x3f" to "image/x-sigma-x3f",
+    "heic" to "image/heic",
+    "heif" to "image/heif",
+    "hif" to "image/heif",
+    "avif" to "image/avif",
+    "tif" to "image/tiff",
+    "tiff" to "image/tiff",
+)
+
+fun fileExtensionOf(name: String): String = name.substringAfterLast('.', "").lowercase()
+
+/** Providers routinely report octet-stream for RAW and HEIF, so the extension gets the last word. */
+fun refineMimeType(reported: String?, name: String): String {
+    val trimmed = reported?.takeIf { it.isNotBlank() && it != GENERIC_MIME && it != "image/bitmap" }
+    // A Google-native title may end in ".pdf" without being one; the reported type decides.
+    if (trimmed != null && trimmed.startsWith(GOOGLE_NATIVE_PREFIX)) return trimmed
+    val extension = fileExtensionOf(name)
+    return EXTRA_MIME_TYPES[extension]
+        ?: trimmed
+        ?: MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
+        ?: GENERIC_MIME
+}
+
+/** Strips any path so a user supplied or remote name can never escape its parent directory. */
+private fun safeFileName(name: String): String? =
+    File(name.trim()).name.takeIf { it.isNotBlank() && it != "." && it != ".." }
 
 /** Only local paths expose a creation time; SAF providers have no such column. */
 private fun creationTimeMillis(uri: Uri): Long? {

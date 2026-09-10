@@ -26,7 +26,7 @@ import com.google.api.services.drive.model.File as DriveFile
 import java.io.InputStream
 
 const val DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder"
-private const val GOOGLE_NATIVE_PREFIX = "application/vnd.google-apps."
+internal const val GOOGLE_NATIVE_PREFIX = "application/vnd.google-apps."
 private const val DRIVE_FIELDS = "id,name,mimeType,size,trashed,modifiedTime,createdTime"
 
 /** Synthetic URIs so Drive items can flow through the same pane/transfer code as SAF documents. */
@@ -214,21 +214,36 @@ object DriveClient {
         return runCatching { drive.files().delete(fileId).setSupportsAllDrives(true).execute() }.isSuccess
     }
 
+    fun rename(fileId: String, newName: String): FileEntry? {
+        val drive = service ?: return null
+        return runCatching {
+            drive.files().update(fileId, DriveFile().apply { name = newName })
+                .setFields(DRIVE_FIELDS)
+                .setSupportsAllDrives(true)
+                .execute()
+                .toEntry()
+        }.onFailure { Log.e("DriveClient", "Failed to rename $fileId", it) }.getOrNull()
+    }
+
     private fun exportTypeFor(nativeType: String): String = when (nativeType) {
         "application/vnd.google-apps.drawing" -> "image/png"
         "application/vnd.google-apps.script" -> "application/vnd.google-apps.script+json"
         else -> "application/pdf"
     }
 
-    private fun DriveFile.toEntry(): FileEntry = FileEntry(
-        uri = DriveUris.forId(id),
-        name = name ?: id,
-        isDirectory = mimeType == DRIVE_FOLDER_MIME,
-        size = getSize() ?: 0L,
-        mimeType = mimeType,
-        lastModified = modifiedTime?.value ?: 0L,
-        createdAt = createdTime?.value ?: modifiedTime?.value ?: 0L,
-    )
+    private fun DriveFile.toEntry(): FileEntry {
+        val entryName = name ?: id
+        val isFolder = mimeType == DRIVE_FOLDER_MIME
+        return FileEntry(
+            uri = DriveUris.forId(id),
+            name = entryName,
+            isDirectory = isFolder,
+            size = getSize() ?: 0L,
+            mimeType = if (isFolder) mimeType else refineMimeType(mimeType, entryName),
+            lastModified = modifiedTime?.value ?: 0L,
+            createdAt = createdTime?.value ?: modifiedTime?.value ?: 0L,
+        )
+    }
 }
 
 internal fun withExportExtension(name: String, mimeType: String): String {

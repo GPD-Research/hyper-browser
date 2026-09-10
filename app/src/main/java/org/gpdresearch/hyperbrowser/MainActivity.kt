@@ -8,6 +8,7 @@ import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.BitmapRegionDecoder
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -24,7 +25,9 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.LocalOverscrollConfiguration
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.border
@@ -34,11 +37,16 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -71,6 +79,7 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Deselect
+import androidx.compose.material.icons.filled.DriveFileRenameOutline
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
@@ -79,6 +88,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.material.icons.filled.ZoomOut
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.AlertDialogDefaults
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
@@ -88,12 +98,14 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -103,23 +115,33 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
@@ -130,11 +152,18 @@ import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.auth.api.signin.GoogleSignInAccount
 import com.google.android.gms.common.api.ApiException
 import kotlin.math.abs
+import kotlin.math.ceil
+import kotlin.math.floor
+import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayInputStream
 import java.io.File
+import java.io.InputStream
 
 private enum class Pane { LEFT, RIGHT }
 private enum class TransferDirection { LEFT_TO_RIGHT, RIGHT_TO_LEFT }
@@ -147,26 +176,81 @@ private enum class AppTheme(val label: String) {
 }
 
 private val MATRIX_GREEN = Color(0xFF00FF41)
+private val MATRIX_DIM = Color(0xFF00B32D)
 
+/**
+ * Every slot is filled in: Material's defaults for the untouched ones are purple-tinted, which is
+ * what used to leak into dialogs and chips regardless of the chosen theme.
+ */
 private fun colorSchemeFor(theme: AppTheme) = when (theme) {
     AppTheme.LIGHT -> lightColorScheme()
     AppTheme.INVERTED -> darkColorScheme(
         background = Color.Black,
-        surface = Color.Black,
         onBackground = Color.White,
+        surface = Color.Black,
         onSurface = Color.White,
+        surfaceVariant = Color(0xFF1C1C1C),
+        onSurfaceVariant = Color(0xFFDDDDDD),
+        surfaceContainerLowest = Color.Black,
+        surfaceContainerLow = Color(0xFF0D0D0D),
+        surfaceContainer = Color(0xFF141414),
+        surfaceContainerHigh = Color(0xFF1A1A1A),
+        surfaceContainerHighest = Color(0xFF212121),
+        inverseSurface = Color.White,
+        inverseOnSurface = Color.Black,
         primary = Color.White,
         onPrimary = Color.Black,
+        primaryContainer = Color(0xFF2B2B2B),
+        onPrimaryContainer = Color.White,
+        secondary = Color.White,
+        onSecondary = Color.Black,
+        secondaryContainer = Color(0xFF2B2B2B),
+        onSecondaryContainer = Color.White,
+        tertiary = Color.White,
+        onTertiary = Color.Black,
+        tertiaryContainer = Color(0xFF2B2B2B),
+        onTertiaryContainer = Color.White,
+        outline = Color(0xFF8C8C8C),
+        outlineVariant = Color(0xFF3A3A3A),
+        error = Color(0xFFFF6B6B),
+        onError = Color.Black,
+        errorContainer = Color(0xFF3A1212),
+        onErrorContainer = Color(0xFFFFB4AB),
+        scrim = Color.Black,
     )
     AppTheme.HACKER -> darkColorScheme(
         background = Color.Black,
-        surface = Color.Black,
         onBackground = MATRIX_GREEN,
+        surface = Color.Black,
         onSurface = MATRIX_GREEN,
+        surfaceVariant = Color(0xFF071A0C),
+        onSurfaceVariant = MATRIX_DIM,
+        surfaceContainerLowest = Color.Black,
+        surfaceContainerLow = Color(0xFF030D06),
+        surfaceContainer = Color(0xFF05140A),
+        surfaceContainerHigh = Color(0xFF071A0C),
+        surfaceContainerHighest = Color(0xFF0A2410),
+        inverseSurface = MATRIX_GREEN,
+        inverseOnSurface = Color.Black,
         primary = MATRIX_GREEN,
         onPrimary = Color.Black,
+        primaryContainer = Color(0xFF0A2410),
+        onPrimaryContainer = MATRIX_GREEN,
         secondary = MATRIX_GREEN,
         onSecondary = Color.Black,
+        secondaryContainer = Color(0xFF0A2410),
+        onSecondaryContainer = MATRIX_GREEN,
+        tertiary = MATRIX_GREEN,
+        onTertiary = Color.Black,
+        tertiaryContainer = Color(0xFF0A2410),
+        onTertiaryContainer = MATRIX_GREEN,
+        outline = MATRIX_DIM,
+        outlineVariant = Color(0xFF0F3A18),
+        error = Color(0xFFFF5252),
+        onError = Color.Black,
+        errorContainer = Color(0xFF2A0A0A),
+        onErrorContainer = Color(0xFFFF8A80),
+        scrim = Color.Black,
     )
 }
 
@@ -187,17 +271,91 @@ private enum class GalleryStage(val columns: Int, val thumbnailPx: Int, val lowQ
     SINGLE(columns = 1, thumbnailPx = 0, lowQuality = false),
 }
 
-private const val MAX_SINGLE_ZOOM = 24f
+/**
+ * RecordingCanvas throws "trying to draw too large bitmap" past 100 MB, and GPUs refuse textures
+ * wider than their limit, so a 30+ MP photo would crash the viewer on draw. 16 MP keeps a decoded
+ * ARGB_8888 frame near 64 MB, which every device can both allocate and draw.
+ */
+private const val MAX_DRAWABLE_PIXELS = 16_000_000L
+private const val MAX_TEXTURE_EDGE = 8192
 
-private enum class LayoutMode {
-    PHONE,
-    TABLET_BALANCED,
-    TABLET_WIDE,
+/** High enough to reach 1:1 pixels on a gigapixel source; tiles keep the memory cost flat. */
+private const val MAX_SINGLE_ZOOM = 64f
+
+private enum class LayoutMode(val label: String) {
+    PHONE("Phone"),
+    TABLET_BALANCED("Tablet balanced"),
+    TABLET_WIDE("Tablet wide"),
+}
+
+/**
+ * The layout modes used to differ only in a few dp of strip width, which was invisible in practice.
+ * Each mode now drives control size, list density and — on [LayoutMode.TABLET_WIDE] — how much
+ * extra width the focused pane takes from the other one.
+ */
+private data class LayoutMetrics(
+    val stripWidth: Dp,
+    val commandHeight: Dp,
+    val commandIcon: Dp,
+    val commandLabel: TextUnit,
+    val rowIcon: Dp,
+    val rowFontSize: TextUnit,
+    val rowPadding: Dp,
+    val paneHeaderSize: TextUnit,
+    val activePaneWeight: Float,
+)
+
+private fun metricsFor(mode: LayoutMode): LayoutMetrics = when (mode) {
+    LayoutMode.PHONE -> LayoutMetrics(
+        stripWidth = 56.dp,
+        commandHeight = 60.dp,
+        commandIcon = 20.dp,
+        commandLabel = 9.sp,
+        rowIcon = 14.dp,
+        rowFontSize = 12.sp,
+        rowPadding = 4.dp,
+        paneHeaderSize = 12.sp,
+        activePaneWeight = 1f,
+    )
+    LayoutMode.TABLET_BALANCED -> LayoutMetrics(
+        stripWidth = 92.dp,
+        commandHeight = 86.dp,
+        commandIcon = 30.dp,
+        commandLabel = 13.sp,
+        rowIcon = 22.dp,
+        rowFontSize = 16.sp,
+        rowPadding = 9.dp,
+        paneHeaderSize = 16.sp,
+        activePaneWeight = 1f,
+    )
+    LayoutMode.TABLET_WIDE -> LayoutMetrics(
+        stripWidth = 112.dp,
+        commandHeight = 100.dp,
+        commandIcon = 36.dp,
+        commandLabel = 15.sp,
+        rowIcon = 26.dp,
+        rowFontSize = 19.sp,
+        rowPadding = 13.dp,
+        paneHeaderSize = 19.sp,
+        activePaneWeight = 1.8f,
+    )
+}
+
+/** Best guess for a first run; the user can still pick any mode in settings. */
+private fun defaultLayoutMode(smallestWidthDp: Int): LayoutMode = when {
+    smallestWidthDp >= 720 -> LayoutMode.TABLET_WIDE
+    smallestWidthDp >= 600 -> LayoutMode.TABLET_BALANCED
+    else -> LayoutMode.PHONE
 }
 
 private data class FileDisplayOptions(
     val showHiddenFiles: Boolean = false,
     val showTrashFiles: Boolean = false,
+)
+
+private val FileDisplayOptionsSaver = listSaver<FileDisplayOptions, Boolean>(
+    save = { listOf(it.showHiddenFiles, it.showTrashFiles) },
+    restore = { FileDisplayOptions(showHiddenFiles = it[0], showTrashFiles = it[1]) },
 )
 
 private enum class SortOrder(val label: String) {
@@ -214,6 +372,17 @@ private data class SortOptions(
     val split: Boolean = true,
     val folderOrder: SortOrder = SortOrder.NAME_ASC,
     val fileOrder: SortOrder = SortOrder.MODIFIED_NEWEST,
+)
+
+private val SortOptionsSaver = listSaver<SortOptions, String>(
+    save = { listOf(it.split.toString(), it.folderOrder.name, it.fileOrder.name) },
+    restore = {
+        SortOptions(
+            split = it[0].toBoolean(),
+            folderOrder = SortOrder.valueOf(it[1]),
+            fileOrder = SortOrder.valueOf(it[2]),
+        )
+    },
 )
 
 private fun comparatorFor(order: SortOrder): Comparator<FileEntry> {
@@ -245,6 +414,22 @@ private const val PANE_PREFS = "hyper_browser_panes"
 private const val PANE_LEFT = "left"
 private const val PANE_RIGHT = "right"
 private const val THEME_PREF = "app_theme"
+private const val LAYOUT_PREF = "layout_mode"
+
+/** Keeps the browsed folder and the current selection across a rotation. */
+private val PaneStateSaver = listSaver<BrowserPaneState, String>(
+    save = { state ->
+        listOf(state.root?.toString().orEmpty(), state.current?.toString().orEmpty()) +
+            state.selected.map { it.toString() }
+    },
+    restore = { stored ->
+        BrowserPaneState(
+            root = stored[0].takeIf { it.isNotEmpty() }?.let(Uri::parse),
+            current = stored[1].takeIf { it.isNotEmpty() }?.let(Uri::parse),
+            selected = stored.drop(2).map(Uri::parse).toSet(),
+        )
+    },
+)
 
 private fun loadPaneState(prefs: SharedPreferences, key: String): BrowserPaneState {
     val root = prefs.getString("${key}_root", null)?.let(Uri::parse) ?: return BrowserPaneState()
@@ -328,34 +513,42 @@ private fun HyperBrowserApp() {
     val activity = LocalContext.current as? ComponentActivity ?: return
 
     val prefs = remember { activity.getSharedPreferences(PANE_PREFS, Context.MODE_PRIVATE) }
-    var leftPane by remember { mutableStateOf(loadPaneState(prefs, PANE_LEFT)) }
-    var rightPane by remember { mutableStateOf(loadPaneState(prefs, PANE_RIGHT)) }
-    var activePane by remember { mutableStateOf(Pane.LEFT) }
-    var transferDirection by remember { mutableStateOf(TransferDirection.LEFT_TO_RIGHT) }
-    var layoutMode by remember { mutableStateOf(LayoutMode.PHONE) }
+    val smallestWidthDp = LocalConfiguration.current.smallestScreenWidthDp
+    var leftPane by rememberSaveable(stateSaver = PaneStateSaver) { mutableStateOf(loadPaneState(prefs, PANE_LEFT)) }
+    var rightPane by rememberSaveable(stateSaver = PaneStateSaver) { mutableStateOf(loadPaneState(prefs, PANE_RIGHT)) }
+    var activePane by rememberSaveable { mutableStateOf(Pane.LEFT) }
+    var transferDirection by rememberSaveable { mutableStateOf(TransferDirection.LEFT_TO_RIGHT) }
+    var layoutMode by rememberSaveable {
+        val stored = prefs.getString(LAYOUT_PREF, null)
+        mutableStateOf(LayoutMode.entries.firstOrNull { it.name == stored } ?: defaultLayoutMode(smallestWidthDp))
+    }
     var pendingRequest by remember { mutableStateOf<TransferRequest?>(null) }
     var pendingFolderTransfer by remember { mutableStateOf<FolderTransferPrompt?>(null) }
     var pendingFilesTransfer by remember { mutableStateOf<FilesIntoFolderPrompt?>(null) }
     var reversePrompt by remember { mutableStateOf<TransferMode?>(null) }
     var pendingDelete by remember { mutableStateOf<Set<Uri>?>(null) }
     var propertiesUri by remember { mutableStateOf<Uri?>(null) }
-    var galleryUri by remember { mutableStateOf<Uri?>(null) }
-    var galleryDirectory by remember { mutableStateOf<Uri?>(null) }
-    var showLayoutSettings by remember { mutableStateOf(false) }
-    var fileDisplayOptions by remember { mutableStateOf(FileDisplayOptions()) }
-    var sortOptions by remember { mutableStateOf(SortOptions()) }
-    var gallerySort by remember { mutableStateOf(SortOrder.MODIFIED_NEWEST) }
-    var showSortSettings by remember { mutableStateOf(false) }
-    var selectionPreviewVisible by remember { mutableStateOf(true) }
+    // Saved, so rotating while an image is open comes back to the gallery instead of the file tree.
+    var galleryUri by rememberSaveable { mutableStateOf<Uri?>(null) }
+    var galleryDirectory by rememberSaveable { mutableStateOf<Uri?>(null) }
+    var showLayoutSettings by rememberSaveable { mutableStateOf(false) }
+    var fileDisplayOptions by rememberSaveable(stateSaver = FileDisplayOptionsSaver) { mutableStateOf(FileDisplayOptions()) }
+    var sortOptions by rememberSaveable(stateSaver = SortOptionsSaver) { mutableStateOf(SortOptions()) }
+    var gallerySort by rememberSaveable { mutableStateOf(SortOrder.MODIFIED_NEWEST) }
+    var showSortSettings by rememberSaveable { mutableStateOf(false) }
+    var selectionPreviewVisible by rememberSaveable { mutableStateOf(true) }
     var selectionPreviewOffset by remember { mutableStateOf(Offset.Zero) }
+    var renameTarget by rememberSaveable { mutableStateOf<Uri?>(null) }
+    var renameValue by rememberSaveable { mutableStateOf("") }
 
-    var showLeftPicker by remember { mutableStateOf(false) }
-    var showRightPicker by remember { mutableStateOf(false) }
-    var multiSelect by remember { mutableStateOf(false) }
-    var appTheme by remember {
+    var showLeftPicker by rememberSaveable { mutableStateOf(false) }
+    var showRightPicker by rememberSaveable { mutableStateOf(false) }
+    var multiSelect by rememberSaveable { mutableStateOf(false) }
+    var appTheme by rememberSaveable {
         val stored = prefs.getString(THEME_PREF, null)
         mutableStateOf(AppTheme.entries.firstOrNull { it.name == stored } ?: AppTheme.LIGHT)
     }
+    val metrics = metricsFor(layoutMode)
 
     val sourcePane = if (transferDirection == TransferDirection.LEFT_TO_RIGHT) Pane.LEFT else Pane.RIGHT
     val destinationPane = if (sourcePane == Pane.LEFT) Pane.RIGHT else Pane.LEFT
@@ -384,6 +577,49 @@ private fun HyperBrowserApp() {
     fun refreshPanesAfterWrite() {
         leftPane = leftPane.copy(refreshKey = leftPane.refreshKey + 1, selected = if (sourcePane == Pane.LEFT) emptySet() else leftPane.selected)
         rightPane = rightPane.copy(refreshKey = rightPane.refreshKey + 1, selected = if (sourcePane == Pane.RIGHT) emptySet() else rightPane.selected)
+    }
+
+    fun commitRename() {
+        val target = renameTarget ?: return
+        val newName = renameValue.trim()
+        renameTarget = null
+        renameValue = ""
+        if (newName.isEmpty()) return
+        scope.launch {
+            val previous = withContext(Dispatchers.IO) { Storage.entry(activity, target)?.name }
+            if (previous == newName) return@launch
+            val renamed = withContext(Dispatchers.IO) { Storage.rename(activity, target, newName) }
+            if (renamed == null) {
+                Toast.makeText(activity, "Could not rename to \"$newName\"", Toast.LENGTH_LONG).show()
+                return@launch
+            }
+            fun follow(state: BrowserPaneState) = state.copy(
+                refreshKey = state.refreshKey + 1,
+                selected = if (target in state.selected) state.selected - target + renamed else state.selected,
+            )
+            leftPane = follow(leftPane)
+            rightPane = follow(rightPane)
+        }
+    }
+
+    fun startRename() {
+        if (renameTarget != null) {
+            commitRename()
+            return
+        }
+        val active = if (activePane == Pane.LEFT) leftPane else rightPane
+        val other = if (activePane == Pane.LEFT) rightPane else leftPane
+        val target = active.selected.singleOrNull() ?: other.selected.singleOrNull()
+        if (target == null) {
+            Toast.makeText(activity, "Select a single item to rename", Toast.LENGTH_SHORT).show()
+            return
+        }
+        scope.launch {
+            renameValue = withContext(Dispatchers.IO) { Storage.entry(activity, target)?.name }
+                ?: target.lastPathSegment
+                ?: return@launch
+            renameTarget = target
+        }
     }
 
     fun runTransfer(request: TransferRequest) {
@@ -514,7 +750,7 @@ private fun HyperBrowserApp() {
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             CommandStrip(
-                                layoutMode = layoutMode,
+                                metrics = metrics,
                                 onCopy = { startOperation(TransferMode.COPY, sourceState, destinationState) },
                                 onMove = { startOperation(TransferMode.MOVE, sourceState, destinationState) },
                                 onDelete = {
@@ -523,6 +759,8 @@ private fun HyperBrowserApp() {
                                         pendingDelete = items
                                     }
                                 },
+                                onRename = { startRename() },
+                                renameActive = renameTarget != null,
                                 onGallery = {
                                     val image = selectedFile?.takeIf { isImageSelected }
                                     if (image != null) {
@@ -551,13 +789,17 @@ private fun HyperBrowserApp() {
                             DirectoryPane(
                                 state = leftPane,
                                 isActive = activePane == Pane.LEFT,
-                                modifier = Modifier.weight(if (layoutMode == LayoutMode.TABLET_WIDE) 1.6f else if (layoutMode == LayoutMode.TABLET_BALANCED) 1.2f else 1f),
+                                modifier = Modifier.weight(if (activePane == Pane.LEFT) metrics.activePaneWeight else 1f),
                                 onActivate = { activePane = Pane.LEFT },
-                                onNavigate = { directory -> leftPane = leftPane.copy(current = directory, selected = emptySet()) },
+                                onNavigate = { directory ->
+                                    commitRename()
+                                    leftPane = leftPane.copy(current = directory, selected = emptySet())
+                                },
                                 onOpenFile = { uri -> openFileTarget(uri, leftPane.current ?: leftPane.root) },
                                 onOpenWith = { uri -> openWith(uri) },
                                 onShowProperties = { uri -> propertiesUri = uri },
                                 onMoveUp = {
+                                    commitRename()
                                     scope.launch {
                                         val parent = withContext(Dispatchers.IO) {
                                             leftPane.current?.let { Storage.parent(activity, it) }
@@ -567,24 +809,37 @@ private fun HyperBrowserApp() {
                                         }
                                     }
                                 },
-                                onSelectionChange = { selectedSet -> leftPane = leftPane.copy(selected = selectedSet) },
+                                onSelectionChange = { selectedSet ->
+                                    // Moving to another file is the second way to commit a rename.
+                                    if (renameTarget != null && renameTarget !in selectedSet) commitRename()
+                                    leftPane = leftPane.copy(selected = selectedSet)
+                                },
                                 multiSelect = multiSelect,
                                 selectionOutline = selectionOutlineColor(appTheme),
                                 showHiddenFiles = fileDisplayOptions.showHiddenFiles,
                                 showTrashFiles = fileDisplayOptions.showTrashFiles,
                                 sortOptions = sortOptions,
+                                metrics = metrics,
+                                renameTarget = renameTarget,
+                                renameValue = renameValue,
+                                onRenameValueChange = { renameValue = it },
+                                onCommitRename = { commitRename() },
                             )
 
                             DirectoryPane(
                                 state = rightPane,
                                 isActive = activePane == Pane.RIGHT,
-                                modifier = Modifier.weight(if (layoutMode == LayoutMode.TABLET_WIDE) 1.6f else if (layoutMode == LayoutMode.TABLET_BALANCED) 1.2f else 1f),
+                                modifier = Modifier.weight(if (activePane == Pane.RIGHT) metrics.activePaneWeight else 1f),
                                 onActivate = { activePane = Pane.RIGHT },
-                                onNavigate = { directory -> rightPane = rightPane.copy(current = directory, selected = emptySet()) },
+                                onNavigate = { directory ->
+                                    commitRename()
+                                    rightPane = rightPane.copy(current = directory, selected = emptySet())
+                                },
                                 onOpenFile = { uri -> openFileTarget(uri, rightPane.current ?: rightPane.root) },
                                 onOpenWith = { uri -> openWith(uri) },
                                 onShowProperties = { uri -> propertiesUri = uri },
                                 onMoveUp = {
+                                    commitRename()
                                     scope.launch {
                                         val parent = withContext(Dispatchers.IO) {
                                             rightPane.current?.let { Storage.parent(activity, it) }
@@ -594,12 +849,20 @@ private fun HyperBrowserApp() {
                                         }
                                     }
                                 },
-                                onSelectionChange = { selectedSet -> rightPane = rightPane.copy(selected = selectedSet) },
+                                onSelectionChange = { selectedSet ->
+                                    if (renameTarget != null && renameTarget !in selectedSet) commitRename()
+                                    rightPane = rightPane.copy(selected = selectedSet)
+                                },
                                 multiSelect = multiSelect,
                                 selectionOutline = selectionOutlineColor(appTheme),
                                 showHiddenFiles = fileDisplayOptions.showHiddenFiles,
                                 showTrashFiles = fileDisplayOptions.showTrashFiles,
                                 sortOptions = sortOptions,
+                                metrics = metrics,
+                                renameTarget = renameTarget,
+                                renameValue = renameValue,
+                                onRenameValueChange = { renameValue = it },
+                                onCommitRename = { commitRename() },
                             )
                         }
 
@@ -628,131 +891,133 @@ private fun HyperBrowserApp() {
             }
             }
         }
-    }
 
-    if (pendingRequest != null) {
-        ConfirmTransferDialog(
-            request = pendingRequest!!,
-            onDismiss = { pendingRequest = null },
-            onConfirm = { request ->
-                pendingRequest = null
-                runTransfer(request)
-            },
-        )
-    }
+        // Dialogs live inside the theme; outside it they fell back to Material's default palette.
+        if (pendingRequest != null) {
+            ConfirmTransferDialog(
+                request = pendingRequest!!,
+                onDismiss = { pendingRequest = null },
+                onConfirm = { request ->
+                    pendingRequest = null
+                    runTransfer(request)
+                },
+            )
+        }
 
-    if (reversePrompt != null) {
-        ReverseFlowDialog(
-            onDismiss = { reversePrompt = null },
-            onReverse = {
-                val mode = reversePrompt!!
-                reversePrompt = null
-                transferDirection = if (transferDirection == TransferDirection.LEFT_TO_RIGHT) TransferDirection.RIGHT_TO_LEFT else TransferDirection.LEFT_TO_RIGHT
-                startOperation(mode, destinationState, sourceState)
-            },
-        )
-    }
+        if (reversePrompt != null) {
+            ReverseFlowDialog(
+                onDismiss = { reversePrompt = null },
+                onReverse = {
+                    val mode = reversePrompt!!
+                    reversePrompt = null
+                    transferDirection = if (transferDirection == TransferDirection.LEFT_TO_RIGHT) TransferDirection.RIGHT_TO_LEFT else TransferDirection.LEFT_TO_RIGHT
+                    startOperation(mode, destinationState, sourceState)
+                },
+            )
+        }
 
-    if (pendingFolderTransfer != null) {
-        ConfirmFolderTransferDialog(
-            prompt = pendingFolderTransfer!!,
-            onDismiss = { pendingFolderTransfer = null },
-            onConfirm = { request ->
-                pendingFolderTransfer = null
-                runTransfer(request)
-            },
-        )
-    }
+        if (pendingFolderTransfer != null) {
+            ConfirmFolderTransferDialog(
+                prompt = pendingFolderTransfer!!,
+                onDismiss = { pendingFolderTransfer = null },
+                onConfirm = { request ->
+                    pendingFolderTransfer = null
+                    runTransfer(request)
+                },
+            )
+        }
 
-    if (pendingFilesTransfer != null) {
-        ConfirmFilesIntoFolderDialog(
-            prompt = pendingFilesTransfer!!,
-            onDismiss = { pendingFilesTransfer = null },
-            onConfirm = { request ->
-                pendingFilesTransfer = null
-                runTransfer(request)
-            },
-        )
-    }
+        if (pendingFilesTransfer != null) {
+            ConfirmFilesIntoFolderDialog(
+                prompt = pendingFilesTransfer!!,
+                onDismiss = { pendingFilesTransfer = null },
+                onConfirm = { request ->
+                    pendingFilesTransfer = null
+                    runTransfer(request)
+                },
+            )
+        }
 
-    if (pendingDelete != null) {
-        ConfirmDeleteDialog(
-            count = pendingDelete!!.size,
-            onDismiss = { pendingDelete = null },
-            onConfirm = {
-                val items = pendingDelete!!
-                pendingDelete = null
-                scope.launch {
-                    val failures = withContext(Dispatchers.IO) { deleteItems(activity, items) }
-                    refreshPanesAfterWrite()
-                    if (failures > 0) {
-                        Toast.makeText(activity, failureMessage(failures, "deleted"), Toast.LENGTH_LONG).show()
+        if (pendingDelete != null) {
+            ConfirmDeleteDialog(
+                count = pendingDelete!!.size,
+                onDismiss = { pendingDelete = null },
+                onConfirm = {
+                    val items = pendingDelete!!
+                    pendingDelete = null
+                    scope.launch {
+                        val failures = withContext(Dispatchers.IO) { deleteItems(activity, items) }
+                        refreshPanesAfterWrite()
+                        if (failures > 0) {
+                            Toast.makeText(activity, failureMessage(failures, "deleted"), Toast.LENGTH_LONG).show()
+                        }
                     }
-                }
-            },
-        )
-    }
+                },
+            )
+        }
 
-    if (propertiesUri != null) {
-        FolderPropertiesDialog(
-            activity = activity,
-            uri = propertiesUri!!,
-            onDismiss = { propertiesUri = null },
-        )
-    }
+        if (propertiesUri != null) {
+            FolderPropertiesDialog(
+                activity = activity,
+                uri = propertiesUri!!,
+                onDismiss = { propertiesUri = null },
+            )
+        }
 
-    if (showLayoutSettings) {
-        LayoutSettingsDialog(
-            selectedMode = layoutMode,
-            showHiddenFiles = fileDisplayOptions.showHiddenFiles,
-            showTrashFiles = fileDisplayOptions.showTrashFiles,
-            currentTheme = appTheme,
-            onSelect = { mode ->
-                layoutMode = mode
-                showLayoutSettings = false
-            },
-            onThemeSelect = { theme ->
-                appTheme = theme
-                prefs.edit().putString(THEME_PREF, theme.name).apply()
-            },
-            onToggleHiddenFiles = { fileDisplayOptions = fileDisplayOptions.copy(showHiddenFiles = it) },
-            onToggleTrashFiles = { fileDisplayOptions = fileDisplayOptions.copy(showTrashFiles = it) },
-            onOpenSort = {
-                showLayoutSettings = false
-                showSortSettings = true
-            },
-            onDismiss = { showLayoutSettings = false },
-        )
-    }
+        if (showLayoutSettings) {
+            LayoutSettingsDialog(
+                selectedMode = layoutMode,
+                showHiddenFiles = fileDisplayOptions.showHiddenFiles,
+                showTrashFiles = fileDisplayOptions.showTrashFiles,
+                currentTheme = appTheme,
+                onSelect = { mode ->
+                    layoutMode = mode
+                    prefs.edit().putString(LAYOUT_PREF, mode.name).apply()
+                    showLayoutSettings = false
+                },
+                onThemeSelect = { theme ->
+                    appTheme = theme
+                    prefs.edit().putString(THEME_PREF, theme.name).apply()
+                },
+                onToggleHiddenFiles = { fileDisplayOptions = fileDisplayOptions.copy(showHiddenFiles = it) },
+                onToggleTrashFiles = { fileDisplayOptions = fileDisplayOptions.copy(showTrashFiles = it) },
+                onOpenSort = {
+                    showLayoutSettings = false
+                    showSortSettings = true
+                },
+                onDismiss = { showLayoutSettings = false },
+            )
+        }
 
-    if (showSortSettings) {
-        SortSettingsDialog(
-            options = sortOptions,
-            gallerySort = gallerySort,
-            onOptionsChange = { sortOptions = it },
-            onGallerySortChange = { gallerySort = it },
-            onDismiss = { showSortSettings = false },
-        )
-    }
+        if (showSortSettings) {
+            SortSettingsDialog(
+                options = sortOptions,
+                gallerySort = gallerySort,
+                onOptionsChange = { sortOptions = it },
+                onGallerySortChange = { gallerySort = it },
+                onDismiss = { showSortSettings = false },
+            )
+        }
 
-    if (showLeftPicker) {
-        FolderPickerDialog(
-            onFolderSelected = { uri ->
-                leftPane = BrowserPaneState(root = uri, current = uri, selected = emptySet())
-                showLeftPicker = false
-            },
-            onDismiss = { showLeftPicker = false }
-        )
-    }
+        if (showLeftPicker) {
+            FolderPickerDialog(
+                onFolderSelected = { uri ->
+                    leftPane = BrowserPaneState(root = uri, current = uri, selected = emptySet())
+                    showLeftPicker = false
+                },
+                onDismiss = { showLeftPicker = false }
+            )
+        }
 
-    if (showRightPicker) {
-        FolderPickerDialog(
-            onFolderSelected = { uri ->
-                rightPane = BrowserPaneState(root = uri, current = uri, selected = emptySet())
-                showRightPicker = false
-            },
-            onDismiss = { showRightPicker = false }
-        )
+        if (showRightPicker) {
+            FolderPickerDialog(
+                onFolderSelected = { uri ->
+                    rightPane = BrowserPaneState(root = uri, current = uri, selected = emptySet())
+                    showRightPicker = false
+                },
+                onDismiss = { showRightPicker = false }
+            )
+        }
     }
 }
 
@@ -1150,12 +1415,39 @@ private fun PreviewDetailPane(
     }
 }
 
+/** One dialog skin for the whole app so every prompt follows the active theme. */
+@Composable
+private fun HyperDialog(
+    onDismissRequest: () -> Unit,
+    title: @Composable () -> Unit,
+    confirmButton: @Composable () -> Unit,
+    dismissButton: (@Composable () -> Unit)? = null,
+    text: @Composable (() -> Unit)? = null,
+) {
+    AlertDialog(
+        onDismissRequest = onDismissRequest,
+        title = title,
+        text = text,
+        confirmButton = confirmButton,
+        dismissButton = dismissButton,
+        shape = AlertDialogDefaults.shape,
+        containerColor = MaterialTheme.colorScheme.surface,
+        titleContentColor = MaterialTheme.colorScheme.onSurface,
+        textContentColor = MaterialTheme.colorScheme.onSurface,
+        iconContentColor = MaterialTheme.colorScheme.primary,
+        // The black themes put a black dialog on a black scrim, so it needs an edge.
+        modifier = Modifier.border(1.dp, MaterialTheme.colorScheme.outline, AlertDialogDefaults.shape),
+    )
+}
+
 @Composable
 private fun CommandStrip(
-    layoutMode: LayoutMode,
+    metrics: LayoutMetrics,
     onCopy: () -> Unit,
     onMove: () -> Unit,
     onDelete: () -> Unit,
+    onRename: () -> Unit,
+    renameActive: Boolean,
     onGallery: () -> Unit,
     multiSelect: Boolean,
     onToggleMulti: () -> Unit,
@@ -1163,35 +1455,37 @@ private fun CommandStrip(
     onDeselect: () -> Unit,
     onOpenSettings: () -> Unit,
 ) {
-    val stripWidth = when (layoutMode) {
-        LayoutMode.PHONE -> 64.dp
-        LayoutMode.TABLET_BALANCED -> 72.dp
-        LayoutMode.TABLET_WIDE -> 80.dp
-    }
-
     Column(
         modifier = Modifier
             .fillMaxHeight()
-            .width(stripWidth)
+            .width(metrics.stripWidth)
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 8.dp, vertical = 10.dp),
+            .padding(horizontal = 6.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        CommandButton(label = "Copy", icon = Icons.Filled.ContentCopy, onClick = onCopy)
-        CommandButton(label = "Move", icon = Icons.AutoMirrored.Filled.DriveFileMove, onClick = onMove)
-        CommandButton(label = "Delete", icon = Icons.Filled.Delete, onClick = onDelete)
-        CommandButton(label = "Gallery", icon = Icons.Filled.Image, onClick = onGallery)
-        CommandButton(label = "Multi", icon = Icons.Filled.SelectAll, onClick = onToggleMulti, active = multiSelect)
+        CommandButton(metrics, "Copy", Icons.Filled.ContentCopy, onCopy)
+        CommandButton(metrics, "Move", Icons.AutoMirrored.Filled.DriveFileMove, onMove)
+        CommandButton(metrics, "Delete", Icons.Filled.Delete, onDelete)
+        CommandButton(
+            metrics = metrics,
+            label = if (renameActive) "Save" else "Rename",
+            icon = Icons.Filled.DriveFileRenameOutline,
+            onClick = onRename,
+            active = renameActive,
+        )
+        CommandButton(metrics, "Gallery", Icons.Filled.Image, onGallery)
+        CommandButton(metrics, "Multi", Icons.Filled.SelectAll, onToggleMulti, active = multiSelect)
         if (selectionActive) {
-            CommandButton(label = "Deselect", icon = Icons.Filled.Deselect, onClick = onDeselect)
+            CommandButton(metrics, "Deselect", Icons.Filled.Deselect, onDeselect)
         }
-        CommandButton(label = "Settings", icon = Icons.Filled.Settings, onClick = onOpenSettings, showLabel = false)
+        CommandButton(metrics, "Settings", Icons.Filled.Settings, onOpenSettings, showLabel = false)
     }
 }
 
 @Composable
 private fun CommandButton(
+    metrics: LayoutMetrics,
     label: String,
     icon: ImageVector,
     onClick: () -> Unit,
@@ -1203,7 +1497,7 @@ private fun CommandButton(
         modifier = Modifier
             .clickable(enabled = enabled, onClick = onClick)
             .fillMaxWidth()
-            .height(76.dp)
+            .height(metrics.commandHeight)
             .padding(4.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
@@ -1213,11 +1507,12 @@ private fun CommandButton(
             active -> MaterialTheme.colorScheme.primary
             else -> MaterialTheme.colorScheme.onSurface
         }
-        Icon(icon, contentDescription = label, modifier = Modifier.size(24.dp), tint = contentColor)
+        Icon(icon, contentDescription = label, modifier = Modifier.size(metrics.commandIcon), tint = contentColor)
         if (showLabel) {
             Text(
                 label,
-                style = MaterialTheme.typography.labelSmall,
+                fontSize = metrics.commandLabel,
+                lineHeight = metrics.commandLabel,
                 color = contentColor,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -1288,7 +1583,7 @@ private fun LayoutSettingsDialog(
     onOpenSort: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    AlertDialog(
+    HyperDialog(
         onDismissRequest = onDismiss,
         title = { Text("Layout settings") },
         text = {
@@ -1297,16 +1592,11 @@ private fun LayoutSettingsDialog(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
             ) {
                 LayoutMode.entries.forEach { mode ->
-                    val label = when (mode) {
-                        LayoutMode.PHONE -> "Phone layout"
-                        LayoutMode.TABLET_BALANCED -> "Tablet balanced"
-                        LayoutMode.TABLET_WIDE -> "Tablet wide"
-                    }
                     Button(
                         onClick = { onSelect(mode) },
                         modifier = Modifier.fillMaxWidth(),
                     ) {
-                        Text(if (mode == selectedMode) "$label (selected)" else label)
+                        Text(if (mode == selectedMode) "${mode.label} (selected)" else mode.label)
                     }
                 }
 
@@ -1364,7 +1654,7 @@ private fun SortSettingsDialog(
     onGallerySortChange: (SortOrder) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    AlertDialog(
+    HyperDialog(
         onDismissRequest = onDismiss,
         title = { Text("Sort options") },
         text = {
@@ -1433,7 +1723,7 @@ private fun ConfirmDeleteDialog(
     onDismiss: () -> Unit,
     onConfirm: () -> Unit,
 ) {
-    AlertDialog(
+    HyperDialog(
         onDismissRequest = onDismiss,
         title = { Text("Delete") },
         text = { Text(if (count == 1) "Delete this item permanently?" else "Delete $count items permanently?") },
@@ -1524,7 +1814,7 @@ private fun FolderPickerDialog(
         }
     }
 
-    AlertDialog(
+    HyperDialog(
         onDismissRequest = onDismiss,
         title = { Text("Select Default Folder") },
         text = {
@@ -1677,7 +1967,7 @@ private fun ConfirmTransferDialog(
     val sourceLabel = resolveDisplayPath(context, request.sourceDir)
     val targetLabel = resolveDisplayPath(context, request.targetDir)
 
-    AlertDialog(
+    HyperDialog(
         onDismissRequest = onDismiss,
         title = { Text("Confirm transfer") },
         text = {
@@ -1716,7 +2006,7 @@ private fun ReverseFlowDialog(
     onDismiss: () -> Unit,
     onReverse: () -> Unit,
 ) {
-    AlertDialog(
+    HyperDialog(
         onDismissRequest = onDismiss,
         title = { Text("Illogical operation: Reverse flow?") },
         text = {
@@ -1740,7 +2030,7 @@ private fun ConfirmFolderTransferDialog(
     var deleteSource by remember(prompt) { mutableStateOf(false) }
     val verb = if (prompt.request.mode == TransferMode.MOVE) "Move" else "Copy"
 
-    AlertDialog(
+    HyperDialog(
         onDismissRequest = onDismiss,
         title = { Text("Confirm folder transfer") },
         text = {
@@ -1783,7 +2073,7 @@ private fun ConfirmFilesIntoFolderDialog(
     val verb = if (prompt.request.mode == TransferMode.MOVE) "Move" else "Copy"
     val items = if (prompt.itemCount == 1) "1 item" else "${prompt.itemCount} items"
 
-    AlertDialog(
+    HyperDialog(
         onDismissRequest = onDismiss,
         title = { Text("Illogical operation") },
         text = {
@@ -1850,7 +2140,7 @@ private fun FolderPropertiesDialog(
     }
     val measured = stats
 
-    AlertDialog(
+    HyperDialog(
         onDismissRequest = onDismiss,
         title = { Text(entry?.name ?: uri.lastPathSegment ?: "Folder") },
         text = {
@@ -1930,7 +2220,7 @@ private fun ImageInfoDialog(
     }
     val rows = exifRows
 
-    AlertDialog(
+    HyperDialog(
         onDismissRequest = onDismiss,
         title = { Text(entry?.name ?: uri.lastPathSegment ?: "Image") },
         text = {
@@ -1964,15 +2254,15 @@ private fun ImageViewerScreen(
     sortOrder: SortOrder,
     onClose: () -> Unit,
 ) {
-    var currentUri by remember(startingUri) { mutableStateOf(startingUri) }
-    var stage by remember { mutableStateOf(GalleryStage.SINGLE) }
-    var scale by remember { mutableFloatStateOf(1f) }
+    var currentUri by rememberSaveable(startingUri) { mutableStateOf(startingUri) }
+    var stage by rememberSaveable { mutableStateOf(GalleryStage.SINGLE) }
+    var scale by rememberSaveable { mutableFloatStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
     var showMenu by remember { mutableStateOf(false) }
-    var showExif by remember { mutableStateOf(false) }
-    var imageActionUri by remember { mutableStateOf<Uri?>(null) }
+    var showExif by rememberSaveable { mutableStateOf(false) }
+    var imageActionUri by rememberSaveable { mutableStateOf<Uri?>(null) }
     var listingRefresh by remember { mutableIntStateOf(0) }
-    var selectionMode by remember { mutableStateOf(false) }
+    var selectionMode by rememberSaveable { mutableStateOf(false) }
     var selectedImages by remember { mutableStateOf(emptySet<Uri>()) }
     var pendingGalleryDelete by remember { mutableStateOf<Set<Uri>?>(null) }
     val scope = rememberCoroutineScope()
@@ -1989,12 +2279,56 @@ private fun ImageViewerScreen(
     }
 
     val currentDoc = images.firstOrNull { it.uri == currentUri }
-    // The single view intentionally decodes the file at native resolution, with no downsampling.
-    val currentBitmap by produceState<ImageBitmap?>(initialValue = null, currentUri, stage) {
-        value = if (stage == GalleryStage.SINGLE) {
-            withContext(Dispatchers.IO) { loadBitmap(activity, currentUri) }
+    // The previous image stays on screen until the next one is ready, so a swipe never flashes an
+    // empty frame.
+    var single by remember { mutableStateOf<SingleImage?>(null) }
+    var detail by remember { mutableStateOf<DetailTile?>(null) }
+    var viewport by remember { mutableStateOf(IntSize.Zero) }
+    LaunchedEffect(currentUri, stage) {
+        detail = null
+        single = if (stage == GalleryStage.SINGLE) {
+            withContext(Dispatchers.IO) { loadSingleImage(activity, currentUri) }
         } else {
+            // A native-resolution bitmap is far too big to hold onto while the grid is showing.
             null
+        }
+    }
+
+    // Images too large to decode whole are shown downscaled, then refined a tile at a time as the
+    // viewport settles. This is what keeps gigapixel files inside a fixed memory budget.
+    LaunchedEffect(single, viewport) {
+        val image = single
+        if (image == null || !image.canTile || viewport == IntSize.Zero) {
+            detail = null
+            return@LaunchedEffect
+        }
+        snapshotFlow { scale to offset }.collectLatest { (currentScale, currentOffset) ->
+            if (currentScale <= 1.02f) {
+                detail = null
+                return@collectLatest
+            }
+            delay(200)
+            val region = visibleSourceRect(image, viewport, currentScale, currentOffset)
+                ?: return@collectLatest
+            val sample = tileSampleSize(region, viewport)
+            if (sample >= image.sample) {
+                detail = null
+                return@collectLatest
+            }
+            val tile = withContext(Dispatchers.IO) {
+                decodeRegion(activity, currentUri, image, region, sample, viewport)
+            }
+            detail = tile?.let {
+                DetailTile(
+                    bitmap = it,
+                    source = Rect(
+                        region.left.toFloat(),
+                        region.top.toFloat(),
+                        region.right.toFloat(),
+                        region.bottom.toFloat(),
+                    ),
+                )
+            }
         }
     }
 
@@ -2125,16 +2459,17 @@ private fun ImageViewerScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
-                .padding(horizontal = 8.dp),
+                // An opened image sits on black in every theme; the controls stay themed.
+                .background(if (stage == GalleryStage.SINGLE) Color.Black else MaterialTheme.colorScheme.background)
+                .then(if (stage == GalleryStage.SINGLE) Modifier else Modifier.padding(horizontal = 8.dp)),
             contentAlignment = Alignment.Center,
         ) {
-            val singleBitmap = currentBitmap
-            if (stage == GalleryStage.SINGLE && singleBitmap != null) {
-                Image(
-                    bitmap = singleBitmap,
-                    contentDescription = "Zoomable image",
+            val singleImage = single
+            if (stage == GalleryStage.SINGLE && singleImage != null) {
+                Canvas(
                     modifier = Modifier
                         .fillMaxSize()
+                        .onSizeChanged { viewport = it }
                         .pointerInput(images, currentUri) {
                             detectImageGestures(
                                 currentScale = { scale },
@@ -2152,20 +2487,43 @@ private fun ImageViewerScreen(
                                 onSwipe = { step -> showRelative(step) },
                             )
                         }
-                        .graphicsLayer(
-                            scaleX = scale,
-                            scaleY = scale,
-                            translationX = offset.x,
-                            translationY = offset.y,
-                        )
                         .combinedClickable(
+                            // No ripple: it read as a glow trailing the swipe.
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
                             onClick = { showMenu = !showMenu },
                             onLongClick = { imageActionUri = currentUri },
                         ),
-                )
+                ) {
+                    val fit = min(size.width / singleImage.width, size.height / singleImage.height)
+                    val centreX = size.width / 2f
+                    val centreY = size.height / 2f
+                    val baseX = (size.width - singleImage.width * fit) / 2f
+                    val baseY = (size.height - singleImage.height * fit) / 2f
+
+                    // Pan and zoom are folded into each destination rect so the overview and the
+                    // sharper tile stay locked together without a shared graphics layer.
+                    fun draw(bitmap: ImageBitmap, source: Rect) {
+                        val left = (baseX + source.left * fit - centreX) * scale + centreX + offset.x
+                        val top = (baseY + source.top * fit - centreY) * scale + centreY + offset.y
+                        val width = source.width * fit * scale
+                        val height = source.height * fit * scale
+                        if (width < 1f || height < 1f) return
+                        drawImage(
+                            image = bitmap,
+                            dstOffset = IntOffset(left.roundToInt(), top.roundToInt()),
+                            dstSize = IntSize(width.roundToInt(), height.roundToInt()),
+                        )
+                    }
+
+                    draw(singleImage.overview, Rect(0f, 0f, singleImage.width.toFloat(), singleImage.height.toFloat()))
+                    detail?.let { draw(it.bitmap, it.source) }
+                }
             }
 
             if (stage != GalleryStage.SINGLE) {
+                // Null overscroll config removes the stretch/glow the grid draws at its edges.
+                CompositionLocalProvider(LocalOverscrollConfiguration provides null) {
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(stage.columns),
                     modifier = Modifier
@@ -2192,6 +2550,8 @@ private fun ImageViewerScreen(
                         Column(
                             horizontalAlignment = Alignment.CenterHorizontally,
                             modifier = Modifier.combinedClickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null,
                                 onClick = {
                                     if (selectionMode) {
                                         selectedImages = if (picked) selectedImages - file.uri else selectedImages + file.uri
@@ -2241,6 +2601,7 @@ private fun ImageViewerScreen(
                         }
                     }
                 }
+                }
 
                 // Thumbnail modes keep the zoom controls out of the toolbar, tucked into the corner.
                 Row(
@@ -2280,7 +2641,7 @@ private fun ImageViewerScreen(
             }
 
             if (imageActionUri != null) {
-                AlertDialog(
+                HyperDialog(
                     onDismissRequest = { imageActionUri = null },
                     title = { Text("Image actions") },
                     text = {
@@ -2370,6 +2731,170 @@ private suspend fun PointerInputScope.detectImageGestures(
     }
 }
 
+/** Repeatable access to an image's bytes, whatever backend it lives on. */
+private class ImageSource(
+    val open: () -> InputStream?,
+    val bytes: ByteArray?,
+    /** True when the URI can be handed to a region decoder as a plain file descriptor. */
+    val seekable: Boolean,
+)
+
+private fun imageSource(activity: ComponentActivity, uri: Uri): ImageSource? {
+    if (DriveUris.isDrive(uri)) {
+        val bytes = runCatching { Storage.openInput(activity, uri)?.use { it.readBytes() } }.getOrNull() ?: return null
+        return ImageSource(open = { ByteArrayInputStream(bytes) }, bytes = bytes, seekable = false)
+    }
+    val resolver = activity.contentResolver
+    val exportType = if (isVirtualDocument(resolver, uri)) exportMimeType(resolver, uri) else null
+    return ImageSource(
+        open = { openDocumentStream(resolver, uri, exportType) },
+        bytes = null,
+        seekable = exportType == null,
+    )
+}
+
+/**
+ * A full-frame overview plus what is needed to fetch sharper tiles. [sample] is how much the
+ * overview was downscaled, so a tile is only worth decoding below that factor.
+ */
+private data class SingleImage(
+    val overview: ImageBitmap,
+    val width: Int,
+    val height: Int,
+    val sample: Int,
+    val canTile: Boolean,
+    /** Set for TIFF, which no platform region decoder can read. */
+    val tiff: RawImage.TiffImage? = null,
+)
+
+/** A sharper crop of the source, drawn over the overview at [source] (in source pixels). */
+private data class DetailTile(val bitmap: ImageBitmap, val source: Rect)
+
+/** Memory-maps the file so gigapixel TIFFs are decoded without ever landing on the heap. */
+private fun mappedByteSource(activity: ComponentActivity, uri: Uri): ByteSource? = runCatching {
+    activity.contentResolver.openFileDescriptor(uri, "r")?.use { descriptor ->
+        RawImage.mappedSource(descriptor.fileDescriptor)
+    }
+}.getOrNull()
+
+private fun loadSingleImage(activity: ComponentActivity, uri: Uri): SingleImage? {
+    val source = imageSource(activity, uri) ?: return null
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    source.open()?.use { BitmapFactory.decodeStream(it, null, bounds) }
+    if (bounds.outWidth > 0 && bounds.outHeight > 0) {
+        val sample = drawableSampleSize(bounds.outWidth, bounds.outHeight, 1)
+        val options = BitmapFactory.Options().apply { inSampleSize = sample }
+        val bitmap = source.open()?.use { BitmapFactory.decodeStream(it, null, options) }
+        if (bitmap != null) {
+            return SingleImage(
+                overview = bitmap.asImageBitmap(),
+                width = bounds.outWidth,
+                height = bounds.outHeight,
+                sample = sample,
+                // Tiling only pays off once the overview itself had to be downscaled.
+                canTile = sample > 1 && source.seekable,
+            )
+        }
+    }
+
+    // RAW and TIFF: map the file when possible so size is bounded by the crop, not the source.
+    val mapped = if (source.seekable) mappedByteSource(activity, uri) else null
+    val bytes = if (mapped == null) source.bytes ?: source.open()?.let { RawImage.readAll(it) } else null
+    val byteSource = mapped ?: bytes?.let { RawImage.arraySource(it) } ?: return null
+
+    RawImage.embeddedPreview(byteSource, 0, 0, false)?.let { preview ->
+        val rotated = bytes?.let { RawImage.rotate(preview, RawImage.orientationDegrees(it)) } ?: preview
+        return SingleImage(rotated.asImageBitmap(), rotated.width, rotated.height, sample = 1, canTile = false)
+    }
+
+    val tiff = RawImage.openTiff(byteSource) ?: return null
+    val overview = tiff.render(0, 0, null) ?: return null
+    return SingleImage(
+        overview = overview.asImageBitmap(),
+        width = tiff.width,
+        height = tiff.height,
+        sample = (tiff.width / overview.width).coerceAtLeast(1),
+        canTile = overview.width < tiff.width,
+        tiff = tiff,
+    )
+}
+
+/**
+ * Source rectangle currently on screen, given the fit-to-container placement and the pan/zoom
+ * transform applied around the container's centre.
+ */
+private fun visibleSourceRect(
+    image: SingleImage,
+    viewport: IntSize,
+    scale: Float,
+    offset: Offset,
+): android.graphics.Rect? {
+    val containerWidth = viewport.width.toFloat()
+    val containerHeight = viewport.height.toFloat()
+    if (containerWidth <= 0f || containerHeight <= 0f) return null
+    val fit = min(containerWidth / image.width, containerHeight / image.height)
+    if (fit <= 0f) return null
+    val centreX = containerWidth / 2f
+    val centreY = containerHeight / 2f
+    val baseX = (containerWidth - image.width * fit) / 2f
+    val baseY = (containerHeight - image.height * fit) / 2f
+
+    fun sourceX(screen: Float) = (((screen - centreX - offset.x) / scale) + centreX - baseX) / fit
+    fun sourceY(screen: Float) = (((screen - centreY - offset.y) / scale) + centreY - baseY) / fit
+
+    val left = sourceX(0f).coerceIn(0f, image.width.toFloat())
+    val right = sourceX(containerWidth).coerceIn(0f, image.width.toFloat())
+    val top = sourceY(0f).coerceIn(0f, image.height.toFloat())
+    val bottom = sourceY(containerHeight).coerceIn(0f, image.height.toFloat())
+    if (right - left < 2f || bottom - top < 2f) return null
+    return android.graphics.Rect(
+        floor(left).toInt(),
+        floor(top).toInt(),
+        ceil(right).toInt(),
+        ceil(bottom).toInt(),
+    )
+}
+
+/** Picks the coarsest sampling that still puts roughly one source pixel on each screen pixel. */
+private fun tileSampleSize(region: android.graphics.Rect, viewport: IntSize): Int {
+    var sample = 1
+    while (
+        region.width() / (sample * 2) >= viewport.width.coerceAtLeast(1) &&
+        region.height() / (sample * 2) >= viewport.height.coerceAtLeast(1)
+    ) {
+        sample *= 2
+    }
+    return drawableSampleSize(region.width(), region.height(), sample)
+}
+
+@Suppress("DEPRECATION")
+private fun decodeRegion(
+    activity: ComponentActivity,
+    uri: Uri,
+    image: SingleImage,
+    region: android.graphics.Rect,
+    sample: Int,
+    viewport: IntSize,
+): ImageBitmap? {
+    image.tiff?.let { tiff ->
+        return runCatching { tiff.render(viewport.width, viewport.height, region) }.getOrNull()?.asImageBitmap()
+    }
+    return runCatching {
+        activity.contentResolver.openFileDescriptor(uri, "r")?.use { descriptor ->
+            val decoder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                BitmapRegionDecoder.newInstance(descriptor)
+            } else {
+                BitmapRegionDecoder.newInstance(descriptor.fileDescriptor, false)
+            } ?: return@use null
+            try {
+                decoder.decodeRegion(region, BitmapFactory.Options().apply { inSampleSize = sample })?.asImageBitmap()
+            } finally {
+                decoder.recycle()
+            }
+        }
+    }.getOrNull()
+}
+
 private fun loadBitmap(
     activity: ComponentActivity,
     uri: Uri,
@@ -2378,40 +2903,43 @@ private fun loadBitmap(
     lowQuality: Boolean = false,
 ): ImageBitmap? {
     // Remote bytes are pulled once and decoded from memory; a second stream would re-download.
-    if (DriveUris.isDrive(uri)) {
-        val bytes = runCatching { Storage.openInput(activity, uri)?.use { it.readBytes() } }.getOrNull() ?: return null
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    val remoteBytes = if (DriveUris.isDrive(uri)) {
+        runCatching { Storage.openInput(activity, uri)?.use { it.readBytes() } }.getOrNull() ?: return null
+    } else {
+        null
+    }
+    val resolver = activity.contentResolver
+    val exportType = if (remoteBytes == null && isVirtualDocument(resolver, uri)) {
+        exportMimeType(resolver, uri)
+    } else {
+        null
+    }
+    fun open(): InputStream? =
+        remoteBytes?.let { ByteArrayInputStream(it) } ?: openDocumentStream(resolver, uri, exportType)
+
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    open()?.use { BitmapFactory.decodeStream(it, null, bounds) }
+    if (bounds.outWidth > 0 && bounds.outHeight > 0) {
         val opts = BitmapFactory.Options().apply {
-            inSampleSize = computeInSampleSize(
+            inSampleSize = drawableSampleSize(
                 bounds.outWidth,
                 bounds.outHeight,
-                if (width > 0) width else bounds.outWidth,
-                if (height > 0) height else bounds.outHeight,
+                computeInSampleSize(
+                    bounds.outWidth,
+                    bounds.outHeight,
+                    if (width > 0) width else bounds.outWidth,
+                    if (height > 0) height else bounds.outHeight,
+                ),
             )
             if (lowQuality) inPreferredConfig = Bitmap.Config.RGB_565
         }
-        return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)?.asImageBitmap()
+        open()?.use { BitmapFactory.decodeStream(it, null, opts) }?.let { return it.asImageBitmap() }
     }
 
-    val resolver = activity.contentResolver
-    val exportType = if (isVirtualDocument(resolver, uri)) exportMimeType(resolver, uri) else null
-    return openDocumentStream(resolver, uri, exportType)?.use { input ->
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeStream(input, null, bounds)
-        val targetWidth = if (width > 0) width else bounds.outWidth
-        val targetHeight = if (height > 0) height else bounds.outHeight
-        val sample = computeInSampleSize(bounds.outWidth, bounds.outHeight, targetWidth, targetHeight)
-
-        openDocumentStream(resolver, uri, exportType)?.use { stream ->
-            val opts = BitmapFactory.Options().apply {
-                inJustDecodeBounds = false
-                inSampleSize = sample
-                if (lowQuality) inPreferredConfig = Bitmap.Config.RGB_565
-            }
-            BitmapFactory.decodeStream(stream, null, opts)?.asImageBitmap()
-        }
-    }
+    // RAW and TIFF are invisible to BitmapFactory and go through the embedded preview decoder.
+    val bytes = remoteBytes ?: open()?.let { RawImage.readAll(it) } ?: return null
+    val decoded = RawImage.decode(bytes, width, height, lowQuality) ?: return null
+    return RawImage.rotate(decoded, RawImage.orientationDegrees(bytes)).asImageBitmap()
 }
 
 /** Keeps decoded grid thumbnails around so scrolling back over them costs nothing. */
@@ -2465,6 +2993,19 @@ private fun computeInSampleSize(srcWidth: Int, srcHeight: Int, targetWidth: Int,
     return inSampleSize
 }
 
+/** Raises [initial] until the decoded frame is small enough for the platform to draw it. */
+private fun drawableSampleSize(srcWidth: Int, srcHeight: Int, initial: Int): Int {
+    var sample = initial.coerceAtLeast(1)
+    while (
+        (srcWidth / sample).toLong() * (srcHeight / sample).toLong() > MAX_DRAWABLE_PIXELS ||
+        srcWidth / sample > MAX_TEXTURE_EDGE ||
+        srcHeight / sample > MAX_TEXTURE_EDGE
+    ) {
+        sample *= 2
+    }
+    return sample
+}
+
 @OptIn(ExperimentalFoundationApi::class, ExperimentalLayoutApi::class)
 @Composable
 private fun DirectoryPane(
@@ -2483,6 +3024,11 @@ private fun DirectoryPane(
     showHiddenFiles: Boolean,
     showTrashFiles: Boolean,
     sortOptions: SortOptions,
+    metrics: LayoutMetrics,
+    renameTarget: Uri?,
+    renameValue: String,
+    onRenameValueChange: (String) -> Unit,
+    onCommitRename: () -> Unit,
 ) {
     val context = LocalContext.current
     val currentUri = state.current ?: state.root
@@ -2519,7 +3065,7 @@ private fun DirectoryPane(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             if (state.root != null && currentUri != null && currentUri != state.root) {
-                AssistChip(onClick = onMoveUp, label = { Text("cd ..", fontSize = 12.sp) })
+                AssistChip(onClick = onMoveUp, label = { Text("cd ..", fontSize = metrics.rowFontSize) })
             }
         }
 
@@ -2529,7 +3075,7 @@ private fun DirectoryPane(
                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                style = MaterialTheme.typography.labelMedium,
+                fontSize = metrics.paneHeaderSize,
             )
         }
 
@@ -2550,6 +3096,7 @@ private fun DirectoryPane(
             LazyColumn(Modifier.fillMaxSize()) {
                 items(files, key = { it.uri }) { file ->
                     val selected = file.uri in state.selected
+                    val renaming = file.uri == renameTarget
                     val icon = if (file.isDirectory) Icons.Filled.FolderOpen else Icons.AutoMirrored.Filled.InsertDriveFile
                     Box(
                         modifier = Modifier
@@ -2589,35 +3136,55 @@ private fun DirectoryPane(
                                     onSelectionChange(setOf(file.uri))
                                 },
                             )
-                            .padding(horizontal = 8.dp, vertical = 5.dp),
+                            .padding(horizontal = 8.dp, vertical = metrics.rowPadding),
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(
                                 imageVector = icon,
                                 contentDescription = if (file.isDirectory) "Folder" else "File",
-                                modifier = Modifier.size(15.dp),
+                                modifier = Modifier.size(metrics.rowIcon),
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
-                            Text(
-                                text = file.name,
-                                modifier = Modifier
-                                    .padding(start = 6.dp)
-                                    .combinedClickable(
-                                        onClick = {
-                                            onActivate()
-                                            if (file.isDirectory) onNavigate(file.uri) else onOpenFile(file.uri)
-                                        },
-                                        onLongClick = {
-                                            onActivate()
-                                            if (file.isDirectory) onShowProperties(file.uri) else onOpenWith(file.uri)
-                                        },
-                                    ),
-                                color = MaterialTheme.colorScheme.onSurface,
-                                fontSize = 12.sp,
-                                lineHeight = 15.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
+                            if (renaming) {
+                                val focusRequester = remember { FocusRequester() }
+                                LaunchedEffect(file.uri) { runCatching { focusRequester.requestFocus() } }
+                                OutlinedTextField(
+                                    value = renameValue,
+                                    onValueChange = onRenameValueChange,
+                                    singleLine = true,
+                                    textStyle = TextStyle(fontSize = metrics.rowFontSize),
+                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                                    keyboardActions = KeyboardActions(onDone = { onCommitRename() }),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .padding(start = 6.dp)
+                                        .focusRequester(focusRequester),
+                                )
+                                TextButton(onClick = onCommitRename, contentPadding = PaddingValues(6.dp)) {
+                                    Text("Rename", fontSize = metrics.rowFontSize)
+                                }
+                            } else {
+                                Text(
+                                    text = file.name,
+                                    modifier = Modifier
+                                        .padding(start = 6.dp)
+                                        .combinedClickable(
+                                            onClick = {
+                                                onActivate()
+                                                if (file.isDirectory) onNavigate(file.uri) else onOpenFile(file.uri)
+                                            },
+                                            onLongClick = {
+                                                onActivate()
+                                                if (file.isDirectory) onShowProperties(file.uri) else onOpenWith(file.uri)
+                                            },
+                                        ),
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    fontSize = metrics.rowFontSize,
+                                    lineHeight = metrics.rowFontSize * 1.25f,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
                         }
                     }
                 }

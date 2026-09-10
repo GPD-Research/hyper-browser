@@ -23,10 +23,12 @@
     -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
+    <!-- largeHeap: camera RAW files are read whole to reach their embedded preview. -->
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:label="Hyper Browser"
+        android:largeHeap="true"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:theme="@style/Theme.Hacker">
         <activity
