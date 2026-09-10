@@ -2,7 +2,7 @@
 
 Lean Android dual-pane file browser built with Kotlin and Jetpack Compose.
 
-## Version 3.1.0 (September 2026)
+## Version 3.0.1 (September 2026)
 
 ### Camera RAW sensor decoding
 
