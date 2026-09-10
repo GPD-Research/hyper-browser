@@ -2,6 +2,51 @@
 
 Lean Android dual-pane file browser built with Kotlin and Jetpack Compose.
 
+## Version 3.0.0 (September 2026)
+
+### Full-resolution inspector for TIFF and RAW
+
+- The TIFF region/arrow-pad mode is gone. TIFF and RAW now share one inspector, toggled from the
+  single-image viewer, that pans and pinch-zooms over the source pixels and refines the visible
+  area into sharp crops while the coarse overview stays on screen.
+- Zooming out is supported; the zoom ceiling is derived from the source width and the viewport
+  instead of a fixed factor, so 30k-pixel-wide images reach 1:1 without over-zooming small ones.
+- A locator overlay marks the visible source rectangle on the overview and can be hidden.
+- Crops are rendered at the requested viewport scale, so a selected region is no longer stretched
+  as though it were the whole image.
+
+### TIFF decoding
+
+- Tiled TIFFs are supported alongside strips, and reduced-resolution SubIFDs/pyramid levels are
+  used for overviews when a file provides them.
+- Downsampling is box-filtered rather than nearest-neighbour, which is what made gallery thumbnails
+  look blocky.
+- Strips/tiles with no rows contributing to the current sampling are skipped, and only the crop's
+  column prefix of each row is decompressed and predictor-corrected.
+- Local files are memory-mapped instead of read onto the heap, so a ~500 MB image is decoded within
+  the bounds of the requested output rather than as one full-resolution bitmap.
+
+### RAW sensor data
+
+- Full-resolution mode decodes actual sensor data instead of falling through to the embedded JPEG:
+  packed 12/14-bit samples, tiled and strip layouts, black/white level normalization,
+  `AsShotNeutral` white balance, sRGB gamma and demosaicing.
+- Casual gallery browsing is unchanged and still preview-first.
+- Files whose sensor data cannot be read (notably lossless-JPEG-compressed CR2/NEF) now say so
+  instead of silently presenting the preview as full resolution.
+
+### File browser
+
+- **New Folder** in the command strip: creates a directory in the active pane's current folder,
+  validating the name and refreshing the pane.
+
+### Verification
+
+Both ESA/Hubble `heic0707a.tif` fixtures (525 MB / 29566x14321 and 61 MB / 10000x4844) were decoded
+on an emulator through `app/src/androidTest/.../TiffDecodeTest.kt`, which skips itself unless the
+fixtures are pushed to the app's external-files directory. RAW sensor decoding has not yet been
+verified against a real camera file.
+
 ## Version 2.0.2 (September 2026)
 
 ### RAW/TIFF rendering refinements
