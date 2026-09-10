@@ -3046,26 +3046,38 @@ private fun loadSingleImage(activity: ComponentActivity, uri: Uri, viewport: Int
     val bytes = if (mapped == null) source.bytes ?: source.open()?.let { RawImage.readAll(it) } else null
     val byteSource = mapped ?: bytes?.let { RawImage.arraySource(it) } ?: return null
 
-    val decoded = RawImage.decode(bytes ?: byteSource.let { RawImage.readAll(byteSource.stream(0, byteSource.size)!!) }!!, viewport.width, viewport.height, false, useFullRaw)
+    // Full-resolution TIFF mode renders just the selected region. It has to run before the
+    // decode() path below, which would otherwise return the same overview every time.
+    if (useTiffFullRes && tiffRegion != null) {
+        val tiff = RawImage.openTiff(byteSource) ?: return null
+        val overview = tiff.render(0, 0, tiffRegion) ?: return null
+        return SingleImage(
+            overview = overview.asImageBitmap(),
+            width = tiff.width,
+            height = tiff.height,
+            sample = 1,
+            canTile = false,
+            tiff = tiff,
+        )
+    }
+
+    val decoded = RawImage.decode(byteSource, viewport.width, viewport.height, false, useFullRaw)
     if (decoded != null) {
-        val rotated = bytes?.let { RawImage.rotate(decoded, RawImage.orientationDegrees(it)) } ?: decoded
+        // Mapped sources have no byte array; orientation is read from the source itself.
+        val degrees = bytes?.let { RawImage.orientationDegrees(it) }
+            ?: RawImage.orientationDegrees(byteSource)
+        val rotated = RawImage.rotate(decoded, degrees)
         return SingleImage(rotated.asImageBitmap(), rotated.width, rotated.height, sample = 1, canTile = false)
     }
 
     val tiff = RawImage.openTiff(byteSource) ?: return null
-    val overview = if (useTiffFullRes && tiffRegion != null) {
-        // Render selected region at full resolution (no downsampling)
-        tiff.render(0, 0, tiffRegion) ?: return null
-    } else {
-        // Standard overview rendering with viewport-based downsampling
-        tiff.render(viewport.width, viewport.height, null) ?: return null
-    }
+    val overview = tiff.render(viewport.width, viewport.height, null) ?: return null
     return SingleImage(
         overview = overview.asImageBitmap(),
         width = tiff.width,
         height = tiff.height,
         sample = (tiff.width / overview.width).coerceAtLeast(1),
-        canTile = overview.width < tiff.width && !useTiffFullRes,
+        canTile = overview.width < tiff.width,
         tiff = tiff,
     )
 }

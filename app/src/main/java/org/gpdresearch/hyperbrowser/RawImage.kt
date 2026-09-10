@@ -105,6 +105,9 @@ object RawImage {
     /** Ceiling for pulling a whole file onto the heap; larger sources have to be mapped instead. */
     private const val MAX_FILE_BYTES = 192 * 1024 * 1024
 
+    /** EXIF metadata sits near the start of a file, so a prefix is enough to read orientation. */
+    private const val EXIF_HEAD_BYTES = 4 * 1024 * 1024
+
     /**
      * Matches the viewer's limit: RecordingCanvas rejects bitmaps over 100 MB and GPUs cap texture
      * edges, so a decoded frame has to come back small enough to draw.
@@ -138,12 +141,12 @@ object RawImage {
         }
     }.getOrNull()
 
-    fun decode(bytes: ByteArray, targetWidth: Int, targetHeight: Int, lowQuality: Boolean, useFullRaw: Boolean = false): Bitmap? {
-        val source = ArraySource(bytes)
+    fun decode(bytes: ByteArray, targetWidth: Int, targetHeight: Int, lowQuality: Boolean, useFullRaw: Boolean = false): Bitmap? =
+        decode(arraySource(bytes), targetWidth, targetHeight, lowQuality, useFullRaw)
+
+    fun decode(source: ByteSource, targetWidth: Int, targetHeight: Int, lowQuality: Boolean, useFullRaw: Boolean = false): Bitmap? {
         if (useFullRaw) {
-            return openTiff(source)?.let { tiff ->
-                demosaicTiff(tiff, targetWidth, targetHeight)
-            }
+            demosaic(source, targetWidth, targetHeight)?.let { return it }
         }
         return embeddedPreview(source, targetWidth, targetHeight, lowQuality)
             ?: openTiff(source)?.render(targetWidth, targetHeight, null)
@@ -151,12 +154,36 @@ object RawImage {
 
     fun orientationDegrees(bytes: ByteArray): Int {
         val exif = runCatching { ExifInterface(ByteArrayInputStream(bytes)) }.getOrNull() ?: return 0
-        return when (exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)) {
-            ExifInterface.ORIENTATION_ROTATE_90 -> 90
-            ExifInterface.ORIENTATION_ROTATE_180 -> 180
-            ExifInterface.ORIENTATION_ROTATE_270 -> 270
-            else -> 0
+        return exifOrientationToDegrees(
+            exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+        )
+    }
+
+    /**
+     * Orientation for a [ByteSource], which may be a memory-mapped file far too large to copy
+     * onto the heap. TIFF-based files (TIFF, DNG, NEF, CR2, ARW …) keep the tag in IFD0, so it
+     * is read directly; other containers go through [ExifInterface] on a bounded prefix, since
+     * EXIF data always sits near the start of the file.
+     */
+    fun orientationDegrees(source: ByteSource): Int {
+        tiffHeader(source)?.let { file ->
+            val directories = mutableListOf<Directory>()
+            readDirectories(file, file.u32(4).toInt(), directories, depth = 0)
+            val orientation = directories.firstOrNull()
+                ?.first(TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL.toLong())
+                ?.toInt()
+                ?: ExifInterface.ORIENTATION_NORMAL
+            return exifOrientationToDegrees(orientation)
         }
+        val head = source.copyRange(0, minOf(source.size, EXIF_HEAD_BYTES)) ?: return 0
+        return orientationDegrees(head)
+    }
+
+    private fun exifOrientationToDegrees(orientation: Int): Int = when (orientation) {
+        ExifInterface.ORIENTATION_ROTATE_90 -> 90
+        ExifInterface.ORIENTATION_ROTATE_180 -> 180
+        ExifInterface.ORIENTATION_ROTATE_270 -> 270
+        else -> 0
     }
 
     fun rotate(bitmap: Bitmap, degrees: Int): Bitmap {
@@ -253,6 +280,7 @@ object RawImage {
     private const val TAG_STRIP_BYTE_COUNTS = 0x0117
     private const val TAG_PLANAR_CONFIGURATION = 0x011C
     private const val TAG_PREDICTOR = 0x013D
+    private const val TAG_ORIENTATION = 0x0112
     private const val TAG_COLOR_MAP = 0x0140
     private const val TAG_SUB_IFDS = 0x014A
 
@@ -581,13 +609,46 @@ object RawImage {
     }
 
     /**
-     * Demosaics RAW sensor data using bilinear interpolation.
-     * This converts Bayer pattern sensor data to full RGB, allowing photographers to view
-     * the full sensor data instead of just the embedded JPEG preview.
-     * Note: This is computationally expensive and may be slow on older devices.
+     * Finds the IFD holding raw sensor data — photometric 32803 (CFA) or a single-channel
+     * 16-bit image — and demosaics it. [openTiff] cannot be used here because it only accepts
+     * directories [supportedDirectory] understands, which excludes the CFA data entirely.
+     * Returns null when the sensor data uses a compression this decoder cannot read (lossless
+     * JPEG, proprietary maker formats), so callers can fall back to the embedded preview.
      */
-    private fun demosaicTiff(tiff: TiffImage, targetWidth: Int, targetHeight: Int): Bitmap? {
-        val directory = tiff.directory
+    fun demosaic(source: ByteSource, targetWidth: Int, targetHeight: Int): Bitmap? {
+        val file = tiffHeader(source) ?: return null
+        val directories = mutableListOf<Directory>()
+        readDirectories(file, file.u32(4).toInt(), directories, depth = 0)
+        val best = directories
+            .filter { rawCandidate(it) }
+            .maxByOrNull { it.first(TAG_IMAGE_WIDTH, 0) * it.first(TAG_IMAGE_LENGTH, 0) }
+            ?: return null
+        return demosaicDirectory(file, best, targetWidth, targetHeight)
+    }
+
+    private fun rawCandidate(directory: Directory): Boolean {
+        val width = directory.first(TAG_IMAGE_WIDTH, 0)
+        val height = directory.first(TAG_IMAGE_LENGTH, 0)
+        if (width <= 0 || height <= 0) return false
+        if (directory.values(TAG_STRIP_OFFSETS) == null) return false
+        if (directory.values(TAG_STRIP_BYTE_COUNTS) == null) return false
+        if (directory.first(TAG_PLANAR_CONFIGURATION, 1) != 1L) return false
+        // Sensor data is one 16-bit sample per pixel; packed 12/14-bit rows are not readable
+        // with the two-bytes-per-pixel path below.
+        val bits = (directory.values(TAG_BITS_PER_SAMPLE) ?: return false).first()
+        if (bits != 16L) return false
+        if (directory.first(TAG_SAMPLES_PER_PIXEL, 1) != 1L) return false
+        val photometric = directory.first(TAG_PHOTOMETRIC, -1)
+        // 1 = BlackIsZero, 32803 = CFA (color filter array).
+        if (photometric != 1L && photometric != 32803L) return false
+        return when (directory.first(TAG_COMPRESSION, 1).toInt()) {
+            COMPRESSION_NONE, COMPRESSION_LZW, COMPRESSION_PACKBITS,
+            COMPRESSION_DEFLATE, COMPRESSION_DEFLATE_ADOBE -> true
+            else -> false
+        }
+    }
+
+    private fun demosaicDirectory(file: TiffFile, directory: Directory, targetWidth: Int, targetHeight: Int): Bitmap? {
         val width = directory.first(TAG_IMAGE_WIDTH, 0).toInt()
         val height = directory.first(TAG_IMAGE_LENGTH, 0).toInt()
         val bits = (directory.values(TAG_BITS_PER_SAMPLE) ?: longArrayOf(16)).first().toInt()
@@ -601,8 +662,8 @@ object RawImage {
         val counts = directory.values(TAG_STRIP_BYTE_COUNTS) ?: return null
         if (offsets.size != counts.size) return null
 
-        // Only support 16-bit single-channel RAW data (Bayer pattern)
-        if (bits != 16 || samples != 1 || photometric != 1) return null
+        // Only 16-bit single-channel RAW data (Bayer pattern) can be demosaiced.
+        if (bits != 16 || samples != 1) return null
 
         val bytesPerSample = 2
         val bytesPerRow = width.toLong() * samples * bytesPerSample
@@ -636,7 +697,7 @@ object RawImage {
             val rowsInStrip = minOf(rowsPerStrip, height - firstRow)
             if (rowsInStrip <= 0) break
 
-            val stream = stripStream(tiff.file.source, offsets[strip].toInt(), counts[strip].toInt(), compression)
+            val stream = stripStream(file.source, offsets[strip].toInt(), counts[strip].toInt(), compression)
                 ?: continue
             stream.use { input ->
                 for (index in 0 until rowsInStrip) {
@@ -651,7 +712,7 @@ object RawImage {
 
         // Demosaic using bilinear interpolation
         val pixels = IntArray(outWidth * outHeight)
-        val littleEndian = tiff.file.littleEndian
+        val littleEndian = file.littleEndian
 
         for (y in 0 until outHeight) {
             for (x in 0 until outWidth) {

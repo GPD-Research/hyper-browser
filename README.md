@@ -2,6 +2,15 @@
 
 Lean Android dual-pane file browser built with Kotlin and Jetpack Compose.
 
+## Version 2.0.2 (September 2026)
+
+### RAW/TIFF rendering refinements
+
+- `RawImage.decode()` now accepts a `ByteSource`, so mapped files (e.g. large TIFFs/RAWs) are decoded without copying the whole file onto the heap.
+- Orientation is now read directly from the source for TIFF-based containers and from a bounded EXIF prefix for other formats.
+- Full RAW demosaicing searches all IFDs for CFA/single-channel 16-bit sensor data and supports more TIFF compression schemes.
+- TIFF full-resolution region mode is selected before the decode path, ensuring the selected region is rendered at full quality.
+
 ## Version 2.0.1 (September 2026)
 
 ### Major Image Quality Improvements
