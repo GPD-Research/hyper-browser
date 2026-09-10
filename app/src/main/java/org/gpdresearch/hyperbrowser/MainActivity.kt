@@ -2888,7 +2888,8 @@ private fun ImageViewerScreen(
                 else -> single?.let { listOfNotNull(it.source, it.notice).joinToString(" — ") }
                     ?.takeIf { it.isNotEmpty() }
             }
-            if (inspect && provenance != null && stage == GalleryStage.SINGLE) {
+            // The tapped-up menu occupies the same corner of the screen as the label.
+            if (inspect && provenance != null && stage == GalleryStage.SINGLE && !showMenu) {
                 Text(
                     text = provenance,
                     style = MaterialTheme.typography.labelSmall,
