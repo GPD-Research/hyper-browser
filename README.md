@@ -2,6 +2,16 @@
 
 Lean Android dual-pane file browser built with Kotlin and Jetpack Compose.
 
+## Version 3.0.2 (September 2026)
+
+### Immersive image viewing
+
+- An image opened on its own fills the screen: the toolbar and filename are hidden, and the tap
+  that already summoned the bottom menu brings them back.
+- Zoom in and out stay one tap away through a pair of buttons over the bottom of the image.
+- A zoomed image is clipped to its own area instead of painting over the toolbar and status bar.
+- The inspector's provenance label steps aside while the menu covers that part of the screen.
+
 ## Version 3.0.1 (September 2026)
 
 ### Camera RAW sensor decoding
