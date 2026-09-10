@@ -94,6 +94,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -123,6 +124,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import androidx.exifinterface.media.ExifInterface
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.auth.api.signin.GoogleSignInAccount
 import com.google.android.gms.common.api.ApiException
@@ -788,6 +791,9 @@ private fun deviceStorageRoots(context: Context): List<StorageRoot> {
     val systemRoot = File("/").takeIf { it.canRead() }?.let { listOf(StorageRoot("System root (/)", it)) }.orEmpty()
     return (roots.ifEmpty { fallback } + systemRoot).distinctBy { it.directory.absolutePath }
 }
+
+private fun allFilesAccessGranted(): Boolean =
+    Build.VERSION.SDK_INT < Build.VERSION_CODES.R || Environment.isExternalStorageManager()
 
 private fun openAllFilesAccessSettings(context: Context) {
     val appSpecific = Intent(
@@ -1470,16 +1476,26 @@ private fun FolderPickerDialog(
             return
         }
         scope.launch {
-            withContext(Dispatchers.IO) { DriveClient.connect(context, androidAccount, account.email) }
+            val connected = withContext(Dispatchers.IO) {
+                DriveClient.connect(context, androidAccount, account.email)
+            }
+            if (!connected) {
+                driveMessage = "Could not reach Google Drive with that account. Check your connection and try again."
+                return@launch
+            }
             driveMessage = null
             browseDriveRoot()
         }
     }
 
-    val hasAllFilesAccess = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-        Environment.isExternalStorageManager()
-    } else {
-        true
+    // The grant is made in a system settings screen, so it can only be re-read once we resume.
+    var hasAllFilesAccess by remember { mutableStateOf(allFilesAccessGranted()) }
+    DisposableEffect(context) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) hasAllFilesAccess = allFilesAccessGranted()
+        }
+        context.lifecycle.addObserver(observer)
+        onDispose { context.lifecycle.removeObserver(observer) }
     }
 
     val pickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
@@ -1551,7 +1567,7 @@ private fun FolderPickerDialog(
                         }
                     }
                     if (hasAllFilesAccess) {
-                        val volumes = remember { deviceStorageRoots(context) }
+                        val volumes = remember(hasAllFilesAccess) { deviceStorageRoots(context) }
                         volumes.forEach { root ->
                             Spacer(modifier = Modifier.size(8.dp))
                             Button(
@@ -2470,7 +2486,7 @@ private fun DirectoryPane(
 ) {
     val context = LocalContext.current
     val currentUri = state.current ?: state.root
-    val listing by produceState<DirectoryListing?>(initialValue = null, currentUri, state.refreshKey, showHiddenFiles, showTrashFiles, sortOptions) {
+    val listing by produceState<DirectoryListing?>(initialValue = null, currentUri, state.refreshKey, DriveClient.connectionGeneration, showHiddenFiles, showTrashFiles, sortOptions) {
         value = currentUri?.let { uri ->
             withContext(Dispatchers.IO) {
                 DirectoryListing(

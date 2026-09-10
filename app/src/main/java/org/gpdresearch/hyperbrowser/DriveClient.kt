@@ -6,6 +6,10 @@ import android.content.Context
 import android.net.Uri
 import android.util.Log
 import android.webkit.MimeTypeMap
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.auth.api.signin.GoogleSignInAccount
 import com.google.android.gms.auth.api.signin.GoogleSignInClient
@@ -65,37 +69,39 @@ object DriveClient {
     @Volatile
     private var service: Drive? = null
 
-    @Volatile
-    var accountName: String? = null
+    /** Bumped on every connect/disconnect so Compose panes reload once the service exists. */
+    var connectionGeneration by mutableIntStateOf(0)
+        private set
+
+    var accountName: String? by mutableStateOf(null)
         private set
 
     val isConnected: Boolean
         get() = service != null
 
-    fun connect(context: Context, account: Account, displayName: String?) {
-        Log.d("DriveClient", "Connecting to Drive with account: ${account.name}")
+    /** Returns false when no token could be obtained, in which case Drive stays disconnected. */
+    fun connect(context: Context, account: Account, displayName: String?): Boolean {
         val credential = GoogleAccountCredential.usingOAuth2(context, listOf(DriveScopes.DRIVE))
         credential.selectedAccount = account
-        Log.d("DriveClient", "Credential selected account: ${credential.selectedAccount}")
-        Log.d("DriveClient", "Credential scope: ${credential.scope}")
-        // Force token refresh to ensure we have the Drive scope
-        Log.d("DriveClient", "Requesting token refresh...")
         try {
             credential.token
-            Log.d("DriveClient", "Token obtained successfully")
         } catch (e: Exception) {
-            Log.e("DriveClient", "Failed to obtain token", e)
+            Log.e("DriveClient", "Could not obtain a Drive token", e)
+            disconnect()
+            return false
         }
         service = Drive.Builder(NetHttpTransport(), GsonFactory.getDefaultInstance(), credential)
             .setApplicationName("Hyper Browser")
             .build()
         accountName = displayName ?: account.name
-        Log.d("DriveClient", "Drive service created successfully")
+        connectionGeneration++
+        return true
     }
 
     fun disconnect() {
         service = null
         accountName = null
+        connectionGeneration++
     }
 
     fun listChildren(folderId: String): List<FileEntry> {

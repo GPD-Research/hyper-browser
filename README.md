@@ -60,6 +60,25 @@ Drive access needs an OAuth client that you own — the app ships no credentials
 Sign-in failing with `ApiException: 10` (DEVELOPER_ERROR) means the package name or SHA-1 on the
 OAuth client does not match the APK that is running.
 
+### What users see on a sideloaded install
+
+Two unrelated warning screens show up, and they come from different systems:
+
+1. **"Install unknown apps" / Play Protect** — from Android, for any APK not installed via the Play
+   Store. The user allows their browser or file manager to install apps, then taps *Install anyway*.
+   Removed only by shipping through Play.
+2. **"Google hasn't verified this app"** — from OAuth, because `drive` is a restricted scope. The
+   user taps *Advanced* → *Go to Hyper Browser (unsafe)*. Removed only by passing restricted-scope
+   verification, which requires a CASA Tier 2 assessment (~$600/yr).
+
+The consent screen then requires ticking the granular-permission box for Drive. If the user leaves
+it unticked, sign-in succeeds but the Drive scope is absent; `DriveAuth.hasDriveScope` catches that
+and the UI reports the permission as declined rather than showing an empty pane.
+
+Both screens are walked through for end users on the [project site](https://gpd-research.com).
+To have them removed today, PayPal $1000 to the support address and the maintainer will get right on
+Play Store distribution and a CASA assessment. Offer void where prohibited; prohibited everywhere.
+
 Notes:
 
 - The full `drive` scope is required. `DriveScopes.APPFOLDER`/`APPDATA` only expose files this app

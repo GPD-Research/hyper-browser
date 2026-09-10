@@ -49,7 +49,44 @@
         </p>
     </div>
 
-    <h2>Google Drive access</h2>
+    <h2>What to expect when you install</h2>
+    <p>
+        Hyper Browser is not on the Play Store and has not been through Google's Drive verification,
+        so you will meet two scary-looking warning screens on the way in. Both are expected. Here is
+        what they are and why they appear, so you are not deciding whether to trust something in the
+        middle of a security prompt.
+    </p>
+    <h3>1. "For your security, your phone is not allowed to install unknown apps"</h3>
+    <p>
+        This one comes from Android, and it appears for <em>every</em> app installed outside the Play
+        Store — the same way Windows warns about an <code>.exe</code> it has not seen before. Tap
+        <strong>Settings</strong> and allow your browser or file manager to install apps, then go back
+        and continue. Play Protect may add a second "unsafe app" notice; choose
+        <strong>Install anyway</strong>. Neither screen means anything has been found wrong with the
+        app — only that Google has not scanned it, because it was never submitted to them.
+    </p>
+    <h3>2. "Google hasn't verified this app"</h3>
+    <p>
+        This one comes from Google's sign-in flow, and only when you connect Google Drive. Tap
+        <strong>Advanced</strong>, then <strong>Go to Hyper Browser (unsafe)</strong>. Verification for
+        the Drive scope requires a third-party security assessment costing roughly $600 a year, which
+        this project does not currently fund. Until then, every app in this position gets the same
+        banner.
+    </p>
+    <h3>3. The Drive permission checkbox</h3>
+    <p>
+        The consent screen then asks you to tick a box granting access to
+        <em>"See, edit, create, and delete all of your Google Drive files."</em> You must tick it, or the
+        Drive pane will have nothing to show. That wording is Google's, and it is broad because a file
+        manager genuinely needs it — see <a href="#drive-access">Google Drive access</a> below for why, and the
+        <a href="privacy.html">privacy policy</a> for what the app does and does not do with it.
+    </p>
+    <p class="note">
+        Skipping all of this requires Play Store distribution and paid Drive verification. If enough
+        people ask, that is the path.
+    </p>
+
+    <h2 id="drive-access">Google Drive access</h2>
     <p>
         Hyper Browser requests the <code>https://www.googleapis.com/auth/drive</code> scope. That is the
         broadest Drive scope Google offers, and the app asks for it because the app is a file manager: it
