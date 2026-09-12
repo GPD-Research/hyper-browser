@@ -75,6 +75,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.DriveFileMove
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
+import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
@@ -477,6 +478,13 @@ private data class FilesIntoFolderPrompt(
     val targetName: String,
 )
 
+private data class BulkFolderPrompt(
+    val request: TransferRequest,
+    val folderNames: List<String>,
+    val fileCount: Int,
+    val targetName: String,
+)
+
 private sealed interface TransferPlan {
     /** The selection is valid, so the operation only stages the clipboard. */
     object Staged : TransferPlan
@@ -488,6 +496,9 @@ private sealed interface TransferPlan {
 
     /** Files are selected on both sides, so the destination folder has to be inferred. */
     data class FilesIntoFolder(val prompt: FilesIntoFolderPrompt) : TransferPlan
+
+    /** Several folders at once can bury a destination, so they are listed before anything moves. */
+    data class BulkFolders(val prompt: BulkFolderPrompt) : TransferPlan
 }
 
 private data class SelectionInfo(
@@ -528,8 +539,10 @@ private fun HyperBrowserApp() {
     var pendingRequest by remember { mutableStateOf<TransferRequest?>(null) }
     var pendingFolderTransfer by remember { mutableStateOf<FolderTransferPrompt?>(null) }
     var pendingFilesTransfer by remember { mutableStateOf<FilesIntoFolderPrompt?>(null) }
+    var pendingBulkFolders by remember { mutableStateOf<BulkFolderPrompt?>(null) }
     var reversePrompt by remember { mutableStateOf<TransferMode?>(null) }
-    var pendingDelete by remember { mutableStateOf<Set<Uri>?>(null) }
+    var pendingDelete by remember { mutableStateOf<DeletePlan?>(null) }
+    var undoRecord by remember { mutableStateOf<UndoRecord?>(null) }
     var propertiesUri by remember { mutableStateOf<Uri?>(null) }
     // Saved, so rotating while an image is open comes back to the gallery instead of the file tree.
     var galleryUri by rememberSaveable { mutableStateOf<Uri?>(null) }
@@ -561,7 +574,11 @@ private fun HyperBrowserApp() {
     val sourceState = if (sourcePane == Pane.LEFT) leftPane else rightPane
     val destinationState = if (destinationPane == Pane.LEFT) leftPane else rightPane
     val scope = rememberCoroutineScope()
-    val selected = sourceState.selected
+    // Single-item commands follow the selection itself; only transfers care about the arrow.
+    val activeState = if (activePane == Pane.LEFT) leftPane else rightPane
+    val otherState = if (activePane == Pane.LEFT) rightPane else leftPane
+    val commandState = if (activeState.selected.isNotEmpty()) activeState else otherState
+    val selected = commandState.selected
     val selectedFile = selected.singleOrNull()
     val selectedMimeType by produceState(initialValue = "", selectedFile) {
         value = selectedFile?.let { uri -> withContext(Dispatchers.IO) { Storage.mimeType(activity, uri) } } ?: ""
@@ -585,9 +602,10 @@ private fun HyperBrowserApp() {
         value = uri?.let { withContext(Dispatchers.IO) { resolveDisplayPath(activity, it) } } ?: "Choose right root"
     }
 
+    // Both selections are dropped: after a write their URIs may point at items that no longer exist.
     fun refreshPanesAfterWrite() {
-        leftPane = leftPane.copy(refreshKey = leftPane.refreshKey + 1, selected = if (sourcePane == Pane.LEFT) emptySet() else leftPane.selected)
-        rightPane = rightPane.copy(refreshKey = rightPane.refreshKey + 1, selected = if (sourcePane == Pane.RIGHT) emptySet() else rightPane.selected)
+        leftPane = leftPane.copy(refreshKey = leftPane.refreshKey + 1, selected = emptySet())
+        rightPane = rightPane.copy(refreshKey = rightPane.refreshKey + 1, selected = emptySet())
     }
 
     fun commitRename() {
@@ -658,10 +676,54 @@ private fun HyperBrowserApp() {
 
     fun runTransfer(request: TransferRequest) {
         scope.launch {
-            val failures = withContext(Dispatchers.IO) { executeTransfer(activity, request) }
+            val result = withContext(Dispatchers.IO) { executeTransfer(activity, request) }
+            val verb = if (request.mode == TransferMode.MOVE) "move" else "copy"
+            undoRecord = UndoRecord(verb, result.trashed, result.created).takeIf { !it.isEmpty }
             refreshPanesAfterWrite()
-            if (failures > 0) {
-                Toast.makeText(activity, failureMessage(failures, "transferred"), Toast.LENGTH_LONG).show()
+            if (result.failures > 0) {
+                Toast.makeText(activity, failureMessage(result.failures, "transferred"), Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    fun runUndo() {
+        val record = undoRecord ?: return
+        undoRecord = null
+        scope.launch {
+            val failures = withContext(Dispatchers.IO) { undoOperation(activity, record) }
+            refreshPanesAfterWrite()
+            val message = if (failures > 0) {
+                failureMessage(failures, "restored")
+            } else {
+                "Undid the last ${record.label}"
+            }
+            Toast.makeText(activity, message, Toast.LENGTH_LONG).show()
+        }
+    }
+
+    fun startDelete() {
+        val items = selected
+        if (items.isEmpty()) {
+            Toast.makeText(activity, "Select a file or folder to delete", Toast.LENGTH_SHORT).show()
+            return
+        }
+        scope.launch {
+            val plan = withContext(Dispatchers.IO) { buildDeletePlan(activity, items) }
+            if (plan.entries.isEmpty()) {
+                Toast.makeText(activity, "Nothing left to delete", Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+            pendingDelete = plan
+        }
+    }
+
+    fun runDelete(plan: DeletePlan) {
+        scope.launch {
+            val outcome = withContext(Dispatchers.IO) { deleteItems(activity, plan.uris) }
+            undoRecord = UndoRecord("delete", trashed = outcome.trashed).takeIf { !it.isEmpty }
+            refreshPanesAfterWrite()
+            if (outcome.failures > 0) {
+                Toast.makeText(activity, failureMessage(outcome.failures, "deleted"), Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -684,6 +746,7 @@ private fun HyperBrowserApp() {
                 TransferPlan.ReverseSuggested -> reversePrompt = mode
                 is TransferPlan.FolderIntoFolder -> pendingFolderTransfer = plan.prompt
                 is TransferPlan.FilesIntoFolder -> pendingFilesTransfer = plan.prompt
+                is TransferPlan.BulkFolders -> pendingBulkFolders = plan.prompt
             }
         }
     }
@@ -777,6 +840,7 @@ private fun HyperBrowserApp() {
                         directoryUri = galleryDirectory,
                         startStage = galleryStage,
                         sortOrder = gallerySort,
+                        onUndoable = { record -> undoRecord = record },
                         onClose = { galleryUri = null },
                     )
                 } else {
@@ -789,12 +853,7 @@ private fun HyperBrowserApp() {
                                 metrics = metrics,
                                 onCopy = { startOperation(TransferMode.COPY, sourceState, destinationState) },
                                 onMove = { startOperation(TransferMode.MOVE, sourceState, destinationState) },
-                                onDelete = {
-                                    val items = sourceState.selected.ifEmpty { setOfNotNull(sourceState.current) }
-                                    if (items.isNotEmpty()) {
-                                        pendingDelete = items
-                                    }
-                                },
+                                onDelete = { startDelete() },
                                 onNewFolder = { startNewFolder() },
                                 onRename = { startRename() },
                                 renameActive = renameTarget != null,
@@ -803,16 +862,18 @@ private fun HyperBrowserApp() {
                                     when {
                                         // An image opens in view mode among the rest of its folder.
                                         target != null && isImageSelected ->
-                                            openGallery(target, sourceState.current)
+                                            openGallery(target, commandState.current)
                                         // A folder — chosen, or just the one the pane is showing —
                                         // opens as a grid of what is in it.
                                         target != null && isDirectorySelected ->
                                             openGallery(target, target, GalleryStage.GRID_SMALL)
-                                        else -> sourceState.current?.let { directory ->
+                                        else -> commandState.current?.let { directory ->
                                             openGallery(directory, directory, GalleryStage.GRID_SMALL)
                                         }
                                     }
                                 },
+                                undoLabel = undoRecord?.label,
+                                onUndo = { runUndo() },
                                 multiSelect = multiSelect,
                                 // Leaving multi mode doubles as "I changed my mind" and drops the payload.
                                 onToggleMulti = {
@@ -931,7 +992,7 @@ private fun HyperBrowserApp() {
                         selectedFile = selectedFile,
                         isImage = isImageSelected,
                         onOpen = { selectedFile?.let { uri -> openWith(uri) } },
-                        onView = { selectedFile?.let { if (isImageSelected) openGallery(it, sourceState.current) } },
+                        onView = { selectedFile?.let { if (isImageSelected) openGallery(it, commandState.current) } },
                     )
                 }
             }
@@ -984,20 +1045,25 @@ private fun HyperBrowserApp() {
             )
         }
 
-        if (pendingDelete != null) {
-            ConfirmDeleteDialog(
-                count = pendingDelete!!.size,
+        if (pendingBulkFolders != null) {
+            ConfirmBulkFolderTransferDialog(
+                prompt = pendingBulkFolders!!,
+                onDismiss = { pendingBulkFolders = null },
+                onConfirm = { request ->
+                    pendingBulkFolders = null
+                    runTransfer(request)
+                },
+            )
+        }
+
+        val deletePlan = pendingDelete
+        if (deletePlan != null) {
+            ConfirmDeletePlanDialog(
+                plan = deletePlan,
                 onDismiss = { pendingDelete = null },
                 onConfirm = {
-                    val items = pendingDelete!!
                     pendingDelete = null
-                    scope.launch {
-                        val failures = withContext(Dispatchers.IO) { deleteItems(activity, items) }
-                        refreshPanesAfterWrite()
-                        if (failures > 0) {
-                            Toast.makeText(activity, failureMessage(failures, "deleted"), Toast.LENGTH_LONG).show()
-                        }
-                    }
+                    runDelete(deletePlan)
                 },
             )
         }
@@ -1172,6 +1238,27 @@ private fun planTransfer(
         return TransferPlan.ReverseSuggested
     }
 
+    if (sourceFolders.size > 1) {
+        val targetDir = targetFolders.singleOrNull()?.uri ?: target.current ?: target.root
+        val sourceDir = source.current ?: source.root
+        if (targetDir != null && sourceDir != null) {
+            return TransferPlan.BulkFolders(
+                BulkFolderPrompt(
+                    request = TransferRequest(
+                        sourceDir = sourceDir,
+                        targetDir = targetDir,
+                        selected = sourceDocs.map { it.uri }.toSet(),
+                        wholeDirectory = false,
+                        mode = mode,
+                    ),
+                    folderNames = sourceFolders.map { it.name },
+                    fileCount = sourceDocs.count { !it.isDirectory },
+                    targetName = resolveDisplayPath(activity, targetDir),
+                ),
+            )
+        }
+    }
+
     if (sourceDocs.isNotEmpty() && sourceFolders.isEmpty() && targetDocs.isNotEmpty() && targetFolders.isEmpty()) {
         val targetDir = target.current ?: target.root
         val sourceDir = source.current ?: source.root
@@ -1226,29 +1313,40 @@ private fun isRemoteOrRemovableUri(uri: Uri): Boolean {
     return !documentId.startsWith("primary:")
 }
 
-private fun executeTransfer(activity: ComponentActivity, request: TransferRequest): Int {
-    val copyMode = request.mode == TransferMode.COPY
+private data class TransferResult(
+    val failures: Int,
+    val created: List<Uri> = emptyList(),
+    val trashed: List<TrashedItem> = emptyList(),
+)
+
+private fun executeTransfer(activity: ComponentActivity, request: TransferRequest): TransferResult {
     val takenNames = Storage.childNames(activity, request.targetDir)
-    var failures = 0
-    if (request.wholeDirectory) {
-        val source = Storage.entry(activity, request.sourceDir) ?: return 1
-        if (!transferEntry(activity, source, request.targetDir, takenNames, copyMode)) failures += 1
-        return failures
-    }
-    request.selected.forEach { uri ->
-        val source = Storage.entry(activity, uri)
-        if (source == null || !transferEntry(activity, source, request.targetDir, takenNames, copyMode)) {
-            failures += 1
+    val wanted = if (request.wholeDirectory) listOf(request.sourceDir) else request.selected.toList()
+    val sources = wanted.mapNotNull { Storage.entry(activity, it) }
+    var failures = wanted.size - sources.size
+    val created = mutableListOf<Uri>()
+    val trashed = mutableListOf<TrashedItem>()
+    sources.forEach { source ->
+        val outcome = transferEntry(activity, source, request.targetDir, takenNames)
+        failures += outcome.failures
+        val copy = outcome.created ?: return@forEach
+        created += copy
+        // A move is a copy plus a trashed original, which keeps the whole operation reversible.
+        if (request.mode == TransferMode.MOVE && outcome.failures == 0) {
+            val parked = moveToTrash(activity, source.uri)
+            when {
+                parked != null -> trashed += parked
+                !Storage.delete(activity, source.uri) -> failures += 1
+            }
         }
     }
-    return failures
+    return TransferResult(failures, created, trashed)
 }
-
-private fun deleteItems(activity: ComponentActivity, uris: Set<Uri>): Int =
-    uris.count { uri -> !Storage.delete(activity, uri) }
 
 private fun failureMessage(count: Int, verb: String): String =
     if (count == 1) "1 item could not be $verb" else "$count items could not be $verb"
+
+private data class EntryOutcome(val created: Uri?, val failures: Int)
 
 /** [takenNames] is threaded through so a batch transfer does not re-list the destination per item. */
 private fun transferEntry(
@@ -1256,30 +1354,22 @@ private fun transferEntry(
     source: FileEntry,
     targetDir: Uri,
     takenNames: MutableSet<String>,
-    copyMode: Boolean,
-): Boolean {
+): EntryOutcome {
     if (source.isDirectory) {
         val folderName = nextAvailableName(takenNames, source.name)
-        val destination = Storage.createFolder(context, targetDir, folderName) ?: return false
+        val destination = Storage.createFolder(context, targetDir, folderName)
+            ?: return EntryOutcome(null, 1)
         val childNames = mutableSetOf<String>()
-        var ok = true
+        var failures = 0
         Storage.children(context, source.uri).forEach { child ->
             if (child.uri == destination.uri) return@forEach
-            if (!transferEntry(context, child, destination.uri, childNames, copyMode)) {
-                ok = false
-            }
+            failures += transferEntry(context, child, destination.uri, childNames).failures
         }
-        if (!copyMode && ok) {
-            Storage.delete(context, source.uri)
-        }
-        return ok
+        return EntryOutcome(destination.uri, failures)
     }
 
-    if (!copyFileContents(context, source, targetDir, takenNames)) return false
-    if (!copyMode) {
-        Storage.delete(context, source.uri)
-    }
-    return true
+    val copy = copyFileContents(context, source, targetDir, takenNames)
+    return EntryOutcome(copy, if (copy == null) 1 else 0)
 }
 
 private fun copyFileContents(
@@ -1287,15 +1377,15 @@ private fun copyFileContents(
     source: FileEntry,
     targetDir: Uri,
     takenNames: MutableSet<String>,
-): Boolean {
-    val content = Storage.read(context, source) ?: return false
+): Uri? {
+    val content = Storage.read(context, source) ?: return null
     val name = nextAvailableName(takenNames, content.fileName)
     return runCatching {
         content.stream.use { input -> Storage.writeChild(context, targetDir, name, content.mimeType, input) }
-    }.getOrDefault(false)
+    }.getOrNull()
 }
 
-private fun nextAvailableName(takenNames: MutableSet<String>, preferredName: String): String {
+internal fun nextAvailableName(takenNames: MutableSet<String>, preferredName: String): String {
     fun claim(name: String): String {
         takenNames += name
         return name
@@ -1507,6 +1597,8 @@ private fun CommandStrip(
     onRename: () -> Unit,
     renameActive: Boolean,
     onGallery: () -> Unit,
+    undoLabel: String?,
+    onUndo: () -> Unit,
     multiSelect: Boolean,
     onToggleMulti: () -> Unit,
     selectionActive: Boolean,
@@ -1534,6 +1626,9 @@ private fun CommandStrip(
             active = renameActive,
         )
         CommandButton(metrics, "Gallery", Icons.Filled.Image, onGallery)
+        if (undoLabel != null) {
+            CommandButton(metrics, "Undo $undoLabel", Icons.AutoMirrored.Filled.Undo, onUndo)
+        }
         CommandButton(metrics, "Multi", Icons.Filled.SelectAll, onToggleMulti, active = multiSelect)
         if (selectionActive) {
             CommandButton(metrics, "Deselect", Icons.Filled.Deselect, onDeselect)
@@ -1785,10 +1880,110 @@ private fun ConfirmDeleteDialog(
     HyperDialog(
         onDismissRequest = onDismiss,
         title = { Text("Delete") },
-        text = { Text(if (count == 1) "Delete this item permanently?" else "Delete $count items permanently?") },
+        text = { Text(if (count == 1) "Delete this item?" else "Delete $count items?") },
         confirmButton = { TextButton(onClick = onConfirm) { Text("Delete") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
+}
+
+@Composable
+private fun ConfirmDeletePlanDialog(
+    plan: DeletePlan,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    var acknowledged by remember(plan) { mutableStateOf(false) }
+    val folders = plan.directories
+
+    HyperDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (plan.needsAcknowledgement) "Delete ${folders.size} folders?" else "Delete") },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+            ) {
+                if (plan.needsAcknowledgement) {
+                    Text(
+                        "Deleting several folders at once is unusual. Everything listed below goes, " +
+                            "including what is inside each folder.",
+                    )
+                }
+                folders.forEach { folder ->
+                    Text("▸ ${folder.name} — ${countLabel(folder.files, folder.folders)}")
+                }
+                if (plan.files.isNotEmpty()) {
+                    val names = plan.files.take(MAX_LISTED_NAMES).joinToString(", ") { it.name }
+                    val extra = plan.files.size - MAX_LISTED_NAMES
+                    Text(if (extra > 0) "$names, and $extra more" else names)
+                }
+                Text(
+                    "Deleted items go to a $TRASH_FOLDER_NAME folder beside them, so Undo can put them back.",
+                    style = MaterialTheme.typography.labelSmall,
+                )
+                if (plan.needsAcknowledgement) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(checked = acknowledged, onCheckedChange = { acknowledged = it })
+                        Text("Yes, delete all ${folders.size} folders")
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onConfirm,
+                enabled = acknowledged || !plan.needsAcknowledgement,
+            ) {
+                Text("Delete")
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
+private fun ConfirmBulkFolderTransferDialog(
+    prompt: BulkFolderPrompt,
+    onDismiss: () -> Unit,
+    onConfirm: (TransferRequest) -> Unit,
+) {
+    var acknowledged by remember(prompt) { mutableStateOf(false) }
+    val verb = if (prompt.request.mode == TransferMode.MOVE) "Move" else "Copy"
+
+    HyperDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("$verb ${prompt.folderNames.size} folders?") },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+            ) {
+                Text("${verb.lowercase()} into ${prompt.targetName}, with everything inside them:")
+                prompt.folderNames.take(MAX_LISTED_NAMES).forEach { name -> Text("▸ $name") }
+                val extra = prompt.folderNames.size - MAX_LISTED_NAMES
+                if (extra > 0) Text("▸ and $extra more")
+                if (prompt.fileCount > 0) {
+                    Text("Plus ${prompt.fileCount} loose ${if (prompt.fileCount == 1) "file" else "files"}.")
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = acknowledged, onCheckedChange = { acknowledged = it })
+                    Text("Yes, ${verb.lowercase()} all ${prompt.folderNames.size} folders")
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(prompt.request) }, enabled = acknowledged) { Text(verb) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+private const val MAX_LISTED_NAMES = 10
+
+private fun countLabel(files: Int, folders: Int): String {
+    val filePart = if (files == 1) "1 file" else "$files files"
+    val folderPart = if (folders == 1) "1 subfolder" else "$folders subfolders"
+    return "$filePart, $folderPart"
 }
 
 @Composable
@@ -2180,7 +2375,7 @@ private fun ConfirmFilesIntoFolderDialog(
     )
 }
 
-private data class FolderStats(
+internal data class FolderStats(
     val directFiles: Int,
     val directFolders: Int,
     val totalFiles: Int,
@@ -2189,7 +2384,7 @@ private data class FolderStats(
 )
 
 /** Walks the tree iteratively; recursion would blow the stack on a deep folder. */
-private fun scanFolder(context: Context, uri: Uri): FolderStats {
+internal fun scanFolder(context: Context, uri: Uri): FolderStats {
     val direct = Storage.children(context, uri)
     var totalFiles = 0
     var totalFolders = 0
@@ -2342,6 +2537,7 @@ private fun ImageViewerScreen(
     directoryUri: Uri?,
     startStage: GalleryStage,
     sortOrder: SortOrder,
+    onUndoable: (UndoRecord?) -> Unit,
     onClose: () -> Unit,
 ) {
     var currentUri by rememberSaveable(startingUri) { mutableStateOf(startingUri) }
@@ -2530,7 +2726,8 @@ private fun ImageViewerScreen(
 
     fun deleteImages(targets: Set<Uri>) {
         scope.launch {
-            withContext(Dispatchers.IO) { targets.forEach { Storage.delete(activity, it) } }
+            val outcome = withContext(Dispatchers.IO) { deleteItems(activity, targets) }
+            onUndoable(UndoRecord("delete", trashed = outcome.trashed).takeIf { !it.isEmpty })
             val remaining = images.filterNot { it.uri in targets }
             selectedImages = emptySet()
             selectionMode = false

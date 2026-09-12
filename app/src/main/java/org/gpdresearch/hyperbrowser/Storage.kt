@@ -93,33 +93,34 @@ object Storage {
         documentFile(context, parentUri)?.createDirectory(name)?.toEntry()
     }
 
-    fun writeChild(context: Context, parentUri: Uri, name: String, mimeType: String, input: InputStream): Boolean {
+    /** Returns the URI of the written child, or null when the backend refused the write. */
+    fun writeChild(context: Context, parentUri: Uri, name: String, mimeType: String, input: InputStream): Uri? {
         android.util.Log.d("Storage", "writeChild: parentUri=$parentUri, name=$name, mimeType=$mimeType")
         if (DriveUris.isDrive(parentUri)) {
             android.util.Log.d("Storage", "Writing to Drive")
-            return DriveClient.upload(DriveUris.idOf(parentUri), name, mimeType, input)
+            return DriveClient.upload(DriveUris.idOf(parentUri), name, mimeType, input)?.uri
         }
         if (parentUri.scheme == ContentResolver.SCHEME_FILE) {
             // RawDocumentFile.createFile() re-appends the MIME extension, turning photo.jpg into photo.jpg.jpg.
-            val parent = parentUri.path?.let(::File) ?: return false
-            val destination = File(parent, safeFileName(name) ?: return false)
+            val parent = parentUri.path?.let(::File) ?: return null
+            val destination = File(parent, safeFileName(name) ?: return null)
             return runCatching {
                 destination.outputStream().use { output -> input.copyTo(output) }
-                true
+                Uri.fromFile(destination)
             }.onFailure {
                 android.util.Log.e("Storage", "Failed to write ${destination.path}", it)
                 destination.delete()
-            }.getOrDefault(false)
+            }.getOrNull()
         }
         android.util.Log.d("Storage", "Writing to local storage")
         val targetDir = documentFile(context, parentUri) ?: run {
             android.util.Log.e("Storage", "Failed to get target directory for $parentUri")
-            return false
+            return null
         }
         android.util.Log.d("Storage", "Target directory obtained: ${targetDir.uri}")
         val destination = targetDir.createFile(mimeType, name) ?: run {
             android.util.Log.e("Storage", "Failed to create file $name with mime type $mimeType")
-            return false
+            return null
         }
         android.util.Log.d("Storage", "File created: ${destination.uri}")
         val written = runCatching {
@@ -137,7 +138,30 @@ object Storage {
             destination.delete()
         }
         android.util.Log.d("Storage", "Write result: $written")
-        return written
+        return destination.uri.takeIf { written }
+    }
+
+    /**
+     * Relocates [uri] inside one backend. Cross-provider moves return null, as do providers that
+     * cannot move documents; callers fall back to copying or to a plain delete.
+     */
+    fun move(context: Context, uri: Uri, sourceParent: Uri, targetParent: Uri): Uri? {
+        if (DriveUris.isDrive(uri) != DriveUris.isDrive(targetParent)) return null
+        if (DriveUris.isDrive(uri)) {
+            return DriveClient.move(DriveUris.idOf(uri), DriveUris.idOf(targetParent), DriveUris.idOf(sourceParent))?.uri
+        }
+        if (uri.scheme == ContentResolver.SCHEME_FILE && targetParent.scheme == ContentResolver.SCHEME_FILE) {
+            val source = uri.path?.let(::File) ?: return null
+            val target = File(targetParent.path ?: return null, source.name)
+            if (target.exists()) return null
+            return if (source.renameTo(target)) Uri.fromFile(target) else null
+        }
+        if (uri.scheme != ContentResolver.SCHEME_CONTENT || targetParent.scheme != ContentResolver.SCHEME_CONTENT) return null
+        // moveDocument() only works inside a single provider, and only with a real source parent.
+        if (uri.authority != targetParent.authority || sourceParent.authority != uri.authority) return null
+        return runCatching {
+            DocumentsContract.moveDocument(context.contentResolver, uri, sourceParent, targetParent)
+        }.getOrNull()
     }
 
     fun delete(context: Context, uri: Uri): Boolean = if (DriveUris.isDrive(uri)) {

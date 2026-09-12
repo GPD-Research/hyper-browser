@@ -2,6 +2,28 @@
 
 Lean Android dual-pane file browser built with Kotlin and Jetpack Compose.
 
+## Version 3.1.0 (September 2026)
+
+### Commands follow the selection, not the arrow
+
+- Delete, rename, gallery and the other single-item commands act on whichever pane holds the
+  selection. Only copy and move read the transfer arrow, so a folder picked in the pane the arrow
+  points at is no longer deleted from the other side.
+
+### Warnings before wholesale changes
+
+- Deleting more than one folder at once lists each folder with the number of files and subfolders
+  inside it, and needs the "yes, delete all" box ticked. Deleting files stays a single tap.
+- Copying or moving more than one folder into a destination lists the folders and where they are
+  headed, and needs the same acknowledgement.
+
+### Undo
+
+- The last delete, copy or move can be undone from the command strip. Deleted items are parked in
+  a hidden `.HyperBrowserTrash` folder beside where they came from and put back on undo; undoing a
+  copy removes the copies. Backends that cannot move an item still delete it outright, and nothing
+  is offered to undo in that case.
+
 ## Version 3.0.2 (September 2026)
 
 ### Immersive image viewing
