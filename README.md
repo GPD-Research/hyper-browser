@@ -22,6 +22,12 @@ Lean Android dual-pane file browser built with Kotlin and Jetpack Compose.
   and TIFF were turned to match their tag.
 - Rotating a Google Drive image is not supported; copy it locally first.
 
+### The inspector and moving between images
+
+- The inspector closes whenever another image is shown — swiped to, tapped in the grid, or stepped
+  onto after a delete. It belongs to the file it was opened on: the next one may be a JPEG with no
+  inspector at all, and another RAW would otherwise be read at full resolution unasked.
+
 ### Coming back from the gallery
 
 - Closing the gallery selects the image that was on screen in the pane it was opened from, so a

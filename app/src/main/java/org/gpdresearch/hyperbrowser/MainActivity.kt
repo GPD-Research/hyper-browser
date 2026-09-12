@@ -2767,6 +2767,17 @@ private fun ImageViewerScreen(
     var showMinimap by rememberSaveable { mutableStateOf(true) }
     val scope = rememberCoroutineScope()
 
+    /**
+     * Moves to another image. The inspector belongs to the file it was opened on — the next one may
+     * have no pixels behind its preview at all, and even another RAW would be read at full
+     * resolution unasked — so it closes here, before the load for the new image is started.
+     */
+    fun showImage(uri: Uri) {
+        inspect = false
+        inspectCompressed = false
+        currentUri = uri
+    }
+
     val images by produceState(initialValue = emptyList<FileEntry>(), directoryUri, startingUri, listingRefresh, sortOrder) {
         value = withContext(Dispatchers.IO) {
             directoryUri?.let { dir ->
@@ -2783,7 +2794,7 @@ private fun ImageViewerScreen(
     // so leaving the grid has somewhere to go.
     LaunchedEffect(images) {
         if (images.none { it.uri == currentUri }) {
-            images.firstOrNull()?.let { currentUri = it.uri }
+            images.firstOrNull()?.let { showImage(it.uri) }
         }
     }
 
@@ -2932,7 +2943,7 @@ private fun ImageViewerScreen(
             index < 0 -> 0
             else -> (index + step + images.size) % images.size
         }
-        currentUri = images[nextIndex].uri
+        showImage(images[nextIndex].uri)
         resetTransform()
     }
 
@@ -2969,7 +2980,7 @@ private fun ImageViewerScreen(
             } else {
                 if (currentUri in targets) {
                     val index = images.indexOfFirst { it.uri == currentUri }
-                    currentUri = remaining[index.coerceIn(0, remaining.lastIndex)].uri
+                    showImage(remaining[index.coerceIn(0, remaining.lastIndex)].uri)
                 }
                 listingRefresh += 1
             }
@@ -3197,7 +3208,7 @@ private fun ImageViewerScreen(
                                     if (selectionMode) {
                                         selectedImages = if (picked) selectedImages - file.uri else selectedImages + file.uri
                                     } else {
-                                        currentUri = file.uri
+                                        showImage(file.uri)
                                         stage = GalleryStage.SINGLE
                                         resetTransform()
                                     }
