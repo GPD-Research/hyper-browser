@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hyper Browser — architecture</title>
+<meta name="description" content="How Hyper Browser is put together: a Compose UI over a single storage facade, and an image pipeline built to open a 500 MB TIFF on a phone.">
+<link rel="icon" href="store/play-icon-512.png">
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --line:#30363d; --ink:#e6edf3; --dim:#8b949e;
+    --green:#3fb950; --cyan:#39c5cf; --amber:#d29922; --violet:#a371f7; --pink:#f778ba;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--ink);font:14px/1.45 "Inter","Helvetica Neue",Arial,sans-serif;padding:40px;max-width:1560px;margin:0 auto}
+  .back{display:inline-block;color:var(--dim);text-decoration:none;font-size:13px;margin-bottom:18px}
+  .back:hover{color:var(--ink)}
+  h1{font-size:30px;letter-spacing:-.5px}
+  .sub{color:var(--dim);margin:6px 0 26px;font-size:14px}
+  .sub b{color:var(--green);font-weight:600}
+  .layer{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:16px 18px;margin-bottom:14px}
+  .layer > header{display:flex;align-items:baseline;gap:12px;margin-bottom:12px}
+  .layer h2{font-size:15px;text-transform:uppercase;letter-spacing:1.4px}
+  .layer .note{color:var(--dim);font-size:12.5px}
+  .row{display:flex;gap:12px;align-items:stretch}
+  .row > *{flex:1}
+  .card{border:1px solid var(--line);border-radius:9px;padding:11px 13px;background:#0f141b}
+  .card h3{font-size:13.5px;font-family:ui-monospace,"SF Mono",Menlo,monospace;margin-bottom:5px}
+  .card p{color:var(--dim);font-size:12.2px}
+  .card ul{color:var(--dim);font-size:12.2px;margin-left:15px}
+  .card li{margin-top:2px}
+  .g h3{color:var(--green)} .c h3{color:var(--cyan)} .a h3{color:var(--amber)}
+  .v h3{color:var(--violet)} .p h3{color:var(--pink)}
+  .g{border-color:#1f4d2b} .c{border-color:#164a4e} .a{border-color:#4d3c12} .v{border-color:#3b2a5e} .p{border-color:#55223b}
+  .arrow{text-align:center;color:var(--line);font-size:19px;margin:-6px 0 8px;letter-spacing:8px}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;background:#0b0f14;border:1px solid var(--line);border-radius:4px;padding:0 4px;color:#c9d1d9;font-size:11.6px}
+  .pipe{display:flex;align-items:center;gap:9px;flex-wrap:wrap;font-size:12.2px;color:var(--dim)}
+  .pipe .step{border:1px solid var(--line);border-radius:20px;padding:5px 11px;background:#0f141b;color:var(--ink);white-space:nowrap}
+  .pipe .sep{color:var(--line)}
+  .foot{display:flex;gap:12px;margin-top:6px}
+  .kv{font-size:12.2px;color:var(--dim)}
+  .kv b{color:var(--ink);font-weight:600}
+  .tag{display:inline-block;font-size:10.5px;letter-spacing:.6px;text-transform:uppercase;border:1px solid var(--line);border-radius:4px;padding:1px 6px;color:var(--dim);margin-left:6px;vertical-align:2px}
+  @media (max-width:900px){
+    body{padding:20px}
+    h1{font-size:24px}
+    .row{flex-wrap:wrap}
+    .row > *{flex:1 1 260px}
+    code{overflow-wrap:anywhere}
+  }
+  @media (max-width:620px){
+    .row{display:block}
+    .row > * + *{margin-top:10px}
+    .layer > header{display:block}
+    .pipe .step{white-space:normal}
+  }
+</style>
+</head>
+<body>
+
+<a class="back" href="index.html">← Hyper Browser</a>
+<h1>Hyper Browser — architecture</h1>
+<p class="sub">Android · Kotlin · Jetpack Compose · single activity, no DI framework, no repository layer.
+  <b>~7,900 lines</b> in 8 files: one UI file, one storage facade, one image decoder.</p>
+
+<div class="layer">
+  <header><h2>UI</h2><span class="note">Compose, all state hoisted into <code>HyperBrowserApp()</code> — no ViewModel; SharedPreferences is the only persistence</span></header>
+  <div class="row">
+    <div class="card g">
+      <h3>DirectoryPane ×2</h3>
+      <p><code>Pane.LEFT</code> / <code>Pane.RIGHT</code>, each with its own root, path stack, sort, selection and list state (<code>BrowserPaneState</code>, saved per pane).</p>
+    </div>
+    <div class="card g">
+      <h3>CommandStrip</h3>
+      <p>Full-height scrollable toolbar between the panes. <code>TransferDirection</code> drives copy/move only — delete, rename and gallery follow <code>SelectionInfo</code>, the pane that actually holds the selection.</p>
+    </div>
+    <div class="card g">
+      <h3>ImageViewerScreen</h3>
+      <p><code>GalleryStage</code> = GRID_SMALL (4 col, 192px) → GRID_MEDIUM (2 col, 640px) → SINGLE. Pinch moves between stages; in SINGLE it zooms, with pan clamped to the overflow the zoom creates.</p>
+    </div>
+    <div class="card g">
+      <h3>Dialogs</h3>
+      <p>Every destructive or ambiguous action is a dialog: delete plans with recursive counts, bulk-folder transfer, folder picker, EXIF, "Set image as", layout &amp; sort.</p>
+    </div>
+  </div>
+</div>
+
+<div class="arrow">▼ ▼ ▼</div>
+
+<div class="layer">
+  <header><h2>Domain</h2><span class="note">plain functions over <code>FileEntry</code> — plan first, then execute, so the UI can show what is about to happen</span></header>
+  <div class="row">
+    <div class="card c">
+      <h3>planTransfer() → TransferRequest</h3>
+      <p>Resolves direction, selection and destination into an explicit plan, classifies it (files-into-folder, folder-into-folder, bulk), and hands the UI a prompt to confirm before anything moves.</p>
+    </div>
+    <div class="card c">
+      <h3>buildDeletePlan() → DeletePlan</h3>
+      <p>Walks each target recursively and counts files/folders <em>before</em> the delete, so ">1 folder" can raise an itemized "are you sure".</p>
+    </div>
+    <div class="card c">
+      <h3>UndoRecord / .HyperBrowserTrash</h3>
+      <p>Delete moves into a hidden trash folder beside the original where the provider allows a move; copy/move record what they created. One step of undo.
+      <span class="tag">no undo cross-provider</span></p>
+    </div>
+  </div>
+</div>
+
+<div class="arrow">▼ ▼ ▼</div>
+
+<div class="layer">
+  <header><h2>Storage facade</h2><span class="note"><code>object Storage</code> — the single branch point in the app: <code>if (DriveUris.isDrive(uri)) … else …</code></span></header>
+  <div class="row">
+    <div class="card a" style="flex:1.15">
+      <h3>Storage</h3>
+      <p><code>entry · children · parent · mimeType · openInput · read</code>. Everything above this line sees only <code>FileEntry(uri, name, mimeType, size, …)</code> and never knows which backend it came from.</p>
+    </div>
+    <div class="card a">
+      <h3>SAF / local</h3>
+      <p><code>content://</code> tree + document URIs via <code>DocumentFile</code>. Seekable, so images decode by region straight off disk. Virtual documents are exported to a concrete MIME type first.</p>
+    </div>
+    <div class="card a">
+      <h3>DriveClient + DriveUris</h3>
+      <p>Drive REST v3 behind synthetic <code>gdrive://&lt;fileId&gt;</code> URIs. <b>Not seekable</b> — a file must be downloaded whole before a pixel can be decoded, which is the root of every Drive slowness.</p>
+    </div>
+    <div class="card a">
+      <h3>AppBackground / Wallpapers / ImageRotation</h3>
+      <p>Side channels to the platform: background copied into app storage, center-cropped <code>WallpaperManager.setBitmap</code>, and in-place rotation written as an EXIF tag rather than a re-encode.</p>
+    </div>
+  </div>
+</div>
+
+<div class="arrow">▼ ▼ ▼</div>
+
+<div class="layer">
+  <header><h2>Image pipeline</h2><span class="note">the part that earns its complexity: a 500 MB TIFF and a 60 MP RAW must open on a phone</span></header>
+
+  <div class="row" style="margin-bottom:12px">
+    <div class="card v" style="flex:1.25">
+      <h3>ByteSource — memory-mapped random access</h3>
+      <p>A local file is <code>mmap</code>'d (<code>BufferSource</code>), so a 500 MB TIFF is never on the heap. Drive has no equivalent: its bytes arrive as an <code>ArraySource</code> in RAM.</p>
+    </div>
+    <div class="card v">
+      <h3>RawImage — what BitmapFactory can't read</h3>
+      <p>TIFF and camera RAW (ARW, CR2, NEF, DNG, RAF). Parses the TIFF/IFD tree itself; every offset bounds-checked, every allocation capped, since these are untrusted bytes.</p>
+    </div>
+    <div class="card v">
+      <h3>SensorCodec — the RAW inspector</h3>
+      <p>Per-vendor sensor decoders (packed, ARW2, Nikon, lossless JPEG) + bilinear demosaic. The inspector's "compressed" toggle instead pulls the camera's largest embedded JPEG.</p>
+    </div>
+  </div>
+
+  <div class="card" style="background:#0b0f14">
+    <div class="pipe">
+      <span class="step">tap image</span><span class="sep">→</span>
+      <span class="step">overview decoded at <b>2× viewport</b></span><span class="sep">→</span>
+      <span class="step">zoom &gt; fit</span><span class="sep">→</span>
+      <span class="step">visible rect only, region-decoded at the scale it's shown</span><span class="sep">→</span>
+      <span class="step">memory stays flat at any zoom</span>
+    </div>
+    <div class="pipe" style="margin-top:9px">
+      <span class="kv"><b>Caps:</b> 16 MP drawable / 8192 px texture — past that Android's canvas refuses to draw.</span>
+      <span class="kv"><b>ThumbnailCache:</b> LRU sized to ⅙ of max heap, keyed <code>uri@px</code>.</span>
+    </div>
+  </div>
+
+  <div class="row" style="margin-top:12px">
+    <div class="card p">
+      <h3>DriveDownload — the 4.0.1 addition</h3>
+      <p>Because Drive can't seek, ≥200 MB files read in 256 KB chunks through <code>readReporting()</code>, publishing bytes-read on a <code>StateFlow</code>. The single view draws the cached thumbnail with a progress bar over it; Cancel flips a flag the read loop checks between chunks — cancelling the coroutine alone would leave the download running to the end.</p>
+    </div>
+    <div class="card p">
+      <h3>Why the grid is still fast on the same file</h3>
+      <p>Thumbnails sample aggressively (<code>inSampleSize</code>) and are cached, so even a 501 MB TIFF renders one with a short delay. Only the full-resolution single view pays the whole-file cost — which is why the fix is a progress bar, not a thumbnail cap.</p>
+    </div>
+  </div>
+</div>
+
+<div class="layer" style="margin-bottom:0">
+  <header><h2>Shape of the code</h2><span class="note">deliberately flat — the file sizes are the architecture diagram</span></header>
+  <div class="row">
+    <div class="card"><h3>MainActivity.kt · 4,563</h3><p>All UI, all app state, the gallery and the decode orchestration.</p></div>
+    <div class="card"><h3>RawImage.kt · 1,794</h3><p>TIFF/RAW container parsing and tiled rendering.</p></div>
+    <div class="card"><h3>SensorCodec.kt · 622</h3><p>Vendor sensor formats and demosaic.</p></div>
+    <div class="card"><h3>Storage.kt · 326</h3><p>Backend facade and MIME resolution.</p></div>
+    <div class="card"><h3>DriveClient.kt · 265</h3><p>Drive auth, listing, read/export.</p></div>
+    <div class="card"><h3>FileOperations · 114<br>ImageRotation · 141<br>AppBackground · 100</h3><p>Delete plans &amp; trash, EXIF rotation, wallpapers.</p></div>
+  </div>
+</div>
+
+</body>
+</html>
