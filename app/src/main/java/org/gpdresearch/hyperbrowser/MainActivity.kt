@@ -82,6 +82,7 @@ import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Compress
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.CreateNewFolder
@@ -2729,6 +2730,8 @@ private fun ImageViewerScreen(
     // The inspector shows the file's own pixels — TIFF at full resolution, RAW as sensor data —
     // instead of the embedded preview browsing uses.
     var inspect by rememberSaveable { mutableStateOf(false) }
+    // Within the inspector, the camera's own JPEG rather than the sensor data behind it.
+    var inspectCompressed by rememberSaveable { mutableStateOf(false) }
     var showMinimap by rememberSaveable { mutableStateOf(true) }
     val scope = rememberCoroutineScope()
 
@@ -2784,12 +2787,14 @@ private fun ImageViewerScreen(
     // Sensor data of a 40-megapixel frame takes seconds to decode; without this the previous
     // image sits there looking as though nothing happened.
     var loading by remember { mutableStateOf(false) }
-    LaunchedEffect(currentUri, stage, viewport, inspect) {
+    LaunchedEffect(currentUri, stage, viewport, inspect, inspectCompressed) {
         detail = null
         single = if (stage == GalleryStage.SINGLE) {
             loading = true
             try {
-                withContext(Dispatchers.IO) { loadSingleImage(activity, currentUri, viewport, inspect) }
+                withContext(Dispatchers.IO) {
+                    loadSingleImage(activity, currentUri, viewport, inspect, inspectCompressed)
+                }
             } finally {
                 loading = false
             }
@@ -2970,6 +2975,24 @@ private fun ImageViewerScreen(
                                 tint = if (inspect) MaterialTheme.colorScheme.primary else LocalContentColor.current,
                             ) {
                                 inspect = !inspect
+                                resetTransform()
+                            }
+                        }
+                        if (inspect && isRawFile) {
+                            GalleryAction(
+                                icon = Icons.Filled.Compress,
+                                description = if (inspectCompressed) {
+                                    "Show sensor data"
+                                } else {
+                                    "Show the camera's JPEG"
+                                },
+                                tint = if (inspectCompressed) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    LocalContentColor.current
+                                },
+                            ) {
+                                inspectCompressed = !inspectCompressed
                                 resetTransform()
                             }
                         }
@@ -3201,6 +3224,21 @@ private fun ImageViewerScreen(
                             Text(if (inspect) "Leave inspector" else "Inspect at full resolution")
                         }
                     }
+                    if (inspect && isRawFile) {
+                        Button(onClick = {
+                            inspectCompressed = !inspectCompressed
+                            resetTransform()
+                            showMenu = false
+                        }) {
+                            Text(
+                                if (inspectCompressed) {
+                                    "Show uncompressed sensor data"
+                                } else {
+                                    "Show compressed (camera JPEG)"
+                                },
+                            )
+                        }
+                    }
                     if (inspect) {
                         Button(onClick = { showMinimap = !showMinimap; showMenu = false }) {
                             Text(if (showMinimap) "Hide locator" else "Show locator")
@@ -3409,6 +3447,8 @@ private data class SingleImage(
     val tiff: RawImage.TiffImage? = null,
     /** Set when the inspector is showing undemosaiced sensor data. */
     val sensor: RawImage.SensorImage? = null,
+    /** Set when the inspector is showing the embedded JPEG; kept so crops can be region-decoded. */
+    val jpeg: ByteArray? = null,
     /** What the inspector is showing: sensor data, full-resolution TIFF or embedded preview. */
     val source: String? = null,
     /** Why the inspector could not show the file's own pixels, when it could not. */
@@ -3435,6 +3475,7 @@ private fun loadSingleImage(
     uri: Uri,
     viewport: IntSize = IntSize.Zero,
     inspect: Boolean = false,
+    compressed: Boolean = false,
 ): SingleImage? {
     val source = imageSource(activity, uri) ?: return null
 
@@ -3449,7 +3490,9 @@ private fun loadSingleImage(
     // The inspector runs before any other decode: both the platform decoder and decode() prefer
     // an embedded preview, and would hand back the very image the gallery already shows.
     if (inspect) {
-        sourceBytes()?.let { (byteSource, _) -> inspectorImage(byteSource, viewport)?.let { return it } }
+        sourceBytes()?.let { (byteSource, _) ->
+            inspectorImage(byteSource, viewport, compressed)?.let { return it }
+        }
     }
 
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -3510,7 +3553,10 @@ private fun loadSingleImage(
  * The unfiltered view of a file: sensor data for RAW, the full-resolution directory for TIFF.
  * The overview is only ever decoded to viewport size; everything sharper arrives as tiles.
  */
-private fun inspectorImage(byteSource: ByteSource, viewport: IntSize): SingleImage? {
+private fun inspectorImage(byteSource: ByteSource, viewport: IntSize, compressed: Boolean): SingleImage? {
+    if (compressed) {
+        compressedInspectorImage(byteSource, viewport)?.let { return it }
+    }
     RawImage.openSensor(byteSource)?.let { sensor ->
         val overview = sensor.render(viewport.width, viewport.height, null) ?: return@let
         return SingleImage(
@@ -3535,6 +3581,43 @@ private fun inspectorImage(byteSource: ByteSource, viewport: IntSize): SingleIma
         canTile = overview.width < tiff.width,
         tiff = tiff,
         source = "Full resolution ${tiff.width}\u00d7${tiff.height}",
+    )
+}
+
+/**
+ * The camera's own rendition of the frame: the largest JPEG in the file, decoded at its native
+ * resolution in full colour and kept whole so zooming pulls crops out of it rather than upscaling
+ * the overview. This is as good as the compressed data in the file gets.
+ */
+private fun compressedInspectorImage(byteSource: ByteSource, viewport: IntSize): SingleImage? {
+    val jpeg = RawImage.embeddedJpeg(byteSource) ?: return null
+    val fit = computeInSampleSize(
+        jpeg.width,
+        jpeg.height,
+        viewport.width.coerceAtLeast(1),
+        viewport.height.coerceAtLeast(1),
+    )
+    val sample = drawableSampleSize(jpeg.width, jpeg.height, fit)
+    val options = BitmapFactory.Options().apply {
+        inSampleSize = sample
+        inPreferredConfig = Bitmap.Config.ARGB_8888
+    }
+    val overview = runCatching {
+        BitmapFactory.decodeByteArray(jpeg.bytes, 0, jpeg.bytes.size, options)
+    }.getOrNull() ?: return null
+    val degrees = RawImage.orientationDegrees(byteSource)
+    val rotated = RawImage.rotate(overview, degrees)
+    val upright = degrees == 90 || degrees == 270
+    return SingleImage(
+        overview = rotated.asImageBitmap(),
+        width = if (upright) jpeg.height else jpeg.width,
+        height = if (upright) jpeg.width else jpeg.height,
+        sample = sample,
+        // Region decoding works in the JPEG's own orientation, so a rotated frame cannot be
+        // refined tile by tile without mapping every crop back through the rotation.
+        canTile = sample > 1 && degrees == 0,
+        jpeg = jpeg.bytes,
+        source = "Embedded JPEG ${jpeg.width}\u00d7${jpeg.height}",
     )
 }
 
@@ -3610,6 +3693,21 @@ private fun decodeRegion(
     image.tiff?.let { tiff ->
         return runCatching { tiff.render(viewport.width, viewport.height, region) }
             .getOrNull()?.asImageBitmap()
+    }
+    image.jpeg?.let { bytes ->
+        return runCatching {
+            val decoder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                BitmapRegionDecoder.newInstance(bytes, 0, bytes.size)
+            } else {
+                BitmapRegionDecoder.newInstance(bytes, 0, bytes.size, false)
+            } ?: return@runCatching null
+            try {
+                decoder.decodeRegion(region, BitmapFactory.Options().apply { inSampleSize = sample })
+                    ?.asImageBitmap()
+            } finally {
+                decoder.recycle()
+            }
+        }.getOrNull()
     }
     return runCatching {
         activity.contentResolver.openFileDescriptor(uri, "r")?.use { descriptor ->

@@ -10,6 +10,15 @@ Lean Android dual-pane file browser built with Kotlin and Jetpack Compose.
   selection. Only copy and move read the transfer arrow, so a folder picked in the pane the arrow
   points at is no longer deleted from the other side.
 
+### RAW inspector: compressed or uncompressed
+
+- Inspecting a RAW file, a second toolbar button switches between the sensor data (uncompressed,
+  the default) and the camera's own JPEG. The compressed view takes the largest JPEG in the file —
+  the best rendition the camera wrote — decodes it at its native resolution in full colour rather
+  than at viewport size, and keeps the JPEG so zooming pulls sharper crops out of it instead of
+  magnifying the overview.
+- The label names which one is on screen, e.g. `Embedded JPEG 6720×4480`.
+
 ### Warnings before wholesale changes
 
 - Deleting more than one folder at once lists each folder with the number of files and subfolders
