@@ -70,6 +70,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -82,6 +83,7 @@ import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Compress
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.CreateNewFolder
@@ -91,6 +93,7 @@ import androidx.compose.material.icons.filled.DriveFileRenameOutline
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Wallpaper
@@ -136,6 +139,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
@@ -292,6 +296,13 @@ private enum class GalleryStage(val columns: Int, val thumbnailPx: Int, val lowQ
  */
 private const val MAX_DRAWABLE_PIXELS = 16_000_000L
 private const val MAX_TEXTURE_EDGE = 8192
+
+/**
+ * How much finer than the viewport a fitted overview is decoded. Screen pixels are not the
+ * whole story: the fitted image is what a small zoom magnifies before a sharper tile has been
+ * decoded, and a downscaled render loses detail to sampling that this headroom buys back.
+ */
+private const val OVERVIEW_DETAIL = 2
 
 /** High enough to reach 1:1 pixels on a gigapixel source; tiles keep the memory cost flat. */
 private const val MAX_SINGLE_ZOOM = 64f
@@ -463,6 +474,7 @@ private const val PANE_LEFT = "left"
 private const val PANE_RIGHT = "right"
 private const val THEME_PREF = "app_theme"
 private const val LAYOUT_PREF = "layout_mode"
+private const val BACKGROUND_DIM_PREF = "background_dim"
 
 /** Keeps the browsed folder and the current selection across a rotation. */
 private val PaneStateSaver = listSaver<BrowserPaneState, String>(
@@ -595,6 +607,8 @@ private fun HyperBrowserApp() {
     var galleryDirectory by rememberSaveable { mutableStateOf<Uri?>(null) }
     // A chosen image opens on itself; a chosen folder opens on its contents.
     var galleryStage by rememberSaveable { mutableStateOf(GalleryStage.SINGLE) }
+    // Which pane the gallery was opened from, so closing it puts the selection back there.
+    var galleryPane by rememberSaveable { mutableStateOf(Pane.LEFT) }
     var showLayoutSettings by rememberSaveable { mutableStateOf(false) }
     var fileDisplayOptions by rememberSaveable(stateSaver = FileDisplayOptionsSaver) { mutableStateOf(FileDisplayOptions()) }
     var sortOptions by rememberSaveable(stateSaver = SortOptionsSaver) { mutableStateOf(SortOptions()) }
@@ -602,6 +616,13 @@ private fun HyperBrowserApp() {
     var showSortSettings by rememberSaveable { mutableStateOf(false) }
     var selectionPreviewVisible by rememberSaveable { mutableStateOf(true) }
     var selectionPreviewOffset by remember { mutableStateOf(Offset.Zero) }
+    // The image whose "set as" dialog is open, and the one currently behind the file tree.
+    var setAsUri by rememberSaveable { mutableStateOf<Uri?>(null) }
+    var background by remember { mutableStateOf<ImageBitmap?>(null) }
+    var dimBackground by rememberSaveable { mutableStateOf(prefs.getBoolean(BACKGROUND_DIM_PREF, true)) }
+    LaunchedEffect(Unit) {
+        background = withContext(Dispatchers.IO) { AppBackground.load(activity)?.asImageBitmap() }
+    }
     var renameTarget by rememberSaveable { mutableStateOf<Uri?>(null) }
     var renameValue by rememberSaveable { mutableStateOf("") }
     var newFolderParent by rememberSaveable { mutableStateOf<Uri?>(null) }
@@ -812,10 +833,27 @@ private fun HyperBrowserApp() {
         }
     }
 
-    fun openGallery(uri: Uri, directory: Uri?, stage: GalleryStage = GalleryStage.SINGLE) {
+    fun openGallery(uri: Uri, directory: Uri?, stage: GalleryStage = GalleryStage.SINGLE, pane: Pane = activePane) {
+        galleryPane = pane
         galleryDirectory = directory
         galleryStage = stage
         galleryUri = uri
+    }
+
+    /**
+     * Returns from the gallery onto whichever image was last on screen: it becomes the pane's
+     * selection, which is what the list then scrolls back to, so a swipe through a folder does
+     * not land the user back at the file they started from.
+     */
+    fun closeGallery(shown: Uri?) {
+        galleryUri = null
+        val target = shown ?: return
+        activePane = galleryPane
+        if (galleryPane == Pane.LEFT) {
+            if (leftPane.current == galleryDirectory) leftPane = leftPane.copy(selected = setOf(target))
+        } else {
+            if (rightPane.current == galleryDirectory) rightPane = rightPane.copy(selected = setOf(target))
+        }
     }
 
     fun openWith(uri: Uri) {
@@ -825,11 +863,11 @@ private fun HyperBrowserApp() {
         }
     }
 
-    fun openFileTarget(uri: Uri, directory: Uri?) {
+    fun openFileTarget(uri: Uri, directory: Uri?, pane: Pane) {
         scope.launch {
             val mime = withContext(Dispatchers.IO) { Storage.mimeType(activity, uri) }
             if (mime.startsWith("image/")) {
-                openGallery(uri, directory)
+                openGallery(uri, directory, pane = pane)
             } else {
                 launchExternalApp(activity, uri, mime)
             }
@@ -885,9 +923,19 @@ private fun HyperBrowserApp() {
                     startStage = galleryStage,
                     sortOrder = gallerySort,
                     onUndoable = { record -> undoRecord = record },
-                    onClose = { galleryUri = null },
+                    onClose = { shown -> closeGallery(shown) },
                 )
             } else {
+                // Drawn behind everything in the file tree, dimmed so rows stay readable over it.
+                background?.let { image ->
+                    Image(
+                        bitmap = image,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        alpha = if (dimBackground) BACKGROUND_ALPHA else 1f,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
                 // The strip runs the full height beside everything else, so the root and direction
                 // buttons sit centred over their own panes and the strip has room to grow.
                 Row(modifier = Modifier.fillMaxSize()) {
@@ -961,7 +1009,7 @@ private fun HyperBrowserApp() {
                                         commitRename()
                                         leftPane = leftPane.copy(current = directory, selected = emptySet())
                                     },
-                                    onOpenFile = { uri -> openFileTarget(uri, leftPane.current ?: leftPane.root) },
+                                    onOpenFile = { uri -> openFileTarget(uri, leftPane.current ?: leftPane.root, Pane.LEFT) },
                                     onOpenWith = { uri -> openWith(uri) },
                                     onShowProperties = { uri -> propertiesUri = uri },
                                     onMoveUp = {
@@ -1007,7 +1055,7 @@ private fun HyperBrowserApp() {
                                         commitRename()
                                         rightPane = rightPane.copy(current = directory, selected = emptySet())
                                     },
-                                    onOpenFile = { uri -> openFileTarget(uri, rightPane.current ?: rightPane.root) },
+                                    onOpenFile = { uri -> openFileTarget(uri, rightPane.current ?: rightPane.root, Pane.RIGHT) },
                                     onOpenWith = { uri -> openWith(uri) },
                                     onShowProperties = { uri -> propertiesUri = uri },
                                     onMoveUp = {
@@ -1049,6 +1097,7 @@ private fun HyperBrowserApp() {
                                     size = metrics.previewSize,
                                     offset = selectionPreviewOffset,
                                     onOffsetChange = { selectionPreviewOffset = it },
+                                    onTap = { setAsUri = selectedFile },
                                     onClose = { selectionPreviewVisible = false },
                                     modifier = Modifier
                                         .align(Alignment.BottomEnd)
@@ -1090,6 +1139,38 @@ private fun HyperBrowserApp() {
                     reversePrompt = null
                     transferDirection = if (transferDirection == TransferDirection.LEFT_TO_RIGHT) TransferDirection.RIGHT_TO_LEFT else TransferDirection.LEFT_TO_RIGHT
                     startOperation(mode, reversed = true)
+                },
+            )
+        }
+
+        val setAsTarget = setAsUri
+        if (setAsTarget != null) {
+            SetImageAsDialog(
+                hasBackground = background != null,
+                dim = dimBackground,
+                onDimChange = { dim ->
+                    dimBackground = dim
+                    prefs.edit().putBoolean(BACKGROUND_DIM_PREF, dim).apply()
+                },
+                onDismiss = { setAsUri = null },
+                onClearBackground = {
+                    setAsUri = null
+                    background = null
+                    scope.launch { withContext(Dispatchers.IO) { AppBackground.clear(activity) } }
+                },
+                onApply = { target ->
+                    setAsUri = null
+                    scope.launch {
+                        val outcome = withContext(Dispatchers.IO) {
+                            applyImageAs(activity, setAsTarget, target)
+                        }
+                        if (target.app) {
+                            background = withContext(Dispatchers.IO) {
+                                AppBackground.load(activity)?.asImageBitmap()
+                            }
+                        }
+                        Toast.makeText(activity, outcome, Toast.LENGTH_SHORT).show()
+                    }
                 },
             )
         }
@@ -1291,6 +1372,27 @@ private fun launchExternalApp(
     }
     runCatching { activity.startActivity(Intent.createChooser(intent, title)) }
         .onFailure { Toast.makeText(activity, "No app can open this file", Toast.LENGTH_SHORT).show() }
+}
+
+/** Enough of the image to see behind the file tree, dim enough for rows to stay legible. */
+private const val BACKGROUND_ALPHA = 0.15f
+
+/**
+ * Puts the image where the dialog asked for it. Both destinations take a decoded bitmap rather
+ * than the file: RAW and TIFF have no bytes the wallpaper service could read, and the file itself
+ * may be on a card or in Drive.
+ */
+private fun applyImageAs(activity: ComponentActivity, uri: Uri, target: WallpaperTarget): String {
+    val (width, height) = Wallpapers.desiredSize(activity)
+    val bitmap = loadBitmap(activity, uri, width, height)?.asAndroidBitmap()
+        ?: return "That image could not be read"
+    val done = mutableListOf<String>()
+    if (target.app && AppBackground.store(activity, bitmap)) done += "file browser"
+    if ((target.home || target.lock) && Wallpapers.apply(activity, bitmap, target.home, target.lock)) {
+        if (target.home) done += "home screen"
+        if (target.lock) done += "lock screen"
+    }
+    return if (done.isEmpty()) "Setting the image failed" else "Set as ${done.joinToString(", ")} background"
 }
 
 /**
@@ -1849,6 +1951,59 @@ private fun CommandButton(
     }
 }
 
+/** Where a tapped preview can be sent, chosen before anything is written. */
+@Composable
+private fun SetImageAsDialog(
+    hasBackground: Boolean,
+    dim: Boolean,
+    onDimChange: (Boolean) -> Unit,
+    onApply: (WallpaperTarget) -> Unit,
+    onClearBackground: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var choice by remember { mutableStateOf(WallpaperTarget.APP) }
+    HyperDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Set image as") },
+        text = {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                WallpaperTarget.entries.forEach { target ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { choice = target },
+                    ) {
+                        RadioButton(selected = choice == target, onClick = { choice = target })
+                        Text(target.label)
+                    }
+                }
+                Text(
+                    text = "File browser background",
+                    modifier = Modifier.padding(top = 8.dp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                listOf(true to "Dimmed behind the panes", false to "Full brightness").forEach { (dimmed, label) ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onDimChange(dimmed) },
+                    ) {
+                        RadioButton(selected = dim == dimmed, onClick = { onDimChange(dimmed) })
+                        Text(label)
+                    }
+                }
+                if (hasBackground) {
+                    TextButton(onClick = onClearBackground) { Text("Remove the file browser background") }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { onApply(choice) }) { Text("Apply") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
 @Composable
 private fun SelectionThumbnail(
     activity: ComponentActivity,
@@ -1856,6 +2011,7 @@ private fun SelectionThumbnail(
     size: Dp,
     offset: Offset,
     onOffsetChange: (Offset) -> Unit,
+    onTap: () -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -1877,7 +2033,9 @@ private fun SelectionThumbnail(
                     currentOffset += dragAmount
                     onOffsetChange(currentOffset)
                 }
-            },
+            }
+            // Declared after the drag so dragging the preview around does not count as a tap.
+            .clickable(onClick = onTap),
         contentAlignment = Alignment.Center,
     ) {
         if (bitmap != null) {
@@ -2713,7 +2871,8 @@ private fun ImageViewerScreen(
     startStage: GalleryStage,
     sortOrder: SortOrder,
     onUndoable: (UndoRecord?) -> Unit,
-    onClose: () -> Unit,
+    /** Carries the image last on screen, so the browser can come back to it. */
+    onClose: (Uri?) -> Unit,
 ) {
     var currentUri by rememberSaveable(startingUri) { mutableStateOf(startingUri) }
     var stage by rememberSaveable(startingUri) { mutableStateOf(startStage) }
@@ -2726,11 +2885,27 @@ private fun ImageViewerScreen(
     var selectionMode by rememberSaveable { mutableStateOf(false) }
     var selectedImages by remember { mutableStateOf(emptySet<Uri>()) }
     var pendingGalleryDelete by remember { mutableStateOf<Set<Uri>?>(null) }
+    var pendingRotate by remember { mutableStateOf<ImageRotation.Cost?>(null) }
+    // Bumped when the file on disk changes, so the viewer decodes it again.
+    var imageRevision by remember { mutableIntStateOf(0) }
     // The inspector shows the file's own pixels — TIFF at full resolution, RAW as sensor data —
     // instead of the embedded preview browsing uses.
     var inspect by rememberSaveable { mutableStateOf(false) }
+    // Within the inspector, the camera's own JPEG rather than the sensor data behind it.
+    var inspectCompressed by rememberSaveable { mutableStateOf(false) }
     var showMinimap by rememberSaveable { mutableStateOf(true) }
     val scope = rememberCoroutineScope()
+
+    /**
+     * Moves to another image. The inspector belongs to the file it was opened on — the next one may
+     * have no pixels behind its preview at all, and even another RAW would be read at full
+     * resolution unasked — so it closes here, before the load for the new image is started.
+     */
+    fun showImage(uri: Uri) {
+        inspect = false
+        inspectCompressed = false
+        currentUri = uri
+    }
 
     val images by produceState(initialValue = emptyList<FileEntry>(), directoryUri, startingUri, listingRefresh, sortOrder) {
         value = withContext(Dispatchers.IO) {
@@ -2748,7 +2923,7 @@ private fun ImageViewerScreen(
     // so leaving the grid has somewhere to go.
     LaunchedEffect(images) {
         if (images.none { it.uri == currentUri }) {
-            images.firstOrNull()?.let { currentUri = it.uri }
+            images.firstOrNull()?.let { showImage(it.uri) }
         }
     }
 
@@ -2784,12 +2959,14 @@ private fun ImageViewerScreen(
     // Sensor data of a 40-megapixel frame takes seconds to decode; without this the previous
     // image sits there looking as though nothing happened.
     var loading by remember { mutableStateOf(false) }
-    LaunchedEffect(currentUri, stage, viewport, inspect) {
+    LaunchedEffect(currentUri, stage, viewport, inspect, inspectCompressed, imageRevision) {
         detail = null
         single = if (stage == GalleryStage.SINGLE) {
             loading = true
             try {
-                withContext(Dispatchers.IO) { loadSingleImage(activity, currentUri, viewport, inspect) }
+                withContext(Dispatchers.IO) {
+                    loadSingleImage(activity, currentUri, viewport, inspect, inspectCompressed)
+                }
             } finally {
                 loading = false
             }
@@ -2895,8 +3072,29 @@ private fun ImageViewerScreen(
             index < 0 -> 0
             else -> (index + step + images.size) % images.size
         }
-        currentUri = images[nextIndex].uri
+        showImage(images[nextIndex].uri)
         resetTransform()
+    }
+
+    fun rotateCurrent() {
+        scope.launch {
+            val outcome = withContext(Dispatchers.IO) { ImageRotation.rotateClockwise(activity, currentUri) }
+            when (outcome) {
+                is ImageRotation.Outcome.Rotated -> {
+                    ThumbnailCache.forget(currentUri)
+                    resetTransform()
+                    imageRevision += 1
+                    listingRefresh += 1
+                }
+                is ImageRotation.Outcome.Failed ->
+                    Toast.makeText(activity, outcome.message, Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    fun requestRotate() {
+        val cost = ImageRotation.cost(activity, currentDoc?.size ?: 0L, isRawFile)
+        if (inspectable && cost.risky) pendingRotate = cost else rotateCurrent()
     }
 
     fun deleteImages(targets: Set<Uri>) {
@@ -2907,11 +3105,11 @@ private fun ImageViewerScreen(
             selectedImages = emptySet()
             selectionMode = false
             if (remaining.isEmpty()) {
-                onClose()
+                onClose(null)
             } else {
                 if (currentUri in targets) {
                     val index = images.indexOfFirst { it.uri == currentUri }
-                    currentUri = remaining[index.coerceIn(0, remaining.lastIndex)].uri
+                    showImage(remaining[index.coerceIn(0, remaining.lastIndex)].uri)
                 }
                 listingRefresh += 1
             }
@@ -2919,7 +3117,7 @@ private fun ImageViewerScreen(
     }
 
     // The system back gesture returns to the browser rather than leaving the app.
-    BackHandler(enabled = true) { onClose() }
+    BackHandler(enabled = true) { onClose(currentUri) }
 
     // A single image is shown on its own; the chrome is summoned by a tap, like the menu.
     val immersive = stage == GalleryStage.SINGLE && !showMenu
@@ -2934,7 +3132,7 @@ private fun ImageViewerScreen(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 AssistChip(
-                    onClick = onClose,
+                    onClick = { onClose(currentUri) },
                     label = { Text("File browser", fontSize = 10.sp) },
                     leadingIcon = { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null, Modifier.size(14.dp)) },
                     modifier = Modifier.height(28.dp),
@@ -2973,6 +3171,25 @@ private fun ImageViewerScreen(
                                 resetTransform()
                             }
                         }
+                        if (inspect && isRawFile) {
+                            GalleryAction(
+                                icon = Icons.Filled.Compress,
+                                description = if (inspectCompressed) {
+                                    "Show sensor data"
+                                } else {
+                                    "Show the camera's JPEG"
+                                },
+                                tint = if (inspectCompressed) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    LocalContentColor.current
+                                },
+                            ) {
+                                inspectCompressed = !inspectCompressed
+                                resetTransform()
+                            }
+                        }
+                        GalleryAction(Icons.Filled.RotateRight, "Rotate 90° clockwise") { requestRotate() }
                         GalleryAction(Icons.Filled.Wallpaper, "Set as wallpaper") {
                             setAsWallpaper(activity, currentUri, currentMimeType)
                         }
@@ -3120,7 +3337,7 @@ private fun ImageViewerScreen(
                                     if (selectionMode) {
                                         selectedImages = if (picked) selectedImages - file.uri else selectedImages + file.uri
                                     } else {
-                                        currentUri = file.uri
+                                        showImage(file.uri)
                                         stage = GalleryStage.SINGLE
                                         resetTransform()
                                     }
@@ -3190,7 +3407,7 @@ private fun ImageViewerScreen(
                         .padding(8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Button(onClick = onClose) { Text("Back to file browser") }
+                    Button(onClick = { onClose(currentUri) }) { Text("Back to file browser") }
                     Button(onClick = { stage = GalleryStage.GRID_SMALL; resetTransform(); showMenu = false }) { Text("Show thumbnails") }
                     if (inspectable) {
                         Button(onClick = {
@@ -3199,6 +3416,21 @@ private fun ImageViewerScreen(
                             showMenu = false
                         }) {
                             Text(if (inspect) "Leave inspector" else "Inspect at full resolution")
+                        }
+                    }
+                    if (inspect && isRawFile) {
+                        Button(onClick = {
+                            inspectCompressed = !inspectCompressed
+                            resetTransform()
+                            showMenu = false
+                        }) {
+                            Text(
+                                if (inspectCompressed) {
+                                    "Show uncompressed sensor data"
+                                } else {
+                                    "Show compressed (camera JPEG)"
+                                },
+                            )
                         }
                     }
                     if (inspect) {
@@ -3315,6 +3547,30 @@ private fun ImageViewerScreen(
                 )
             }
 
+            pendingRotate?.let { cost ->
+                HyperDialog(
+                    onDismissRequest = { pendingRotate = null },
+                    title = { Text("Rotate this file?") },
+                    text = {
+                        Text(
+                            "The turn itself only rewrites the orientation tag, but drawing this " +
+                                "file again afterwards is " + cost.summary +
+                                ". On this device that may take a long time, or run out of memory " +
+                                "and close the app.",
+                        )
+                    },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            pendingRotate = null
+                            rotateCurrent()
+                        }) { Text("Rotate") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { pendingRotate = null }) { Text("Cancel") }
+                    },
+                )
+            }
+
             if (pendingGalleryDelete != null) {
                 ConfirmDeleteDialog(
                     count = pendingGalleryDelete!!.size,
@@ -3409,6 +3665,8 @@ private data class SingleImage(
     val tiff: RawImage.TiffImage? = null,
     /** Set when the inspector is showing undemosaiced sensor data. */
     val sensor: RawImage.SensorImage? = null,
+    /** Set when the inspector is showing the embedded JPEG; kept so crops can be region-decoded. */
+    val jpeg: ByteArray? = null,
     /** What the inspector is showing: sensor data, full-resolution TIFF or embedded preview. */
     val source: String? = null,
     /** Why the inspector could not show the file's own pixels, when it could not. */
@@ -3435,6 +3693,7 @@ private fun loadSingleImage(
     uri: Uri,
     viewport: IntSize = IntSize.Zero,
     inspect: Boolean = false,
+    compressed: Boolean = false,
 ): SingleImage? {
     val source = imageSource(activity, uri) ?: return null
 
@@ -3449,7 +3708,9 @@ private fun loadSingleImage(
     // The inspector runs before any other decode: both the platform decoder and decode() prefer
     // an embedded preview, and would hand back the very image the gallery already shows.
     if (inspect) {
-        sourceBytes()?.let { (byteSource, _) -> inspectorImage(byteSource, viewport)?.let { return it } }
+        sourceBytes()?.let { (byteSource, _) ->
+            inspectorImage(byteSource, viewport, compressed)?.let { return it }
+        }
     }
 
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -3459,13 +3720,16 @@ private fun loadSingleImage(
         val options = BitmapFactory.Options().apply { inSampleSize = sample }
         val bitmap = source.open()?.use { BitmapFactory.decodeStream(it, null, options) }
         if (bitmap != null) {
+            val degrees = source.open()?.use { RawImage.orientationDegrees(it) } ?: 0
+            val turned = degrees == 90 || degrees == 270
             return SingleImage(
-                overview = bitmap.asImageBitmap(),
-                width = bounds.outWidth,
-                height = bounds.outHeight,
+                overview = RawImage.rotate(bitmap, degrees).asImageBitmap(),
+                width = if (turned) bounds.outHeight else bounds.outWidth,
+                height = if (turned) bounds.outWidth else bounds.outHeight,
                 sample = sample,
-                // Tiling only pays off once the overview itself had to be downscaled.
-                canTile = sample > 1 && source.seekable,
+                // Tiling only pays off once the overview itself had to be downscaled, and a
+                // region decoder works in the file's own orientation rather than the shown one.
+                canTile = sample > 1 && source.seekable && degrees == 0,
                 // Reached with the inspector on only when the file's own pixels could not be
                 // read; saying so beats passing a preview off as them.
                 source = if (inspect) "Embedded preview ${bounds.outWidth}\u00d7${bounds.outHeight}" else null,
@@ -3475,6 +3739,17 @@ private fun loadSingleImage(
     }
 
     val (byteSource, bytes) = sourceBytes() ?: return null
+
+    // A TIFF's own pixels beat the thumbnail a camera or scanner left in it: those previews are
+    // routinely a few hundred pixels wide, which is what made a large TIFF look soft full screen.
+    // RAW keeps preferring its embedded JPEG, whose full-size rendition is the point of it.
+    val tiffImage = RawImage.openTiff(byteSource)
+    if (tiffImage != null) {
+        val preview = RawImage.embeddedJpeg(byteSource)
+        if (preview == null || preview.width < minOf(tiffImage.width, viewport.width)) {
+            tiffSingleImage(tiffImage, byteSource, viewport, null)?.let { return it }
+        }
+    }
 
     val decoded = RawImage.decode(byteSource, viewport.width, viewport.height, false)
     if (decoded != null) {
@@ -3494,15 +3769,38 @@ private fun loadSingleImage(
         )
     }
 
-    val tiff = RawImage.openTiff(byteSource) ?: return null
-    val overview = tiff.render(viewport.width, viewport.height, null) ?: return null
+    return tiffImage?.let { tiffSingleImage(it, byteSource, viewport, null) }
+}
+
+/**
+ * A TIFF as the viewer holds it: an overview drawn from the smallest pyramid level that still
+ * covers the screen, plus the handle crops are pulled through. The overview is decoded at
+ * [OVERVIEW_DETAIL] times the viewport so the fitted image is sharp on a dense display and
+ * survives a little zoom before a tile arrives.
+ */
+private fun tiffSingleImage(
+    tiff: RawImage.TiffImage,
+    byteSource: ByteSource,
+    viewport: IntSize,
+    label: String?,
+): SingleImage? {
+    val overview = tiff.render(
+        viewport.width * OVERVIEW_DETAIL,
+        viewport.height * OVERVIEW_DETAIL,
+        null,
+    ) ?: return null
+    val degrees = RawImage.orientationDegrees(byteSource)
+    val turned = degrees == 90 || degrees == 270
     return SingleImage(
-        overview = overview.asImageBitmap(),
-        width = tiff.width,
-        height = tiff.height,
+        overview = RawImage.rotate(overview, degrees).asImageBitmap(),
+        width = if (turned) tiff.height else tiff.width,
+        height = if (turned) tiff.width else tiff.height,
         sample = (tiff.width / overview.width).coerceAtLeast(1),
-        canTile = overview.width < tiff.width,
+        // Crops are rendered in the file's own orientation, so a turned frame cannot be refined
+        // tile by tile without mapping every region back through the rotation.
+        canTile = overview.width < tiff.width && degrees == 0,
         tiff = tiff,
+        source = label,
     )
 }
 
@@ -3510,7 +3808,10 @@ private fun loadSingleImage(
  * The unfiltered view of a file: sensor data for RAW, the full-resolution directory for TIFF.
  * The overview is only ever decoded to viewport size; everything sharper arrives as tiles.
  */
-private fun inspectorImage(byteSource: ByteSource, viewport: IntSize): SingleImage? {
+private fun inspectorImage(byteSource: ByteSource, viewport: IntSize, compressed: Boolean): SingleImage? {
+    if (compressed) {
+        compressedInspectorImage(byteSource, viewport)?.let { return it }
+    }
     RawImage.openSensor(byteSource)?.let { sensor ->
         val overview = sensor.render(viewport.width, viewport.height, null) ?: return@let
         return SingleImage(
@@ -3526,15 +3827,48 @@ private fun inspectorImage(byteSource: ByteSource, viewport: IntSize): SingleIma
         )
     }
     val tiff = RawImage.openTiff(byteSource) ?: return null
-    val overview = tiff.render(viewport.width, viewport.height, null) ?: return null
+    return tiffSingleImage(
+        tiff,
+        byteSource,
+        viewport,
+        "Full resolution ${tiff.width}\u00d7${tiff.height}",
+    )
+}
+
+/**
+ * The camera's own rendition of the frame: the largest JPEG in the file, decoded at its native
+ * resolution in full colour and kept whole so zooming pulls crops out of it rather than upscaling
+ * the overview. This is as good as the compressed data in the file gets.
+ */
+private fun compressedInspectorImage(byteSource: ByteSource, viewport: IntSize): SingleImage? {
+    val jpeg = RawImage.embeddedJpeg(byteSource) ?: return null
+    val fit = computeInSampleSize(
+        jpeg.width,
+        jpeg.height,
+        viewport.width.coerceAtLeast(1),
+        viewport.height.coerceAtLeast(1),
+    )
+    val sample = drawableSampleSize(jpeg.width, jpeg.height, fit)
+    val options = BitmapFactory.Options().apply {
+        inSampleSize = sample
+        inPreferredConfig = Bitmap.Config.ARGB_8888
+    }
+    val overview = runCatching {
+        BitmapFactory.decodeByteArray(jpeg.bytes, 0, jpeg.bytes.size, options)
+    }.getOrNull() ?: return null
+    val degrees = RawImage.orientationDegrees(byteSource)
+    val rotated = RawImage.rotate(overview, degrees)
+    val upright = degrees == 90 || degrees == 270
     return SingleImage(
-        overview = overview.asImageBitmap(),
-        width = tiff.width,
-        height = tiff.height,
-        sample = (tiff.width / overview.width).coerceAtLeast(1),
-        canTile = overview.width < tiff.width,
-        tiff = tiff,
-        source = "Full resolution ${tiff.width}\u00d7${tiff.height}",
+        overview = rotated.asImageBitmap(),
+        width = if (upright) jpeg.height else jpeg.width,
+        height = if (upright) jpeg.width else jpeg.height,
+        sample = sample,
+        // Region decoding works in the JPEG's own orientation, so a rotated frame cannot be
+        // refined tile by tile without mapping every crop back through the rotation.
+        canTile = sample > 1 && degrees == 0,
+        jpeg = jpeg.bytes,
+        source = "Embedded JPEG ${jpeg.width}\u00d7${jpeg.height}",
     )
 }
 
@@ -3611,6 +3945,21 @@ private fun decodeRegion(
         return runCatching { tiff.render(viewport.width, viewport.height, region) }
             .getOrNull()?.asImageBitmap()
     }
+    image.jpeg?.let { bytes ->
+        return runCatching {
+            val decoder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                BitmapRegionDecoder.newInstance(bytes, 0, bytes.size)
+            } else {
+                BitmapRegionDecoder.newInstance(bytes, 0, bytes.size, false)
+            } ?: return@runCatching null
+            try {
+                decoder.decodeRegion(region, BitmapFactory.Options().apply { inSampleSize = sample })
+                    ?.asImageBitmap()
+            } finally {
+                decoder.recycle()
+            }
+        }.getOrNull()
+    }
     return runCatching {
         activity.contentResolver.openFileDescriptor(uri, "r")?.use { descriptor ->
             val decoder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -3665,7 +4014,10 @@ private fun loadBitmap(
             )
             if (lowQuality) inPreferredConfig = Bitmap.Config.RGB_565
         }
-        open()?.use { BitmapFactory.decodeStream(it, null, opts) }?.let { return it.asImageBitmap() }
+        open()?.use { BitmapFactory.decodeStream(it, null, opts) }?.let { bitmap ->
+            val degrees = open()?.use { RawImage.orientationDegrees(it) } ?: 0
+            return RawImage.rotate(bitmap, degrees).asImageBitmap()
+        }
     }
 
     // RAW and TIFF are invisible to BitmapFactory and go through the embedded preview decoder.
@@ -3690,6 +4042,11 @@ private object ThumbnailCache {
 
     fun put(uri: Uri, sizePx: Int, bitmap: ImageBitmap) {
         cache.put("$uri@$sizePx", bitmap)
+    }
+
+    /** Drops every size of one image, for when the file behind it has changed. */
+    fun forget(uri: Uri) {
+        cache.snapshot().keys.filter { it.startsWith("$uri@") }.forEach { cache.remove(it) }
     }
 }
 
@@ -3785,6 +4142,23 @@ private fun DirectoryPane(
     }
     val files = listing?.files ?: emptyList()
     val isLoading = currentUri != null && listing == null
+    val listState = rememberLazyListState()
+
+    // The list is rebuilt from nothing whenever the pane comes back — after the gallery, after a
+    // write — and would start at the top. Bringing the selection back into view is what keeps a
+    // file deep in a large folder from being lost; it is centred rather than scrolled to the
+    // edge, and a row already on screen is left where it is so a tap never shifts the list.
+    LaunchedEffect(files, state.selected) {
+        val target = state.selected.singleOrNull() ?: return@LaunchedEffect
+        val index = files.indexOfFirst { it.uri == target }
+        if (index < 0) return@LaunchedEffect
+        if (listState.layoutInfo.visibleItemsInfo.any { it.index == index }) return@LaunchedEffect
+        listState.scrollToItem(index)
+        val row = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }
+            ?: return@LaunchedEffect
+        val margin = (listState.layoutInfo.viewportSize.height - row.size) / 2
+        if (margin > 0) listState.scrollToItem(index, -margin)
+    }
 
     Column(
         modifier = modifier
@@ -3830,7 +4204,7 @@ private fun DirectoryPane(
                 )
             }
         } else {
-            LazyColumn(Modifier.fillMaxSize()) {
+            LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
                 items(files, key = { it.uri }) { file ->
                     val selected = file.uri in state.selected
                     val renaming = file.uri == renameTarget
