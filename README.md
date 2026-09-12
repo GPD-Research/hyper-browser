@@ -22,6 +22,15 @@ Lean Android dual-pane file browser built with Kotlin and Jetpack Compose.
   and TIFF were turned to match their tag.
 - Rotating a Google Drive image is not supported; copy it locally first.
 
+### Setting an image as a background
+
+- Tapping the preview box in file-tree mode opens a "Set image as" dialog: file browser background,
+  home screen, lock screen, home and lock, or all three. Choose one and apply, or cancel.
+- The file browser background is copied into app storage and survives restarts; the dialog offers to
+  remove it once one is set. It is drawn dimmed behind both panes.
+- Both destinations take the decoded image rather than the file, so RAW, TIFF and Drive images can
+  be used as wallpaper too.
+
 ### The inspector and moving between images
 
 - The inspector closes whenever another image is shown — swiped to, tapped in the grid, or stepped

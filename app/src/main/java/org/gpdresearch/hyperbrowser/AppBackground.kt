@@ -1,0 +1,71 @@
+package org.gpdresearch.hyperbrowser
+
+import android.app.WallpaperManager
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import java.io.File
+import java.io.FileOutputStream
+
+/** Where a chosen image can be shown. */
+enum class WallpaperTarget(val label: String) {
+    APP("File browser background"),
+    HOME("Home screen wallpaper"),
+    LOCK("Lock screen wallpaper"),
+    HOME_AND_LOCK("Home and lock screen"),
+    EVERYWHERE("File browser, home and lock screen"),
+    ;
+
+    val app: Boolean get() = this == APP || this == EVERYWHERE
+    val home: Boolean get() = this == HOME || this == HOME_AND_LOCK || this == EVERYWHERE
+    val lock: Boolean get() = this == LOCK || this == HOME_AND_LOCK || this == EVERYWHERE
+}
+
+/**
+ * The image drawn behind the file tree. It is copied into app storage rather than remembered by
+ * URI: the original may live on a card that is unmounted, in Drive, or behind a folder grant that
+ * is revoked, and a background that disappears is worse than none.
+ */
+object AppBackground {
+    private const val FILE_NAME = "app_background.jpg"
+
+    private fun file(context: Context): File = File(context.filesDir, FILE_NAME)
+
+    fun exists(context: Context): Boolean = file(context).exists()
+
+    fun store(context: Context, bitmap: Bitmap): Boolean = runCatching {
+        FileOutputStream(file(context)).use { out ->
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 92, out)
+        }
+    }.getOrDefault(false)
+
+    fun clear(context: Context) {
+        runCatching { file(context).delete() }
+    }
+
+    fun load(context: Context): Bitmap? {
+        val stored = file(context)
+        if (!stored.exists()) return null
+        return runCatching { BitmapFactory.decodeFile(stored.path) }.getOrNull()
+    }
+}
+
+/** Sets the system wallpaper, home and lock screen being separately addressable since Android 7. */
+object Wallpapers {
+    /** The size the launcher wants, so the image is not stored smaller than it will be drawn. */
+    fun desiredSize(context: Context): Pair<Int, Int> {
+        val manager = WallpaperManager.getInstance(context)
+        val width = manager.desiredMinimumWidth.takeIf { it > 0 }
+            ?: context.resources.displayMetrics.widthPixels
+        val height = manager.desiredMinimumHeight.takeIf { it > 0 }
+            ?: context.resources.displayMetrics.heightPixels
+        return width to height
+    }
+
+    fun apply(context: Context, bitmap: Bitmap, home: Boolean, lock: Boolean): Boolean = runCatching {
+        val manager = WallpaperManager.getInstance(context)
+        if (home) manager.setBitmap(bitmap, null, true, WallpaperManager.FLAG_SYSTEM)
+        if (lock) manager.setBitmap(bitmap, null, true, WallpaperManager.FLAG_LOCK)
+        true
+    }.getOrDefault(false)
+}

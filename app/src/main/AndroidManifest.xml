@@ -9,6 +9,9 @@
     <!-- Pre-scoped-storage writes for copy/move/delete targets on Android 9 and older. -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
 
+    <!-- Setting a chosen image as the home or lock screen wallpaper. -->
+    <uses-permission android:name="android.permission.SET_WALLPAPER" />
+
     <!-- Android 13+ granular media reads: listings, grid thumbnails and the gallery viewer. -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
