@@ -638,7 +638,7 @@ private fun HyperBrowserApp() {
     var background by remember { mutableStateOf<ImageBitmap?>(null) }
     var backgroundDim by rememberSaveable { mutableFloatStateOf(prefs.getFloat(BACKGROUND_DIM_PREF, 0f)) }
     LaunchedEffect(Unit) {
-        background = withContext(Dispatchers.IO) { AppBackground.load(activity)?.asImageBitmap() }
+        background = withContext(Dispatchers.IO) { loadBackground(activity) }
     }
     var renameTarget by rememberSaveable { mutableStateOf<Uri?>(null) }
     var renameValue by rememberSaveable { mutableStateOf("") }
@@ -679,6 +679,10 @@ private fun HyperBrowserApp() {
         value = selectedFile?.let { uri -> withContext(Dispatchers.IO) { Storage.mimeType(activity, uri) } } ?: ""
     }
     val isImageSelected = selectedMimeType.startsWith("image/")
+    // Closing the preview hides it for that image only; choosing another one brings it back.
+    LaunchedEffect(selectedFile) {
+        if (selectedFile != null) selectionPreviewVisible = true
+    }
     val isDirectorySelected by produceState(initialValue = false, selectedFile) {
         value = selectedFile?.let { uri ->
             withContext(Dispatchers.IO) { Storage.entry(activity, uri)?.isDirectory == true }
@@ -1190,9 +1194,7 @@ private fun HyperBrowserApp() {
                             applyImageAs(activity, setAsTarget, target)
                         }
                         if (target.app) {
-                            background = withContext(Dispatchers.IO) {
-                                AppBackground.load(activity)?.asImageBitmap()
-                            }
+                            background = withContext(Dispatchers.IO) { loadBackground(activity) }
                         }
                         Toast.makeText(activity, outcome, Toast.LENGTH_SHORT).show()
                     }
@@ -1397,6 +1399,12 @@ private fun launchExternalApp(
     }
     runCatching { activity.startActivity(Intent.createChooser(intent, title)) }
         .onFailure { Toast.makeText(activity, "No app can open this file", Toast.LENGTH_SHORT).show() }
+}
+
+/** The stored background, decoded no larger than the display it is drawn across. */
+private fun loadBackground(activity: ComponentActivity): ImageBitmap? {
+    val display = activity.resources.displayMetrics
+    return AppBackground.load(activity, display.widthPixels, display.heightPixels)?.asImageBitmap()
 }
 
 /** Where the dimming slider starts when dimming is first switched on. */
@@ -2139,11 +2147,19 @@ private fun SelectionThumbnail(
             Icon(Icons.Filled.Image, contentDescription = null)
         }
 
+        // Kept small: at the default touch target it covers a quarter of the preview, and a tap
+        // meant for the image lands on it instead.
         IconButton(
             onClick = onClose,
-            modifier = Modifier.align(Alignment.TopEnd),
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .size(28.dp),
         ) {
-            Icon(Icons.Filled.Close, contentDescription = "Close preview")
+            Icon(
+                Icons.Filled.Close,
+                contentDescription = "Close preview",
+                modifier = Modifier.size(16.dp),
+            )
         }
     }
 }
