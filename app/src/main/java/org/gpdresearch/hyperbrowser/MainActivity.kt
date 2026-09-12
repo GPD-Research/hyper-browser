@@ -933,7 +933,7 @@ private fun HyperBrowserApp() {
                         bitmap = image,
                         contentDescription = null,
                         contentScale = ContentScale.Crop,
-                        alpha = if (dimBackground) BACKGROUND_ALPHA else 1f,
+                        alpha = if (dimBackground) 1f - BACKGROUND_DIM else 1f,
                         modifier = Modifier.fillMaxSize(),
                     )
                 }
@@ -1381,8 +1381,8 @@ private fun launchExternalApp(
         .onFailure { Toast.makeText(activity, "No app can open this file", Toast.LENGTH_SHORT).show() }
 }
 
-/** Enough of the image to see behind the file tree, dim enough for rows to stay legible. */
-private const val BACKGROUND_ALPHA = 0.15f
+/** How far the background is taken down behind the file tree, so rows stay legible. */
+private const val BACKGROUND_DIM = 0.15f
 
 /**
  * Puts the image where the dialog asked for it. Both destinations take a decoded bitmap rather
