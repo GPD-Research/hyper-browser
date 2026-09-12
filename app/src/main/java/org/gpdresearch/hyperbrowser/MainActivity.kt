@@ -126,6 +126,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -921,8 +922,14 @@ private fun HyperBrowserApp() {
                         onToggleMulti = {
                             if (multiSelect) {
                                 multiSelect = false
-                                leftPane = leftPane.copy(selected = emptySet())
-                                rightPane = rightPane.copy(selected = emptySet())
+                                // The row tap that prompted this may still be inside its
+                                // double-tap window; clearing before it lands leaves its item
+                                // selected as though the mode had never been left.
+                                scope.launch {
+                                    awaitSelectionSettled()
+                                    leftPane = leftPane.copy(selected = emptySet())
+                                    rightPane = rightPane.copy(selected = emptySet())
+                                }
                             } else {
                                 multiSelect = true
                             }
@@ -1824,6 +1831,13 @@ private fun CommandButton(
             .clickable(enabled = enabled, onClick = onClick)
             .fillMaxWidth()
             .height(metrics.commandHeight)
+            .then(
+                if (active) {
+                    Modifier.border(1.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(6.dp))
+                } else {
+                    Modifier
+                },
+            )
             .padding(4.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
@@ -3785,6 +3799,10 @@ private fun DirectoryPane(
     }
     val files = listing?.files ?: emptyList()
     val isLoading = currentUri != null && listing == null
+    // A row tap is held back for the double-tap window, so it can land after the mode or the
+    // selection it was based on has already moved on; it reads the current ones instead.
+    val multiSelectNow by rememberUpdatedState(multiSelect)
+    val selectionNow by rememberUpdatedState(state.selected)
 
     Column(
         modifier = modifier
@@ -3862,11 +3880,13 @@ private fun DirectoryPane(
                             .combinedClickable(
                                 onClick = {
                                     onActivate()
+                                    val current = selectionNow
+                                    val alreadySelected = file.uri in current
                                     onSelectionChange(
                                         when {
-                                            multiSelect && selected -> state.selected - file.uri
-                                            multiSelect -> state.selected + file.uri
-                                            selected -> emptySet()
+                                            multiSelectNow && alreadySelected -> current - file.uri
+                                            multiSelectNow -> current + file.uri
+                                            alreadySelected -> emptySet()
                                             else -> setOf(file.uri)
                                         }
                                     )
