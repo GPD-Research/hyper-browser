@@ -295,7 +295,7 @@ private const val SELECTION_SETTLE_MS = 350L
 
 private enum class LayoutMode(val label: String) {
     PHONE("Phone"),
-    TABLET_BALANCED("Tablet balanced"),
+    TABLET_BALANCED("Tablet"),
 }
 
 /**
@@ -328,16 +328,18 @@ private fun metricsFor(mode: LayoutMode): LayoutMetrics = when (mode) {
         paneHeaderSize = 12.sp,
         activePaneWeight = 1f,
     )
+    // Only the controls grow with the screen. List text and row padding stay close to phone
+    // density: a tablet is meant to show more of each tree, not the same rows written larger.
     LayoutMode.TABLET_BALANCED -> LayoutMetrics(
-        stripWidth = 92.dp,
+        stripWidth = 80.dp,
         previewSize = 288.dp,
-        commandHeight = 86.dp,
-        commandIcon = 30.dp,
-        commandLabel = 13.sp,
-        rowIcon = 22.dp,
-        rowFontSize = 16.sp,
-        rowPadding = 9.dp,
-        paneHeaderSize = 16.sp,
+        commandHeight = 72.dp,
+        commandIcon = 26.dp,
+        commandLabel = 11.sp,
+        rowIcon = 16.dp,
+        rowFontSize = 13.sp,
+        rowPadding = 5.dp,
+        paneHeaderSize = 13.sp,
         activePaneWeight = 1f,
     )
 }
