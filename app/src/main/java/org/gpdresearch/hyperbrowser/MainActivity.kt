@@ -1368,7 +1368,7 @@ private fun launchExternalApp(
 }
 
 /** Enough of the image to see behind the file tree, dim enough for rows to stay legible. */
-private const val BACKGROUND_ALPHA = 0.3f
+private const val BACKGROUND_ALPHA = 0.15f
 
 /**
  * Puts the image where the dialog asked for it. Both destinations take a decoded bitmap rather
