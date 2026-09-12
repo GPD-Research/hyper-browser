@@ -33,6 +33,9 @@ Lean Android dual-pane file browser built with Kotlin and Jetpack Compose.
 - The preview that follows a selected image is twice its old size in phone mode and three times it
   in tablet mode, and is decoded at that size rather than upscaled. The "tablet wide" layout mode
   is gone; the two remaining modes are phone and tablet.
+- The root button above each pane shows the full path, right-aligned and truncated from the left,
+  so the folder you are actually in stays visible as the path deepens. Shared storage is named
+  "Internal Storage" rather than the "0" it is called on disk.
 - Tablet mode enlarges the controls only. The file lists keep the same text size and row height as
   phone mode, so a larger screen shows more of each tree instead of the same rows written larger.
 

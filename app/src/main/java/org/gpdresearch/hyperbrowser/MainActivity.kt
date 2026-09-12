@@ -52,6 +52,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -103,6 +104,7 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalContentColor
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
@@ -144,6 +146,7 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -296,6 +299,8 @@ private const val MAX_SINGLE_ZOOM = 64f
  * touch older than this has had its window and the selection it makes has landed.
  */
 private const val SELECTION_SETTLE_MS = 450L
+
+private const val INTERNAL_STORAGE_LABEL = "Internal Storage"
 
 private enum class LayoutMode(val label: String) {
     PHONE("Phone"),
@@ -1466,8 +1471,44 @@ internal fun nextAvailableName(takenNames: MutableSet<String>, preferredName: St
     }
 }
 
-private fun resolveDisplayPath(context: Context, uri: Uri): String =
-    Storage.entry(context, uri)?.name ?: uri.lastPathSegment ?: "unknown"
+/**
+ * The whole path rather than the last folder name, so a pane says where it is and not merely what
+ * it is in. The shared storage root is named "0" on disk, which tells the user nothing.
+ */
+private fun resolveDisplayPath(context: Context, uri: Uri): String {
+    if (DriveUris.isDrive(uri)) {
+        val name = Storage.entry(context, uri)?.name.orEmpty()
+        return if (name.isBlank()) "Google Drive" else "Google Drive/$name"
+    }
+    if (uri.scheme == ContentResolver.SCHEME_FILE) {
+        return uri.path?.let(::labelForFilePath) ?: INTERNAL_STORAGE_LABEL
+    }
+    val documentId = runCatching {
+        if (DocumentsContract.isDocumentUri(context, uri)) {
+            DocumentsContract.getDocumentId(uri)
+        } else {
+            DocumentsContract.getTreeDocumentId(uri)
+        }
+    }.getOrNull()
+    if (documentId != null) {
+        val volume = documentId.substringBefore(':', "")
+        val relative = documentId.substringAfter(':', "").trim('/')
+        val root = if (volume.isBlank() || volume == "primary") INTERNAL_STORAGE_LABEL else volume
+        return if (relative.isEmpty()) root else "$root/$relative"
+    }
+    return Storage.entry(context, uri)?.name ?: uri.lastPathSegment ?: "unknown"
+}
+
+private fun labelForFilePath(path: String): String {
+    val trimmed = path.trimEnd('/')
+    val emulatedRoot = Regex("^/storage/emulated/\\d+").find(trimmed)?.value
+        ?: "/sdcard".takeIf { trimmed == it || trimmed.startsWith("$it/") }
+    if (emulatedRoot != null) {
+        val relative = trimmed.removePrefix(emulatedRoot).trim('/')
+        return if (relative.isEmpty()) INTERNAL_STORAGE_LABEL else "$INTERNAL_STORAGE_LABEL/$relative"
+    }
+    return trimmed.ifEmpty { "/" }
+}
 
 private fun isImageMimeType(value: String): Boolean = value.startsWith("image/")
 
@@ -1542,6 +1583,43 @@ private fun formatBytes(size: Long): String {
     return String.format("%.1f %s", value, units[index])
 }
 
+/**
+ * Truncates from the left and sits against the right edge, so the deepest folder — the part that
+ * says where the pane is — stays on screen however long the path in front of it grows.
+ */
+@Composable
+private fun PathLabel(path: String) {
+    val measurer = rememberTextMeasurer()
+    val style = LocalTextStyle.current.copy(fontSize = 10.sp)
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        val available = constraints.maxWidth
+        val shown = remember(path, available, style) {
+            fun fits(candidate: String) =
+                measurer.measure(candidate, style, softWrap = false, maxLines = 1).size.width <= available
+            if (fits(path)) {
+                path
+            } else {
+                // Longest suffix that still fits, found by halving rather than character by character.
+                var low = 0
+                var high = path.length
+                while (low < high) {
+                    val mid = (low + high) / 2
+                    if (fits("…" + path.substring(mid))) high = mid else low = mid + 1
+                }
+                "…" + path.substring(low)
+            }
+        }
+        Text(
+            text = shown,
+            style = style,
+            softWrap = false,
+            maxLines = 1,
+            textAlign = TextAlign.End,
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
+}
+
 @Composable
 private fun MinimalTransferMenu(
     direction: TransferDirection,
@@ -1561,7 +1639,7 @@ private fun MinimalTransferMenu(
         ) {
             AssistChip(
                 onClick = onChooseLeftRoot,
-                label = { Text(leftLabel, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                label = { PathLabel(leftLabel) },
                 leadingIcon = { Icon(Icons.Filled.FolderOpen, contentDescription = null, Modifier.size(14.dp)) },
                 modifier = Modifier.weight(1f),
             )
@@ -1583,7 +1661,7 @@ private fun MinimalTransferMenu(
 
             AssistChip(
                 onClick = onChooseRightRoot,
-                label = { Text(rightLabel, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                label = { PathLabel(rightLabel) },
                 leadingIcon = { Icon(Icons.Filled.FolderOpen, contentDescription = null, Modifier.size(14.dp)) },
                 modifier = Modifier.weight(1f),
             )
