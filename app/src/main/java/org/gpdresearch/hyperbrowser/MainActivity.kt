@@ -348,6 +348,9 @@ private data class LayoutMetrics(
     val commandIcon: Dp,
     val commandLabel: TextUnit,
     val rowIcon: Dp,
+    // The gap belongs to the row's select-and-preview area: the name itself opens the item, so the
+    // wider the gap, the easier the icon side is to hit without opening anything.
+    val rowIconGap: Dp,
     val rowFontSize: TextUnit,
     val rowPadding: Dp,
     val paneHeaderSize: TextUnit,
@@ -361,7 +364,8 @@ private fun metricsFor(mode: LayoutMode): LayoutMetrics = when (mode) {
         commandHeight = 60.dp,
         commandIcon = 20.dp,
         commandLabel = 9.sp,
-        rowIcon = 14.dp,
+        rowIcon = 20.dp,
+        rowIconGap = 14.dp,
         rowFontSize = 12.sp,
         rowPadding = 4.dp,
         paneHeaderSize = 12.sp,
@@ -375,7 +379,8 @@ private fun metricsFor(mode: LayoutMode): LayoutMetrics = when (mode) {
         commandHeight = 72.dp,
         commandIcon = 26.dp,
         commandLabel = 11.sp,
-        rowIcon = 14.dp,
+        rowIcon = 20.dp,
+        rowIconGap = 14.dp,
         rowFontSize = 12.sp,
         rowPadding = 4.dp,
         paneHeaderSize = 12.sp,
@@ -4542,7 +4547,7 @@ private fun DirectoryPane(
                                     keyboardActions = KeyboardActions(onDone = { onCommitRename() }),
                                     modifier = Modifier
                                         .weight(1f)
-                                        .padding(start = 6.dp)
+                                        .padding(start = metrics.rowIconGap)
                                         .focusRequester(focusRequester),
                                 )
                                 TextButton(onClick = onCommitRename, contentPadding = PaddingValues(6.dp)) {
@@ -4552,7 +4557,7 @@ private fun DirectoryPane(
                                 Text(
                                     text = file.name,
                                     modifier = Modifier
-                                        .padding(start = 6.dp)
+                                        .padding(start = metrics.rowIconGap)
                                         .combinedClickable(
                                             onClick = {
                                                 onActivate()
