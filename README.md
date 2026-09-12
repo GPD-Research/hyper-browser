@@ -13,6 +13,16 @@ Lean Android dual-pane file browser built with Kotlin and Jetpack Compose.
   be taken to solid black, next to a preview of the image at that level. The file tree behind the
   dialog follows the slider as it moves, and the amount is remembered across restarts.
 
+### Panning a zoomed image
+
+- Panning is limited to what the zoom actually hides: the image stops when an edge reaches the
+  viewport, so a nearly-fitted image barely moves and a fitted one does not move at all. It could
+  previously be dragged anywhere on screen at any zoom, which is what made zooming back out feel
+  unpredictable.
+- With no room left to pan sideways, a horizontal drag is read as a swipe to the next image again,
+  rather than only below a fixed zoom level. Pinching back out below 1.08x settles exactly on the
+  fitted, centred image.
+
 ## Version 4.0.0 (September 2026)
 
 ### Rotate

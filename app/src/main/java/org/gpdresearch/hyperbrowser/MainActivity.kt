@@ -174,6 +174,7 @@ import com.google.android.gms.common.api.ApiException
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.floor
+import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
@@ -308,6 +309,9 @@ private const val OVERVIEW_DETAIL = 2
 
 /** High enough to reach 1:1 pixels on a gigapixel source; tiles keep the memory cost flat. */
 private const val MAX_SINGLE_ZOOM = 64f
+
+/** Zooming back out below this settles on the fitted image instead of a nearly-fitted one. */
+private const val SINGLE_FIT_SNAP = 1.08f
 
 /**
  * A row tap turns into a selection one double-tap timeout (300ms) after the finger lifts, so a
@@ -3109,6 +3113,26 @@ private fun ImageViewerScreen(
         offset = Offset.Zero
     }
 
+    /** How far the image can be dragged before an edge would come inside the viewport. */
+    fun panRoom(atScale: Float): Offset {
+        val image = single ?: return Offset.Zero
+        val width = viewport.width.toFloat()
+        val height = viewport.height.toFloat()
+        if (width <= 0f || height <= 0f) return Offset.Zero
+        val fit = min(width / image.width, height / image.height) * atScale
+        return Offset(
+            x = max(0f, (image.width * fit - width) / 2f),
+            y = max(0f, (image.height * fit - height) / 2f),
+        )
+    }
+
+    // At the fitted size there is nothing hidden to drag towards, so panning gives way entirely
+    // and a horizontal drag stays a swipe to the next image.
+    fun clampPan(candidate: Offset, atScale: Float): Offset {
+        val room = panRoom(atScale)
+        return Offset(candidate.x.coerceIn(-room.x, room.x), candidate.y.coerceIn(-room.y, room.y))
+    }
+
     fun zoomIn() {
         when (stage) {
             GalleryStage.GRID_SMALL -> stage = GalleryStage.GRID_MEDIUM
@@ -3120,7 +3144,7 @@ private fun ImageViewerScreen(
                 val next = (scale * 2f).coerceAtMost(maxZoom)
                 // Pan is applied after the zoom, so it has to track it or the view jumps to a
                 // different part of the image on every step.
-                offset *= next / scale
+                offset = clampPan(offset * (next / scale), next)
                 scale = next
             }
         }
@@ -3130,7 +3154,7 @@ private fun ImageViewerScreen(
         when (stage) {
             GalleryStage.SINGLE -> if (scale > 1.05f) {
                 val next = (scale / 2f).coerceAtLeast(1f)
-                offset = if (next <= 1f) Offset.Zero else offset * (next / scale)
+                offset = clampPan(offset * (next / scale), next)
                 scale = next
             } else {
                 stage = GalleryStage.GRID_MEDIUM
@@ -3313,16 +3337,18 @@ private fun ImageViewerScreen(
                         .onSizeChanged { viewport = it }
                         .pointerInput(images, currentUri) {
                             detectImageGestures(
-                                currentScale = { scale },
+                                canSwipe = { panRoom(scale).x < 1f },
                                 onTransform = { pan, zoom ->
                                     val next = scale * zoom
                                     if (next < 0.85f) {
                                         stage = GalleryStage.GRID_MEDIUM
-                                        scale = 1f
-                                        offset = Offset.Zero
+                                        resetTransform()
                                     } else {
-                                        scale = next.coerceIn(1f, maxZoom)
-                                        if (scale > 1f) offset += pan
+                                        // Anything this close to fitting is treated as fitted, so
+                                        // pinching out lands on a centred image rather than one
+                                        // held slightly off-centre with nowhere useful to drag.
+                                        scale = if (next < SINGLE_FIT_SNAP) 1f else next.coerceAtMost(maxZoom)
+                                        offset = clampPan(offset + pan, scale)
                                     }
                                 },
                                 onSwipe = { step -> showRelative(step) },
@@ -3679,7 +3705,7 @@ private fun GalleryAction(
  * [onSwipe] gets -1 for the previous image and +1 for the next.
  */
 private suspend fun PointerInputScope.detectImageGestures(
-    currentScale: () -> Float,
+    canSwipe: () -> Boolean,
     onTransform: (pan: Offset, zoom: Float) -> Unit,
     onSwipe: (Int) -> Unit,
 ) {
@@ -3699,7 +3725,7 @@ private suspend fun PointerInputScope.detectImageGestures(
         } while (event.changes.any { it.pressed })
 
         val horizontal = abs(travel.x) > abs(travel.y) && abs(travel.x) > swipeThreshold
-        if (!pinched && currentScale() <= 1.02f && horizontal) {
+        if (!pinched && canSwipe() && horizontal) {
             onSwipe(if (travel.x < 0) 1 else -1)
         }
     }
