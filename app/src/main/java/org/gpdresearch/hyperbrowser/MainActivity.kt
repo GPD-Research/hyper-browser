@@ -314,6 +314,12 @@ private const val MAX_SINGLE_ZOOM = 64f
 private const val SINGLE_FIT_SNAP = 1.08f
 
 /**
+ * A Drive file cannot be read a region at a time: the whole thing is downloaded into memory before
+ * a pixel can be decoded. Past this size that wait is long enough to be worth warning about.
+ */
+private const val LARGE_DRIVE_IMAGE_BYTES = 200L * 1024 * 1024
+
+/**
  * A row tap turns into a selection one double-tap timeout (300ms) after the finger lifts, so a
  * touch older than this has had its window and the selection it makes has landed.
  */
@@ -3036,12 +3042,20 @@ private fun ImageViewerScreen(
     var single by remember { mutableStateOf<SingleImage?>(null) }
     var detail by remember { mutableStateOf<DetailTile?>(null) }
     var viewport by remember { mutableStateOf(IntSize.Zero) }
+    // Asked once per image: a second prompt on the way back from the grid would only be in the way.
+    var acceptedLargeDrive by remember { mutableStateOf(emptySet<Uri>()) }
+    val largeDriveImage = currentDoc?.takeIf {
+        stage == GalleryStage.SINGLE &&
+            DriveUris.isDrive(it.uri) &&
+            it.size >= LARGE_DRIVE_IMAGE_BYTES &&
+            it.uri !in acceptedLargeDrive
+    }
     // Sensor data of a 40-megapixel frame takes seconds to decode; without this the previous
     // image sits there looking as though nothing happened.
     var loading by remember { mutableStateOf(false) }
-    LaunchedEffect(currentUri, stage, viewport, inspect, inspectCompressed, imageRevision) {
+    LaunchedEffect(currentUri, stage, viewport, inspect, inspectCompressed, imageRevision, largeDriveImage) {
         detail = null
-        single = if (stage == GalleryStage.SINGLE) {
+        single = if (stage == GalleryStage.SINGLE && largeDriveImage == null) {
             loading = true
             try {
                 withContext(Dispatchers.IO) {
@@ -3645,6 +3659,29 @@ private fun ImageViewerScreen(
                     },
                     confirmButton = {
                         TextButton(onClick = { imageActionUri = null }) { Text("Close") }
+                    },
+                )
+            }
+
+            largeDriveImage?.let { entry ->
+                HyperDialog(
+                    onDismissRequest = { onClose(currentUri) },
+                    title = { Text("Open this from Drive?") },
+                    text = {
+                        Text(
+                            "${entry.name} is ${formatBytes(entry.size)}, and a Drive file has to " +
+                                "be downloaded in full before any of it can be shown. Copying it " +
+                                "to local storage first and opening it from there is usually much " +
+                                "faster, and only pays that cost once.",
+                        )
+                    },
+                    confirmButton = {
+                        TextButton(onClick = { acceptedLargeDrive = acceptedLargeDrive + entry.uri }) {
+                            Text("Open anyway")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { onClose(currentUri) }) { Text("Back to the files") }
                     },
                 )
             }

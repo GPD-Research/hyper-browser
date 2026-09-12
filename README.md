@@ -13,6 +13,15 @@ Lean Android dual-pane file browser built with Kotlin and Jetpack Compose.
   be taken to solid black, next to a preview of the image at that level. The file tree behind the
   dialog follows the slider as it moves, and the amount is remembered across restarts.
 
+### Large Google Drive images
+
+- Opening a Drive image of 200 MB or more in the viewer asks first. A Drive file cannot be read a
+  piece at a time, so the whole thing is downloaded into memory before anything appears, and a
+  large TIFF stalls the gallery for as long as that takes.
+- The prompt names the file and its size and suggests copying it to local storage first, where it
+  is read from disk and tiled like any other file. Opening it anyway is one tap, and is remembered
+  for that image.
+
 ### Panning a zoomed image
 
 - Panning is limited to what the zoom actually hides: the image stops when an edge reaches the
