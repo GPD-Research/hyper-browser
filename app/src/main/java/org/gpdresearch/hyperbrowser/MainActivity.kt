@@ -474,6 +474,7 @@ private const val PANE_LEFT = "left"
 private const val PANE_RIGHT = "right"
 private const val THEME_PREF = "app_theme"
 private const val LAYOUT_PREF = "layout_mode"
+private const val BACKGROUND_DIM_PREF = "background_dim"
 
 /** Keeps the browsed folder and the current selection across a rotation. */
 private val PaneStateSaver = listSaver<BrowserPaneState, String>(
@@ -618,6 +619,7 @@ private fun HyperBrowserApp() {
     // The image whose "set as" dialog is open, and the one currently behind the file tree.
     var setAsUri by rememberSaveable { mutableStateOf<Uri?>(null) }
     var background by remember { mutableStateOf<ImageBitmap?>(null) }
+    var dimBackground by rememberSaveable { mutableStateOf(prefs.getBoolean(BACKGROUND_DIM_PREF, true)) }
     LaunchedEffect(Unit) {
         background = withContext(Dispatchers.IO) { AppBackground.load(activity)?.asImageBitmap() }
     }
@@ -930,7 +932,7 @@ private fun HyperBrowserApp() {
                         bitmap = image,
                         contentDescription = null,
                         contentScale = ContentScale.Crop,
-                        alpha = BACKGROUND_ALPHA,
+                        alpha = if (dimBackground) BACKGROUND_ALPHA else 1f,
                         modifier = Modifier.fillMaxSize(),
                     )
                 }
@@ -1145,6 +1147,11 @@ private fun HyperBrowserApp() {
         if (setAsTarget != null) {
             SetImageAsDialog(
                 hasBackground = background != null,
+                dim = dimBackground,
+                onDimChange = { dim ->
+                    dimBackground = dim
+                    prefs.edit().putBoolean(BACKGROUND_DIM_PREF, dim).apply()
+                },
                 onDismiss = { setAsUri = null },
                 onClearBackground = {
                     setAsUri = null
@@ -1948,6 +1955,8 @@ private fun CommandButton(
 @Composable
 private fun SetImageAsDialog(
     hasBackground: Boolean,
+    dim: Boolean,
+    onDimChange: (Boolean) -> Unit,
     onApply: (WallpaperTarget) -> Unit,
     onClearBackground: () -> Unit,
     onDismiss: () -> Unit,
@@ -1967,6 +1976,22 @@ private fun SetImageAsDialog(
                     ) {
                         RadioButton(selected = choice == target, onClick = { choice = target })
                         Text(target.label)
+                    }
+                }
+                Text(
+                    text = "File browser background",
+                    modifier = Modifier.padding(top = 8.dp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                listOf(true to "Dimmed behind the panes", false to "Full brightness").forEach { (dimmed, label) ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onDimChange(dimmed) },
+                    ) {
+                        RadioButton(selected = dim == dimmed, onClick = { onDimChange(dimmed) })
+                        Text(label)
                     }
                 }
                 if (hasBackground) {
