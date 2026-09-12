@@ -2,6 +2,39 @@
 
 Lean Android dual-pane file browser built with Kotlin and Jetpack Compose.
 
+## Version 4.0.1 (September 2026)
+
+### Background dimming
+
+- The background was drawn at 15% opacity rather than dimmed by 15%, leaving the image all but
+  black behind the panes. It is now drawn at the brightness the setting names.
+- Dimming is off by default and chosen rather than fixed: "Dim the file browser background" in the
+  "Set image as" dialog reveals a slider, starting at 15% and stopping at 90% so the image cannot
+  be taken to solid black, next to a preview of the image at that level. The file tree behind the
+  dialog follows the slider as it moves, and the amount is remembered across restarts.
+
+### Large Google Drive images
+
+- A Drive file cannot be read a piece at a time, so the whole thing is downloaded before anything
+  can be drawn, and opening a several-hundred-megabyte TIFF looked like the viewer had hung. From
+  200 MB up, the single view now says what it is doing over the grid's thumbnail of the image: how
+  much of the file has arrived, a progress bar, and the suggestion to copy it to local storage and
+  open it from there instead, which pays that cost once.
+- Cancel stops the download where it stands and returns to the thumbnails. The read watches for
+  this itself, since a blocking download does not end just because the viewer moved on.
+- Nothing else changed: thumbnails are still generated for every image, and a file already in
+  local storage still opens straight away.
+
+### Panning a zoomed image
+
+- Panning is limited to what the zoom actually hides: the image stops when an edge reaches the
+  viewport, so a nearly-fitted image barely moves and a fitted one does not move at all. It could
+  previously be dragged anywhere on screen at any zoom, which is what made zooming back out feel
+  unpredictable.
+- With no room left to pan sideways, a horizontal drag is read as a swipe to the next image again,
+  rather than only below a fixed zoom level. Pinching back out below 1.08x settles exactly on the
+  fitted, centred image.
+
 ## Version 4.0.0 (September 2026)
 
 ### Rotate

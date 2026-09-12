@@ -108,17 +108,20 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -173,14 +176,18 @@ import com.google.android.gms.common.api.ApiException
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.floor
+import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.InputStream
 
@@ -307,6 +314,15 @@ private const val OVERVIEW_DETAIL = 2
 
 /** High enough to reach 1:1 pixels on a gigapixel source; tiles keep the memory cost flat. */
 private const val MAX_SINGLE_ZOOM = 64f
+
+/** Zooming back out below this settles on the fitted image instead of a nearly-fitted one. */
+private const val SINGLE_FIT_SNAP = 1.08f
+
+/**
+ * A Drive file cannot be read a region at a time: the whole thing is downloaded into memory before
+ * a pixel can be decoded. Past this size that wait is long enough to be worth warning about.
+ */
+private const val LARGE_DRIVE_IMAGE_BYTES = 200L * 1024 * 1024
 
 /**
  * A row tap turns into a selection one double-tap timeout (300ms) after the finger lifts, so a
@@ -475,7 +491,7 @@ private const val PANE_LEFT = "left"
 private const val PANE_RIGHT = "right"
 private const val THEME_PREF = "app_theme"
 private const val LAYOUT_PREF = "layout_mode"
-private const val BACKGROUND_DIM_PREF = "background_dim"
+private const val BACKGROUND_DIM_PREF = "background_dim_level"
 
 /** Keeps the browsed folder and the current selection across a rotation. */
 private val PaneStateSaver = listSaver<BrowserPaneState, String>(
@@ -620,7 +636,7 @@ private fun HyperBrowserApp() {
     // The image whose "set as" dialog is open, and the one currently behind the file tree.
     var setAsUri by rememberSaveable { mutableStateOf<Uri?>(null) }
     var background by remember { mutableStateOf<ImageBitmap?>(null) }
-    var dimBackground by rememberSaveable { mutableStateOf(prefs.getBoolean(BACKGROUND_DIM_PREF, true)) }
+    var backgroundDim by rememberSaveable { mutableFloatStateOf(prefs.getFloat(BACKGROUND_DIM_PREF, 0f)) }
     LaunchedEffect(Unit) {
         background = withContext(Dispatchers.IO) { AppBackground.load(activity)?.asImageBitmap() }
     }
@@ -933,7 +949,7 @@ private fun HyperBrowserApp() {
                         bitmap = image,
                         contentDescription = null,
                         contentScale = ContentScale.Crop,
-                        alpha = if (dimBackground) BACKGROUND_ALPHA else 1f,
+                        alpha = 1f - backgroundDim,
                         modifier = Modifier.fillMaxSize(),
                     )
                 }
@@ -1154,10 +1170,12 @@ private fun HyperBrowserApp() {
         if (setAsTarget != null) {
             SetImageAsDialog(
                 hasBackground = background != null,
-                dim = dimBackground,
+                activity = activity,
+                uri = setAsTarget,
+                dim = backgroundDim,
                 onDimChange = { dim ->
-                    dimBackground = dim
-                    prefs.edit().putBoolean(BACKGROUND_DIM_PREF, dim).apply()
+                    backgroundDim = dim
+                    prefs.edit().putFloat(BACKGROUND_DIM_PREF, dim).apply()
                 },
                 onDismiss = { setAsUri = null },
                 onClearBackground = {
@@ -1381,8 +1399,11 @@ private fun launchExternalApp(
         .onFailure { Toast.makeText(activity, "No app can open this file", Toast.LENGTH_SHORT).show() }
 }
 
-/** Enough of the image to see behind the file tree, dim enough for rows to stay legible. */
-private const val BACKGROUND_ALPHA = 0.15f
+/** Where the dimming slider starts when dimming is first switched on. */
+private const val BACKGROUND_DIM = 0.15f
+
+/** Past this the image is gone anyway, and the slider would only be choosing shades of black. */
+private const val BACKGROUND_DIM_MAX = 0.9f
 
 /**
  * Puts the image where the dialog asked for it. Both destinations take a decoded bitmap rather
@@ -1969,13 +1990,19 @@ private fun CommandButton(
 @Composable
 private fun SetImageAsDialog(
     hasBackground: Boolean,
-    dim: Boolean,
-    onDimChange: (Boolean) -> Unit,
+    activity: ComponentActivity,
+    uri: Uri,
+    dim: Float,
+    onDimChange: (Float) -> Unit,
     onApply: (WallpaperTarget) -> Unit,
     onClearBackground: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     var choice by remember { mutableStateOf(WallpaperTarget.APP) }
+    // No dimming is stored as zero; the slider keeps a level to return to when it is switched back
+    // on. It is dragged locally so the preview tracks the finger, and written when it is let go.
+    var dimOn by remember { mutableStateOf(dim > 0f) }
+    var dimming by remember { mutableFloatStateOf(dim.takeIf { it > 0f } ?: BACKGROUND_DIM) }
     HyperDialog(
         onDismissRequest = onDismiss,
         title = { Text("Set image as") },
@@ -1992,21 +2019,39 @@ private fun SetImageAsDialog(
                         Text(target.label)
                     }
                 }
-                Text(
-                    text = "File browser background",
-                    modifier = Modifier.padding(top = 8.dp),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                listOf(true to "Dimmed behind the panes", false to "Full brightness").forEach { (dimmed, label) ->
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onDimChange(dimmed) },
-                    ) {
-                        RadioButton(selected = dim == dimmed, onClick = { onDimChange(dimmed) })
-                        Text(label)
-                    }
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp)
+                        .clickable {
+                            dimOn = !dimOn
+                            onDimChange(if (dimOn) dimming else 0f)
+                        },
+                ) {
+                    Checkbox(
+                        checked = dimOn,
+                        onCheckedChange = {
+                            dimOn = it
+                            onDimChange(if (it) dimming else 0f)
+                        },
+                    )
+                    Text("Dim the file browser background")
+                }
+                if (dimOn) {
+                    Text(
+                        text = "Dimmed ${(dimming * 100).roundToInt()}%",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    BackgroundDimPreview(activity = activity, uri = uri, dim = dimming)
+                    Slider(
+                        value = dimming,
+                        onValueChange = {
+                            dimming = it
+                            onDimChange(it)
+                        },
+                        valueRange = 0f..BACKGROUND_DIM_MAX,
+                    )
                 }
                 if (hasBackground) {
                     TextButton(onClick = onClearBackground) { Text("Remove the file browser background") }
@@ -2016,6 +2061,38 @@ private fun SetImageAsDialog(
         confirmButton = { TextButton(onClick = { onApply(choice) }) { Text("Apply") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
+}
+
+/** The chosen image at the chosen dimming, over the colour the panes are drawn on. */
+@Composable
+private fun BackgroundDimPreview(activity: ComponentActivity, uri: Uri, dim: Float) {
+    val pixels = with(LocalDensity.current) { 160.dp.roundToPx() }
+    val bitmap by produceState<ImageBitmap?>(initialValue = null, uri, pixels) {
+        value = withContext(Dispatchers.IO) { loadBitmap(activity, uri, pixels, pixels) }
+    }
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(96.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(MaterialTheme.colorScheme.background),
+        contentAlignment = Alignment.Center,
+    ) {
+        bitmap?.let { image ->
+            Image(
+                bitmap = image,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                alpha = 1f - dim,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+        Text(
+            text = "File name",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onBackground,
+        )
+    }
 }
 
 @Composable
@@ -2970,12 +3047,20 @@ private fun ImageViewerScreen(
     var single by remember { mutableStateOf<SingleImage?>(null) }
     var detail by remember { mutableStateOf<DetailTile?>(null) }
     var viewport by remember { mutableStateOf(IntSize.Zero) }
+    // The file is fetched whole before a pixel of it can be drawn, so past a certain size the
+    // viewer owes the user an explanation and a way out rather than an unexplained freeze.
+    val largeDriveImage = currentDoc?.takeIf {
+        stage == GalleryStage.SINGLE &&
+            DriveUris.isDrive(it.uri) &&
+            it.size >= LARGE_DRIVE_IMAGE_BYTES
+    }
+    val driveProgress by DriveDownload.progress.collectAsState()
     // Sensor data of a 40-megapixel frame takes seconds to decode; without this the previous
     // image sits there looking as though nothing happened.
     var loading by remember { mutableStateOf(false) }
     LaunchedEffect(currentUri, stage, viewport, inspect, inspectCompressed, imageRevision) {
         detail = null
-        single = if (stage == GalleryStage.SINGLE) {
+        single = if (stage == GalleryStage.SINGLE && viewport != IntSize.Zero) {
             loading = true
             try {
                 withContext(Dispatchers.IO) {
@@ -3047,6 +3132,26 @@ private fun ImageViewerScreen(
         offset = Offset.Zero
     }
 
+    /** How far the image can be dragged before an edge would come inside the viewport. */
+    fun panRoom(atScale: Float): Offset {
+        val image = single ?: return Offset.Zero
+        val width = viewport.width.toFloat()
+        val height = viewport.height.toFloat()
+        if (width <= 0f || height <= 0f) return Offset.Zero
+        val fit = min(width / image.width, height / image.height) * atScale
+        return Offset(
+            x = max(0f, (image.width * fit - width) / 2f),
+            y = max(0f, (image.height * fit - height) / 2f),
+        )
+    }
+
+    // At the fitted size there is nothing hidden to drag towards, so panning gives way entirely
+    // and a horizontal drag stays a swipe to the next image.
+    fun clampPan(candidate: Offset, atScale: Float): Offset {
+        val room = panRoom(atScale)
+        return Offset(candidate.x.coerceIn(-room.x, room.x), candidate.y.coerceIn(-room.y, room.y))
+    }
+
     fun zoomIn() {
         when (stage) {
             GalleryStage.GRID_SMALL -> stage = GalleryStage.GRID_MEDIUM
@@ -3058,7 +3163,7 @@ private fun ImageViewerScreen(
                 val next = (scale * 2f).coerceAtMost(maxZoom)
                 // Pan is applied after the zoom, so it has to track it or the view jumps to a
                 // different part of the image on every step.
-                offset *= next / scale
+                offset = clampPan(offset * (next / scale), next)
                 scale = next
             }
         }
@@ -3068,7 +3173,7 @@ private fun ImageViewerScreen(
         when (stage) {
             GalleryStage.SINGLE -> if (scale > 1.05f) {
                 val next = (scale / 2f).coerceAtLeast(1f)
-                offset = if (next <= 1f) Offset.Zero else offset * (next / scale)
+                offset = clampPan(offset * (next / scale), next)
                 scale = next
             } else {
                 stage = GalleryStage.GRID_MEDIUM
@@ -3251,16 +3356,18 @@ private fun ImageViewerScreen(
                         .onSizeChanged { viewport = it }
                         .pointerInput(images, currentUri) {
                             detectImageGestures(
-                                currentScale = { scale },
+                                canSwipe = { panRoom(scale).x < 1f },
                                 onTransform = { pan, zoom ->
                                     val next = scale * zoom
                                     if (next < 0.85f) {
                                         stage = GalleryStage.GRID_MEDIUM
-                                        scale = 1f
-                                        offset = Offset.Zero
+                                        resetTransform()
                                     } else {
-                                        scale = next.coerceIn(1f, maxZoom)
-                                        if (scale > 1f) offset += pan
+                                        // Anything this close to fitting is treated as fitted, so
+                                        // pinching out lands on a centred image rather than one
+                                        // held slightly off-centre with nowhere useful to drag.
+                                        scale = if (next < SINGLE_FIT_SNAP) 1f else next.coerceAtMost(maxZoom)
+                                        offset = clampPan(offset + pan, scale)
                                     }
                                 },
                                 onSwipe = { step -> showRelative(step) },
@@ -3297,6 +3404,73 @@ private fun ImageViewerScreen(
 
                     draw(singleImage.overview, Rect(0f, 0f, singleImage.width.toFloat(), singleImage.height.toFloat()))
                     detail?.let { draw(it.bitmap, it.source) }
+                }
+            } else if (stage == GalleryStage.SINGLE) {
+                // Nothing decoded yet: the grid's thumbnail stands in so the wait is not spent
+                // looking at an empty black screen. The box also measures the viewport, which the
+                // decode needs before it starts — sizing it off the finished image would mean
+                // decoding a large file twice.
+                Box(modifier = Modifier.fillMaxSize().onSizeChanged { viewport = it }) {
+                    val thumbnail = ThumbnailCache.get(currentUri, GalleryStage.GRID_MEDIUM.thumbnailPx)
+                        ?: ThumbnailCache.get(currentUri, GalleryStage.GRID_SMALL.thumbnailPx)
+                    thumbnail?.let {
+                        Image(
+                            bitmap = it,
+                            contentDescription = null,
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    }
+                }
+            }
+
+            // A Drive file arrives in one piece before it can be decoded, so this is the only
+            // place the user can see the wait coming or step out of it.
+            largeDriveImage?.let { entry ->
+                if (loading) {
+                    val read = driveProgress?.takeIf { it.first == entry.uri }?.second
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .padding(24.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.9f))
+                            .padding(16.dp),
+                    ) {
+                        Text(
+                            text = if (read == null) {
+                                "Loading ${entry.name} (${formatBytes(entry.size)}) from Drive…"
+                            } else {
+                                "Loading ${formatBytes(read)} of ${formatBytes(entry.size)} " +
+                                    "from Drive…"
+                            },
+                            style = MaterialTheme.typography.bodyMedium,
+                            textAlign = TextAlign.Center,
+                        )
+                        if (read == null || entry.size <= 0L) {
+                            LinearProgressIndicator(modifier = Modifier.padding(top = 12.dp))
+                        } else {
+                            LinearProgressIndicator(
+                                progress = { (read.toFloat() / entry.size).coerceIn(0f, 1f) },
+                                modifier = Modifier.padding(top = 12.dp),
+                            )
+                        }
+                        Text(
+                            text = "Drive cannot send part of a file, so all of it is downloaded " +
+                                "before anything is drawn. Copying it to local storage and " +
+                                "opening it from there pays that cost once.",
+                            style = MaterialTheme.typography.bodySmall,
+                            textAlign = TextAlign.Center,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 12.dp),
+                        )
+                        TextButton(onClick = {
+                            DriveDownload.cancel(entry.uri)
+                            stage = GalleryStage.GRID_MEDIUM
+                            resetTransform()
+                        }) { Text("Cancel") }
+                    }
                 }
             }
 
@@ -3617,7 +3791,7 @@ private fun GalleryAction(
  * [onSwipe] gets -1 for the previous image and +1 for the next.
  */
 private suspend fun PointerInputScope.detectImageGestures(
-    currentScale: () -> Float,
+    canSwipe: () -> Boolean,
     onTransform: (pan: Offset, zoom: Float) -> Unit,
     onSwipe: (Int) -> Unit,
 ) {
@@ -3637,7 +3811,7 @@ private suspend fun PointerInputScope.detectImageGestures(
         } while (event.changes.any { it.pressed })
 
         val horizontal = abs(travel.x) > abs(travel.y) && abs(travel.x) > swipeThreshold
-        if (!pinched && currentScale() <= 1.02f && horizontal) {
+        if (!pinched && canSwipe() && horizontal) {
             onSwipe(if (travel.x < 0) 1 else -1)
         }
     }
@@ -3651,9 +3825,62 @@ private class ImageSource(
     val seekable: Boolean,
 )
 
+/**
+ * How much of a Drive file has arrived, and the way out of a download that is taking too long.
+ * The read is a blocking one inside a coroutine, so cancelling the coroutine alone would leave it
+ * downloading; the loop watches [cancelled] instead.
+ */
+private object DriveDownload {
+    private val _progress = MutableStateFlow<Pair<Uri, Long>?>(null)
+    val progress: StateFlow<Pair<Uri, Long>?> = _progress
+
+    @Volatile
+    private var cancelled: Uri? = null
+
+    fun cancel(uri: Uri) {
+        cancelled = uri
+    }
+
+    fun begin(uri: Uri) {
+        if (cancelled == uri) cancelled = null
+        _progress.value = uri to 0L
+    }
+
+    /** False once the user has given up on this file, which stops the read where it stands. */
+    fun report(uri: Uri, read: Long): Boolean {
+        if (cancelled == uri) return false
+        _progress.value = uri to read
+        return true
+    }
+
+    fun end(uri: Uri) {
+        if (_progress.value?.first == uri) _progress.value = null
+    }
+}
+
+/** Reads the whole stream, reporting as it goes and stopping early if the user cancels. */
+private fun InputStream.readReporting(uri: Uri): ByteArray? {
+    DriveDownload.begin(uri)
+    try {
+        val collected = ByteArrayOutputStream()
+        val buffer = ByteArray(256 * 1024)
+        var total = 0L
+        while (true) {
+            val read = read(buffer)
+            if (read < 0) break
+            collected.write(buffer, 0, read)
+            total += read
+            if (!DriveDownload.report(uri, total)) return null
+        }
+        return collected.toByteArray()
+    } finally {
+        DriveDownload.end(uri)
+    }
+}
+
 private fun imageSource(activity: ComponentActivity, uri: Uri): ImageSource? {
     if (DriveUris.isDrive(uri)) {
-        val bytes = runCatching { Storage.openInput(activity, uri)?.use { it.readBytes() } }.getOrNull() ?: return null
+        val bytes = runCatching { Storage.openInput(activity, uri)?.use { it.readReporting(uri) } }.getOrNull() ?: return null
         return ImageSource(open = { ByteArrayInputStream(bytes) }, bytes = bytes, seekable = false)
     }
     val resolver = activity.contentResolver
