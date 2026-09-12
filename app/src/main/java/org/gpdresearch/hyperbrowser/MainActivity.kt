@@ -139,6 +139,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
@@ -473,6 +474,7 @@ private const val PANE_LEFT = "left"
 private const val PANE_RIGHT = "right"
 private const val THEME_PREF = "app_theme"
 private const val LAYOUT_PREF = "layout_mode"
+private const val BACKGROUND_DIM_PREF = "background_dim"
 
 /** Keeps the browsed folder and the current selection across a rotation. */
 private val PaneStateSaver = listSaver<BrowserPaneState, String>(
@@ -614,6 +616,13 @@ private fun HyperBrowserApp() {
     var showSortSettings by rememberSaveable { mutableStateOf(false) }
     var selectionPreviewVisible by rememberSaveable { mutableStateOf(true) }
     var selectionPreviewOffset by remember { mutableStateOf(Offset.Zero) }
+    // The image whose "set as" dialog is open, and the one currently behind the file tree.
+    var setAsUri by rememberSaveable { mutableStateOf<Uri?>(null) }
+    var background by remember { mutableStateOf<ImageBitmap?>(null) }
+    var dimBackground by rememberSaveable { mutableStateOf(prefs.getBoolean(BACKGROUND_DIM_PREF, true)) }
+    LaunchedEffect(Unit) {
+        background = withContext(Dispatchers.IO) { AppBackground.load(activity)?.asImageBitmap() }
+    }
     var renameTarget by rememberSaveable { mutableStateOf<Uri?>(null) }
     var renameValue by rememberSaveable { mutableStateOf("") }
     var newFolderParent by rememberSaveable { mutableStateOf<Uri?>(null) }
@@ -917,6 +926,16 @@ private fun HyperBrowserApp() {
                     onClose = { shown -> closeGallery(shown) },
                 )
             } else {
+                // Drawn behind everything in the file tree, dimmed so rows stay readable over it.
+                background?.let { image ->
+                    Image(
+                        bitmap = image,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        alpha = if (dimBackground) BACKGROUND_ALPHA else 1f,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
                 // The strip runs the full height beside everything else, so the root and direction
                 // buttons sit centred over their own panes and the strip has room to grow.
                 Row(modifier = Modifier.fillMaxSize()) {
@@ -1078,6 +1097,7 @@ private fun HyperBrowserApp() {
                                     size = metrics.previewSize,
                                     offset = selectionPreviewOffset,
                                     onOffsetChange = { selectionPreviewOffset = it },
+                                    onTap = { setAsUri = selectedFile },
                                     onClose = { selectionPreviewVisible = false },
                                     modifier = Modifier
                                         .align(Alignment.BottomEnd)
@@ -1119,6 +1139,38 @@ private fun HyperBrowserApp() {
                     reversePrompt = null
                     transferDirection = if (transferDirection == TransferDirection.LEFT_TO_RIGHT) TransferDirection.RIGHT_TO_LEFT else TransferDirection.LEFT_TO_RIGHT
                     startOperation(mode, reversed = true)
+                },
+            )
+        }
+
+        val setAsTarget = setAsUri
+        if (setAsTarget != null) {
+            SetImageAsDialog(
+                hasBackground = background != null,
+                dim = dimBackground,
+                onDimChange = { dim ->
+                    dimBackground = dim
+                    prefs.edit().putBoolean(BACKGROUND_DIM_PREF, dim).apply()
+                },
+                onDismiss = { setAsUri = null },
+                onClearBackground = {
+                    setAsUri = null
+                    background = null
+                    scope.launch { withContext(Dispatchers.IO) { AppBackground.clear(activity) } }
+                },
+                onApply = { target ->
+                    setAsUri = null
+                    scope.launch {
+                        val outcome = withContext(Dispatchers.IO) {
+                            applyImageAs(activity, setAsTarget, target)
+                        }
+                        if (target.app) {
+                            background = withContext(Dispatchers.IO) {
+                                AppBackground.load(activity)?.asImageBitmap()
+                            }
+                        }
+                        Toast.makeText(activity, outcome, Toast.LENGTH_SHORT).show()
+                    }
                 },
             )
         }
@@ -1320,6 +1372,27 @@ private fun launchExternalApp(
     }
     runCatching { activity.startActivity(Intent.createChooser(intent, title)) }
         .onFailure { Toast.makeText(activity, "No app can open this file", Toast.LENGTH_SHORT).show() }
+}
+
+/** Enough of the image to see behind the file tree, dim enough for rows to stay legible. */
+private const val BACKGROUND_ALPHA = 0.15f
+
+/**
+ * Puts the image where the dialog asked for it. Both destinations take a decoded bitmap rather
+ * than the file: RAW and TIFF have no bytes the wallpaper service could read, and the file itself
+ * may be on a card or in Drive.
+ */
+private fun applyImageAs(activity: ComponentActivity, uri: Uri, target: WallpaperTarget): String {
+    val (width, height) = Wallpapers.desiredSize(activity)
+    val bitmap = loadBitmap(activity, uri, width, height)?.asAndroidBitmap()
+        ?: return "That image could not be read"
+    val done = mutableListOf<String>()
+    if (target.app && AppBackground.store(activity, bitmap)) done += "file browser"
+    if ((target.home || target.lock) && Wallpapers.apply(activity, bitmap, target.home, target.lock)) {
+        if (target.home) done += "home screen"
+        if (target.lock) done += "lock screen"
+    }
+    return if (done.isEmpty()) "Setting the image failed" else "Set as ${done.joinToString(", ")} background"
 }
 
 /**
@@ -1878,6 +1951,59 @@ private fun CommandButton(
     }
 }
 
+/** Where a tapped preview can be sent, chosen before anything is written. */
+@Composable
+private fun SetImageAsDialog(
+    hasBackground: Boolean,
+    dim: Boolean,
+    onDimChange: (Boolean) -> Unit,
+    onApply: (WallpaperTarget) -> Unit,
+    onClearBackground: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var choice by remember { mutableStateOf(WallpaperTarget.APP) }
+    HyperDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Set image as") },
+        text = {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                WallpaperTarget.entries.forEach { target ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { choice = target },
+                    ) {
+                        RadioButton(selected = choice == target, onClick = { choice = target })
+                        Text(target.label)
+                    }
+                }
+                Text(
+                    text = "File browser background",
+                    modifier = Modifier.padding(top = 8.dp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                listOf(true to "Dimmed behind the panes", false to "Full brightness").forEach { (dimmed, label) ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onDimChange(dimmed) },
+                    ) {
+                        RadioButton(selected = dim == dimmed, onClick = { onDimChange(dimmed) })
+                        Text(label)
+                    }
+                }
+                if (hasBackground) {
+                    TextButton(onClick = onClearBackground) { Text("Remove the file browser background") }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { onApply(choice) }) { Text("Apply") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
 @Composable
 private fun SelectionThumbnail(
     activity: ComponentActivity,
@@ -1885,6 +2011,7 @@ private fun SelectionThumbnail(
     size: Dp,
     offset: Offset,
     onOffsetChange: (Offset) -> Unit,
+    onTap: () -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -1906,7 +2033,9 @@ private fun SelectionThumbnail(
                     currentOffset += dragAmount
                     onOffsetChange(currentOffset)
                 }
-            },
+            }
+            // Declared after the drag so dragging the preview around does not count as a tap.
+            .clickable(onClick = onTap),
         contentAlignment = Alignment.Center,
     ) {
         if (bitmap != null) {

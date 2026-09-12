@@ -2,13 +2,7 @@
 
 Lean Android dual-pane file browser built with Kotlin and Jetpack Compose.
 
-## Version 3.1.0 (September 2026)
-
-### Commands follow the selection, not the arrow
-
-- Delete, rename, gallery and the other single-item commands act on whichever pane holds the
-  selection. Only copy and move read the transfer arrow, so a folder picked in the pane the arrow
-  points at is no longer deleted from the other side.
+## Version 4.0.0 (September 2026)
 
 ### Rotate
 
@@ -21,6 +15,19 @@ Lean Android dual-pane file browser built with Kotlin and Jetpack Compose.
 - Orientation is now honoured when showing ordinary JPEG and PNG images too; previously only RAW
   and TIFF were turned to match their tag.
 - Rotating a Google Drive image is not supported; copy it locally first.
+
+### Setting an image as a background
+
+- Tapping the preview box in file-tree mode opens a "Set image as" dialog: file browser background,
+  home screen, lock screen, home and lock, or all three. Choose one and apply, or cancel.
+- The file browser background is copied into app storage and survives restarts; the dialog offers to
+  remove it once one is set. It is drawn behind both panes, dimmed by default, and the dialog has a
+  second radio pair to show it at full brightness instead.
+- Both destinations take the decoded image rather than the file, so RAW, TIFF and Drive images can
+  be used as wallpaper too.
+- Nothing is stretched: the wallpaper is scaled by one factor until it covers the screen and the
+  middle is kept, so a landscape photo on a portrait screen fills top to bottom and loses its sides.
+  The file browser background is cropped the same way as the panes are laid out.
 
 ### The inspector and moving between images
 
@@ -55,6 +62,14 @@ Lean Android dual-pane file browser built with Kotlin and Jetpack Compose.
   than at viewport size, and keeps the JPEG so zooming pulls sharper crops out of it instead of
   magnifying the overview.
 - The label names which one is on screen, e.g. `Embedded JPEG 6720×4480`.
+
+## Version 3.1.0 (September 2026)
+
+### Commands follow the selection, not the arrow
+
+- Delete, rename, gallery and the other single-item commands act on whichever pane holds the
+  selection. Only copy and move read the transfer arrow, so a folder picked in the pane the arrow
+  points at is no longer deleted from the other side.
 
 ### Warnings before wholesale changes
 
