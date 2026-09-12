@@ -71,6 +71,15 @@ Lean Android dual-pane file browser built with Kotlin and Jetpack Compose.
   selection. Only copy and move read the transfer arrow, so a folder picked in the pane the arrow
   points at is no longer deleted from the other side.
 
+### Multi-select
+
+- The Multi button is boxed while multi-select is the active mode, so the mode is visible without
+  having to tap a row to find out.
+- Leaving multi-select no longer sticks: a row tap is held back for the double-tap window, and it
+  used to land after the mode had been switched off, applying the old mode and restoring the
+  selection that had just been dropped. Taps now read the mode and selection as they are when the
+  tap resolves.
+
 ### Warnings before wholesale changes
 
 - Deleting more than one folder at once lists each folder with the number of files and subfolders
