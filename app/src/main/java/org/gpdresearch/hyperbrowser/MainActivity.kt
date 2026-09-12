@@ -108,6 +108,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
@@ -120,6 +121,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -179,10 +181,13 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.InputStream
 
@@ -3042,20 +3047,20 @@ private fun ImageViewerScreen(
     var single by remember { mutableStateOf<SingleImage?>(null) }
     var detail by remember { mutableStateOf<DetailTile?>(null) }
     var viewport by remember { mutableStateOf(IntSize.Zero) }
-    // Asked once per image: a second prompt on the way back from the grid would only be in the way.
-    var acceptedLargeDrive by remember { mutableStateOf(emptySet<Uri>()) }
+    // The file is fetched whole before a pixel of it can be drawn, so past a certain size the
+    // viewer owes the user an explanation and a way out rather than an unexplained freeze.
     val largeDriveImage = currentDoc?.takeIf {
         stage == GalleryStage.SINGLE &&
             DriveUris.isDrive(it.uri) &&
-            it.size >= LARGE_DRIVE_IMAGE_BYTES &&
-            it.uri !in acceptedLargeDrive
+            it.size >= LARGE_DRIVE_IMAGE_BYTES
     }
+    val driveProgress by DriveDownload.progress.collectAsState()
     // Sensor data of a 40-megapixel frame takes seconds to decode; without this the previous
     // image sits there looking as though nothing happened.
     var loading by remember { mutableStateOf(false) }
-    LaunchedEffect(currentUri, stage, viewport, inspect, inspectCompressed, imageRevision, largeDriveImage) {
+    LaunchedEffect(currentUri, stage, viewport, inspect, inspectCompressed, imageRevision) {
         detail = null
-        single = if (stage == GalleryStage.SINGLE && largeDriveImage == null) {
+        single = if (stage == GalleryStage.SINGLE && viewport != IntSize.Zero) {
             loading = true
             try {
                 withContext(Dispatchers.IO) {
@@ -3400,6 +3405,73 @@ private fun ImageViewerScreen(
                     draw(singleImage.overview, Rect(0f, 0f, singleImage.width.toFloat(), singleImage.height.toFloat()))
                     detail?.let { draw(it.bitmap, it.source) }
                 }
+            } else if (stage == GalleryStage.SINGLE) {
+                // Nothing decoded yet: the grid's thumbnail stands in so the wait is not spent
+                // looking at an empty black screen. The box also measures the viewport, which the
+                // decode needs before it starts — sizing it off the finished image would mean
+                // decoding a large file twice.
+                Box(modifier = Modifier.fillMaxSize().onSizeChanged { viewport = it }) {
+                    val thumbnail = ThumbnailCache.get(currentUri, GalleryStage.GRID_MEDIUM.thumbnailPx)
+                        ?: ThumbnailCache.get(currentUri, GalleryStage.GRID_SMALL.thumbnailPx)
+                    thumbnail?.let {
+                        Image(
+                            bitmap = it,
+                            contentDescription = null,
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    }
+                }
+            }
+
+            // A Drive file arrives in one piece before it can be decoded, so this is the only
+            // place the user can see the wait coming or step out of it.
+            largeDriveImage?.let { entry ->
+                if (loading) {
+                    val read = driveProgress?.takeIf { it.first == entry.uri }?.second
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .padding(24.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.9f))
+                            .padding(16.dp),
+                    ) {
+                        Text(
+                            text = if (read == null) {
+                                "Loading ${entry.name} (${formatBytes(entry.size)}) from Drive…"
+                            } else {
+                                "Loading ${formatBytes(read)} of ${formatBytes(entry.size)} " +
+                                    "from Drive…"
+                            },
+                            style = MaterialTheme.typography.bodyMedium,
+                            textAlign = TextAlign.Center,
+                        )
+                        if (read == null || entry.size <= 0L) {
+                            LinearProgressIndicator(modifier = Modifier.padding(top = 12.dp))
+                        } else {
+                            LinearProgressIndicator(
+                                progress = { (read.toFloat() / entry.size).coerceIn(0f, 1f) },
+                                modifier = Modifier.padding(top = 12.dp),
+                            )
+                        }
+                        Text(
+                            text = "Drive cannot send part of a file, so all of it is downloaded " +
+                                "before anything is drawn. Copying it to local storage and " +
+                                "opening it from there pays that cost once.",
+                            style = MaterialTheme.typography.bodySmall,
+                            textAlign = TextAlign.Center,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 12.dp),
+                        )
+                        TextButton(onClick = {
+                            DriveDownload.cancel(entry.uri)
+                            stage = GalleryStage.GRID_MEDIUM
+                            resetTransform()
+                        }) { Text("Cancel") }
+                    }
+                }
             }
 
             // With the toolbar out of the way, zoom stays reachable without a pinch.
@@ -3663,29 +3735,6 @@ private fun ImageViewerScreen(
                 )
             }
 
-            largeDriveImage?.let { entry ->
-                HyperDialog(
-                    onDismissRequest = { onClose(currentUri) },
-                    title = { Text("Open this from Drive?") },
-                    text = {
-                        Text(
-                            "${entry.name} is ${formatBytes(entry.size)}, and a Drive file has to " +
-                                "be downloaded in full before any of it can be shown. Copying it " +
-                                "to local storage first and opening it from there is usually much " +
-                                "faster, and only pays that cost once.",
-                        )
-                    },
-                    confirmButton = {
-                        TextButton(onClick = { acceptedLargeDrive = acceptedLargeDrive + entry.uri }) {
-                            Text("Open anyway")
-                        }
-                    },
-                    dismissButton = {
-                        TextButton(onClick = { onClose(currentUri) }) { Text("Back to the files") }
-                    },
-                )
-            }
-
             pendingRotate?.let { cost ->
                 HyperDialog(
                     onDismissRequest = { pendingRotate = null },
@@ -3776,9 +3825,62 @@ private class ImageSource(
     val seekable: Boolean,
 )
 
+/**
+ * How much of a Drive file has arrived, and the way out of a download that is taking too long.
+ * The read is a blocking one inside a coroutine, so cancelling the coroutine alone would leave it
+ * downloading; the loop watches [cancelled] instead.
+ */
+private object DriveDownload {
+    private val _progress = MutableStateFlow<Pair<Uri, Long>?>(null)
+    val progress: StateFlow<Pair<Uri, Long>?> = _progress
+
+    @Volatile
+    private var cancelled: Uri? = null
+
+    fun cancel(uri: Uri) {
+        cancelled = uri
+    }
+
+    fun begin(uri: Uri) {
+        if (cancelled == uri) cancelled = null
+        _progress.value = uri to 0L
+    }
+
+    /** False once the user has given up on this file, which stops the read where it stands. */
+    fun report(uri: Uri, read: Long): Boolean {
+        if (cancelled == uri) return false
+        _progress.value = uri to read
+        return true
+    }
+
+    fun end(uri: Uri) {
+        if (_progress.value?.first == uri) _progress.value = null
+    }
+}
+
+/** Reads the whole stream, reporting as it goes and stopping early if the user cancels. */
+private fun InputStream.readReporting(uri: Uri): ByteArray? {
+    DriveDownload.begin(uri)
+    try {
+        val collected = ByteArrayOutputStream()
+        val buffer = ByteArray(256 * 1024)
+        var total = 0L
+        while (true) {
+            val read = read(buffer)
+            if (read < 0) break
+            collected.write(buffer, 0, read)
+            total += read
+            if (!DriveDownload.report(uri, total)) return null
+        }
+        return collected.toByteArray()
+    } finally {
+        DriveDownload.end(uri)
+    }
+}
+
 private fun imageSource(activity: ComponentActivity, uri: Uri): ImageSource? {
     if (DriveUris.isDrive(uri)) {
-        val bytes = runCatching { Storage.openInput(activity, uri)?.use { it.readBytes() } }.getOrNull() ?: return null
+        val bytes = runCatching { Storage.openInput(activity, uri)?.use { it.readReporting(uri) } }.getOrNull() ?: return null
         return ImageSource(open = { ByteArrayInputStream(bytes) }, bytes = bytes, seekable = false)
     }
     val resolver = activity.contentResolver

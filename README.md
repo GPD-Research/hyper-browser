@@ -15,12 +15,15 @@ Lean Android dual-pane file browser built with Kotlin and Jetpack Compose.
 
 ### Large Google Drive images
 
-- Opening a Drive image of 200 MB or more in the viewer asks first. A Drive file cannot be read a
-  piece at a time, so the whole thing is downloaded into memory before anything appears, and a
-  large TIFF stalls the gallery for as long as that takes.
-- The prompt names the file and its size and suggests copying it to local storage first, where it
-  is read from disk and tiled like any other file. Opening it anyway is one tap, and is remembered
-  for that image.
+- A Drive file cannot be read a piece at a time, so the whole thing is downloaded before anything
+  can be drawn, and opening a several-hundred-megabyte TIFF looked like the viewer had hung. From
+  200 MB up, the single view now says what it is doing over the grid's thumbnail of the image: how
+  much of the file has arrived, a progress bar, and the suggestion to copy it to local storage and
+  open it from there instead, which pays that cost once.
+- Cancel stops the download where it stands and returns to the thumbnails. The read watches for
+  this itself, since a blocking download does not end just because the viewer moved on.
+- Nothing else changed: thumbnails are still generated for every image, and a file already in
+  local storage still opens straight away.
 
 ### Panning a zoomed image
 
