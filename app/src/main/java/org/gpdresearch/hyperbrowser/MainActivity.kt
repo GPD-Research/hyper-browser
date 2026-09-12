@@ -1501,8 +1501,9 @@ private fun resolveDisplayPath(context: Context, uri: Uri): String {
 
 private fun labelForFilePath(path: String): String {
     val trimmed = path.trimEnd('/')
+    val externalRoot = Environment.getExternalStorageDirectory().path.trimEnd('/')
     val emulatedRoot = Regex("^/storage/emulated/\\d+").find(trimmed)?.value
-        ?: "/sdcard".takeIf { trimmed == it || trimmed.startsWith("$it/") }
+        ?: externalRoot.takeIf { it.isNotEmpty() && (trimmed == it || trimmed.startsWith("$it/")) }
     if (emulatedRoot != null) {
         val relative = trimmed.removePrefix(emulatedRoot).trim('/')
         return if (relative.isEmpty()) INTERNAL_STORAGE_LABEL else "$INTERNAL_STORAGE_LABEL/$relative"
