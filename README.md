@@ -22,6 +22,18 @@ Lean Android dual-pane file browser built with Kotlin and Jetpack Compose.
   and TIFF were turned to match their tag.
 - Rotating a Google Drive image is not supported; copy it locally first.
 
+### Large TIFFs
+
+- Opening a TIFF draws the file's own pixels rather than the thumbnail stored inside it. Those
+  thumbnails are routinely a few hundred pixels wide, and stretching one across the screen is what
+  made large TIFFs look soft; the embedded preview is now used only when it is at least as wide as
+  the screen, or when the image itself cannot be decoded.
+- Fitted images are decoded at twice the viewport, so the first frame is sharp on a dense display
+  and survives a pinch before a sharper tile arrives. Zooming still refines a tile at a time out of
+  the pyramid, which is what keeps a gigapixel file inside a fixed memory budget.
+- Grid thumbnails follow the same rule, so a TIFF whose preview is smaller than the cell is
+  rendered rather than upscaled.
+
 ### RAW inspector: compressed or uncompressed
 
 - Inspecting a RAW file, a second toolbar button switches between the sensor data (uncompressed,

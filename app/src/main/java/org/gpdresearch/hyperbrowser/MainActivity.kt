@@ -295,6 +295,13 @@ private enum class GalleryStage(val columns: Int, val thumbnailPx: Int, val lowQ
 private const val MAX_DRAWABLE_PIXELS = 16_000_000L
 private const val MAX_TEXTURE_EDGE = 8192
 
+/**
+ * How much finer than the viewport a fitted overview is decoded. Screen pixels are not the
+ * whole story: the fitted image is what a small zoom magnifies before a sharper tile has been
+ * decoded, and a downscaled render loses detail to sampling that this headroom buys back.
+ */
+private const val OVERVIEW_DETAIL = 2
+
 /** High enough to reach 1:1 pixels on a gigapixel source; tiles keep the memory cost flat. */
 private const val MAX_SINGLE_ZOOM = 64f
 
@@ -3572,6 +3579,17 @@ private fun loadSingleImage(
 
     val (byteSource, bytes) = sourceBytes() ?: return null
 
+    // A TIFF's own pixels beat the thumbnail a camera or scanner left in it: those previews are
+    // routinely a few hundred pixels wide, which is what made a large TIFF look soft full screen.
+    // RAW keeps preferring its embedded JPEG, whose full-size rendition is the point of it.
+    val tiffImage = RawImage.openTiff(byteSource)
+    if (tiffImage != null) {
+        val preview = RawImage.embeddedJpeg(byteSource)
+        if (preview == null || preview.width < minOf(tiffImage.width, viewport.width)) {
+            tiffSingleImage(tiffImage, byteSource, viewport, null)?.let { return it }
+        }
+    }
+
     val decoded = RawImage.decode(byteSource, viewport.width, viewport.height, false)
     if (decoded != null) {
         // Mapped sources have no byte array; orientation is read from the source itself.
@@ -3590,15 +3608,38 @@ private fun loadSingleImage(
         )
     }
 
-    val tiff = RawImage.openTiff(byteSource) ?: return null
-    val overview = tiff.render(viewport.width, viewport.height, null) ?: return null
+    return tiffImage?.let { tiffSingleImage(it, byteSource, viewport, null) }
+}
+
+/**
+ * A TIFF as the viewer holds it: an overview drawn from the smallest pyramid level that still
+ * covers the screen, plus the handle crops are pulled through. The overview is decoded at
+ * [OVERVIEW_DETAIL] times the viewport so the fitted image is sharp on a dense display and
+ * survives a little zoom before a tile arrives.
+ */
+private fun tiffSingleImage(
+    tiff: RawImage.TiffImage,
+    byteSource: ByteSource,
+    viewport: IntSize,
+    label: String?,
+): SingleImage? {
+    val overview = tiff.render(
+        viewport.width * OVERVIEW_DETAIL,
+        viewport.height * OVERVIEW_DETAIL,
+        null,
+    ) ?: return null
+    val degrees = RawImage.orientationDegrees(byteSource)
+    val turned = degrees == 90 || degrees == 270
     return SingleImage(
-        overview = overview.asImageBitmap(),
-        width = tiff.width,
-        height = tiff.height,
+        overview = RawImage.rotate(overview, degrees).asImageBitmap(),
+        width = if (turned) tiff.height else tiff.width,
+        height = if (turned) tiff.width else tiff.height,
         sample = (tiff.width / overview.width).coerceAtLeast(1),
-        canTile = overview.width < tiff.width,
+        // Crops are rendered in the file's own orientation, so a turned frame cannot be refined
+        // tile by tile without mapping every region back through the rotation.
+        canTile = overview.width < tiff.width && degrees == 0,
         tiff = tiff,
+        source = label,
     )
 }
 
@@ -3625,15 +3666,11 @@ private fun inspectorImage(byteSource: ByteSource, viewport: IntSize, compressed
         )
     }
     val tiff = RawImage.openTiff(byteSource) ?: return null
-    val overview = tiff.render(viewport.width, viewport.height, null) ?: return null
-    return SingleImage(
-        overview = overview.asImageBitmap(),
-        width = tiff.width,
-        height = tiff.height,
-        sample = (tiff.width / overview.width).coerceAtLeast(1),
-        canTile = overview.width < tiff.width,
-        tiff = tiff,
-        source = "Full resolution ${tiff.width}\u00d7${tiff.height}",
+    return tiffSingleImage(
+        tiff,
+        byteSource,
+        viewport,
+        "Full resolution ${tiff.width}\u00d7${tiff.height}",
     )
 }
 
