@@ -157,15 +157,30 @@ object RawImage {
         decode(arraySource(bytes), targetWidth, targetHeight, lowQuality)
 
     /**
-     * The browsing view of a file: the embedded preview when there is one, and a downscaled
-     * render of the image itself for TIFF. Sensor data is the inspector's job, not this one's.
+     * The browsing view of a file: the embedded preview when it is large enough to fill the
+     * target, and a downscaled render of the image itself otherwise. A TIFF's embedded preview
+     * is often a few hundred pixels wide, so taking it regardless of the target is what left
+     * large TIFFs looking soft. Sensor data is the inspector's job, not this one's.
      */
-    fun decode(source: ByteSource, targetWidth: Int, targetHeight: Int, lowQuality: Boolean): Bitmap? =
-        embeddedPreview(source, targetWidth, targetHeight, lowQuality)
-            ?: openTiff(source)?.render(targetWidth, targetHeight, null)
+    fun decode(source: ByteSource, targetWidth: Int, targetHeight: Int, lowQuality: Boolean): Bitmap? {
+        val preview = embeddedJpeg(source)
+        if (preview == null || preview.width < targetWidth || preview.height < targetHeight) {
+            openTiff(source)?.render(targetWidth, targetHeight, null)?.let { return it }
+        }
+        preview ?: return null
+        val options = BitmapFactory.Options().apply {
+            inSampleSize = sampleSizeFor(preview.width, preview.height, targetWidth, targetHeight)
+            if (lowQuality) inPreferredConfig = Bitmap.Config.RGB_565
+        }
+        return runCatching {
+            BitmapFactory.decodeByteArray(preview.bytes, 0, preview.bytes.size, options)
+        }.getOrNull()
+    }
 
-    fun orientationDegrees(bytes: ByteArray): Int {
-        val exif = runCatching { ExifInterface(ByteArrayInputStream(bytes)) }.getOrNull() ?: return 0
+    fun orientationDegrees(bytes: ByteArray): Int = orientationDegrees(ByteArrayInputStream(bytes))
+
+    fun orientationDegrees(stream: InputStream): Int {
+        val exif = runCatching { ExifInterface(stream) }.getOrNull() ?: return 0
         return exifOrientationToDegrees(
             exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
         )
@@ -212,6 +227,22 @@ object RawImage {
      * well as the containers that are not TIFF at all (RAF, CR3).
      */
     fun embeddedPreview(source: ByteSource, targetWidth: Int, targetHeight: Int, lowQuality: Boolean): Bitmap? {
+        val jpeg = embeddedJpeg(source) ?: return null
+        val options = BitmapFactory.Options().apply {
+            inSampleSize = sampleSizeFor(jpeg.width, jpeg.height, targetWidth, targetHeight)
+            if (lowQuality) inPreferredConfig = Bitmap.Config.RGB_565
+        }
+        return runCatching { BitmapFactory.decodeByteArray(jpeg.bytes, 0, jpeg.bytes.size, options) }.getOrNull()
+    }
+
+    /** The bytes of an embedded JPEG, kept whole so a region decoder can work over them. */
+    class EmbeddedJpeg(val bytes: ByteArray, val width: Int, val height: Int)
+
+    /**
+     * The largest JPEG embedded in the file — the best the camera itself wrote, which is what the
+     * inspector shows as the compressed rendition.
+     */
+    fun embeddedJpeg(source: ByteSource): EmbeddedJpeg? {
         var bestOffset = -1
         var bestArea = 0L
         var bestWidth = 0
@@ -246,11 +277,7 @@ object RawImage {
         }
         if (bestOffset < 0) return null
         val payload = source.copyRange(bestOffset, jpegLength(source, bestOffset)) ?: return null
-        val options = BitmapFactory.Options().apply {
-            inSampleSize = sampleSizeFor(bestWidth, bestHeight, targetWidth, targetHeight)
-            if (lowQuality) inPreferredConfig = Bitmap.Config.RGB_565
-        }
-        return runCatching { BitmapFactory.decodeByteArray(payload, 0, payload.size, options) }.getOrNull()
+        return EmbeddedJpeg(payload, bestWidth, bestHeight)
     }
 
     /** Length through the end-of-image marker, so only the preview itself gets copied. */

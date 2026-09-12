@@ -2,6 +2,67 @@
 
 Lean Android dual-pane file browser built with Kotlin and Jetpack Compose.
 
+## Version 4.0.0 (September 2026)
+
+### Rotate
+
+- Single-image view has a rotate-90°-clockwise button that saves to the same file. The turn is
+  written as the orientation tag — in IFD0 for TIFF and the RAW formats built on it, through EXIF
+  for JPEG, PNG and WebP — so the pixels, and a RAW file's sensor data, are never re-encoded.
+- Because the write is a handful of bytes, the cost is redrawing the file afterwards. For RAW and
+  TIFF whose decode would need more than about 60% of the heap this device grants the app, a
+  prompt says so before anything is written.
+- Orientation is now honoured when showing ordinary JPEG and PNG images too; previously only RAW
+  and TIFF were turned to match their tag.
+- Rotating a Google Drive image is not supported; copy it locally first.
+
+### Setting an image as a background
+
+- Tapping the preview box in file-tree mode opens a "Set image as" dialog: file browser background,
+  home screen, lock screen, home and lock, or all three. Choose one and apply, or cancel.
+- The file browser background is copied into app storage and survives restarts; the dialog offers to
+  remove it once one is set. It is drawn behind both panes, dimmed by default, and the dialog has a
+  second radio pair to show it at full brightness instead.
+- Both destinations take the decoded image rather than the file, so RAW, TIFF and Drive images can
+  be used as wallpaper too.
+- Nothing is stretched: the wallpaper is scaled by one factor until it covers the screen and the
+  middle is kept, so a landscape photo on a portrait screen fills top to bottom and loses its sides.
+  The file browser background is cropped the same way as the panes are laid out.
+
+### The inspector and moving between images
+
+- The inspector closes whenever another image is shown — swiped to, tapped in the grid, or stepped
+  onto after a delete. It belongs to the file it was opened on: the next one may be a JPEG with no
+  inspector at all, and another RAW would otherwise be read at full resolution unasked.
+
+### Coming back from the gallery
+
+- Closing the gallery selects the image that was on screen in the pane it was opened from, so a
+  swipe through a folder comes back to where it ended rather than where it began.
+- The pane scrolls that row back into view, centred, whether the file is near the top of a folder
+  or the bottom of a long one. A row already on screen is left where it is.
+
+### Large TIFFs
+
+- Opening a TIFF draws the file's own pixels rather than the thumbnail stored inside it. Those
+  thumbnails are routinely a few hundred pixels wide, and stretching one across the screen is what
+  made large TIFFs look soft; the embedded preview is now used only when it is at least as wide as
+  the screen, or when the image itself cannot be decoded.
+- Fitted images are decoded at twice the viewport, so the first frame is sharp on a dense display
+  and survives a pinch before a sharper tile arrives. Zooming still refines a tile at a time out of
+  the pyramid, which is what keeps a gigapixel file inside a fixed memory budget.
+- Grid thumbnails follow the same rule, so a TIFF whose preview is smaller than the cell is
+  rendered rather than upscaled.
+
+### RAW inspector: compressed or uncompressed
+
+- Inspecting a RAW file, a second toolbar button switches between the sensor data (uncompressed,
+  the default) and the camera's own JPEG. The compressed view takes the largest JPEG in the file —
+  the best rendition the camera wrote — decodes it at its native resolution in full colour rather
+  than at viewport size, and keeps the JPEG so zooming pulls sharper crops out of it instead of
+  magnifying the overview.
+- The label names which one is on screen, e.g. `Embedded JPEG 6720×4480`.
+
 ## Version 3.1.0 (September 2026)
 
 ### Commands follow the selection, not the arrow
