@@ -27,8 +27,8 @@ android {
         applicationId = "org.gpdresearch.hyperbrowser"
         minSdk = 26
         targetSdk = 35
-        versionCode = 9
-        versionName = "3.1.0"
+        versionCode = 10
+        versionName = "4.0.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

@@ -2,13 +2,7 @@
 
 Lean Android dual-pane file browser built with Kotlin and Jetpack Compose.
 
-## Version 3.1.0 (September 2026)
-
-### Commands follow the selection, not the arrow
-
-- Delete, rename, gallery and the other single-item commands act on whichever pane holds the
-  selection. Only copy and move read the transfer arrow, so a folder picked in the pane the arrow
-  points at is no longer deleted from the other side.
+## Version 4.0.0 (September 2026)
 
 ### Rotate
 
@@ -68,6 +62,14 @@ Lean Android dual-pane file browser built with Kotlin and Jetpack Compose.
   than at viewport size, and keeps the JPEG so zooming pulls sharper crops out of it instead of
   magnifying the overview.
 - The label names which one is on screen, e.g. `Embedded JPEG 6720×4480`.
+
+## Version 3.1.0 (September 2026)
+
+### Commands follow the selection, not the arrow
+
+- Delete, rename, gallery and the other single-item commands act on whichever pane holds the
+  selection. Only copy and move read the transfer arrow, so a folder picked in the pane the arrow
+  points at is no longer deleted from the other side.
 
 ### Warnings before wholesale changes
 
