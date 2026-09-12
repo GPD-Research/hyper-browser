@@ -46,10 +46,26 @@ object AppBackground {
         runCatching { file(context).delete() }
     }
 
-    fun load(context: Context): Bitmap? {
+    /**
+     * Decoded no larger than the screen it is drawn on: the stored image is wallpaper-sized, and
+     * holding it at full resolution takes heap away from the previews drawn over it.
+     */
+    fun load(context: Context, maxWidth: Int = 0, maxHeight: Int = 0): Bitmap? {
         val stored = file(context)
         if (!stored.exists()) return null
-        return runCatching { BitmapFactory.decodeFile(stored.path) }.getOrNull()
+        return runCatching {
+            val options = BitmapFactory.Options()
+            if (maxWidth > 0 && maxHeight > 0) {
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeFile(stored.path, bounds)
+                var sample = 1
+                while (bounds.outWidth / (sample * 2) >= maxWidth && bounds.outHeight / (sample * 2) >= maxHeight) {
+                    sample *= 2
+                }
+                options.inSampleSize = sample
+            }
+            BitmapFactory.decodeFile(stored.path, options)
+        }.getOrNull()
     }
 }
 

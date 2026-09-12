@@ -348,6 +348,9 @@ private data class LayoutMetrics(
     val commandIcon: Dp,
     val commandLabel: TextUnit,
     val rowIcon: Dp,
+    // The gap belongs to the row's select-and-preview area: the name itself opens the item, so the
+    // wider the gap, the easier the icon side is to hit without opening anything.
+    val rowIconGap: Dp,
     val rowFontSize: TextUnit,
     val rowPadding: Dp,
     val paneHeaderSize: TextUnit,
@@ -361,7 +364,8 @@ private fun metricsFor(mode: LayoutMode): LayoutMetrics = when (mode) {
         commandHeight = 60.dp,
         commandIcon = 20.dp,
         commandLabel = 9.sp,
-        rowIcon = 14.dp,
+        rowIcon = 20.dp,
+        rowIconGap = 14.dp,
         rowFontSize = 12.sp,
         rowPadding = 4.dp,
         paneHeaderSize = 12.sp,
@@ -375,7 +379,8 @@ private fun metricsFor(mode: LayoutMode): LayoutMetrics = when (mode) {
         commandHeight = 72.dp,
         commandIcon = 26.dp,
         commandLabel = 11.sp,
-        rowIcon = 14.dp,
+        rowIcon = 20.dp,
+        rowIconGap = 14.dp,
         rowFontSize = 12.sp,
         rowPadding = 4.dp,
         paneHeaderSize = 12.sp,
@@ -638,7 +643,7 @@ private fun HyperBrowserApp() {
     var background by remember { mutableStateOf<ImageBitmap?>(null) }
     var backgroundDim by rememberSaveable { mutableFloatStateOf(prefs.getFloat(BACKGROUND_DIM_PREF, 0f)) }
     LaunchedEffect(Unit) {
-        background = withContext(Dispatchers.IO) { AppBackground.load(activity)?.asImageBitmap() }
+        background = withContext(Dispatchers.IO) { loadBackground(activity) }
     }
     var renameTarget by rememberSaveable { mutableStateOf<Uri?>(null) }
     var renameValue by rememberSaveable { mutableStateOf("") }
@@ -679,6 +684,10 @@ private fun HyperBrowserApp() {
         value = selectedFile?.let { uri -> withContext(Dispatchers.IO) { Storage.mimeType(activity, uri) } } ?: ""
     }
     val isImageSelected = selectedMimeType.startsWith("image/")
+    // Closing the preview hides it for that image only; choosing another one brings it back.
+    LaunchedEffect(selectedFile) {
+        if (selectedFile != null) selectionPreviewVisible = true
+    }
     val isDirectorySelected by produceState(initialValue = false, selectedFile) {
         value = selectedFile?.let { uri ->
             withContext(Dispatchers.IO) { Storage.entry(activity, uri)?.isDirectory == true }
@@ -1190,9 +1199,7 @@ private fun HyperBrowserApp() {
                             applyImageAs(activity, setAsTarget, target)
                         }
                         if (target.app) {
-                            background = withContext(Dispatchers.IO) {
-                                AppBackground.load(activity)?.asImageBitmap()
-                            }
+                            background = withContext(Dispatchers.IO) { loadBackground(activity) }
                         }
                         Toast.makeText(activity, outcome, Toast.LENGTH_SHORT).show()
                     }
@@ -1397,6 +1404,12 @@ private fun launchExternalApp(
     }
     runCatching { activity.startActivity(Intent.createChooser(intent, title)) }
         .onFailure { Toast.makeText(activity, "No app can open this file", Toast.LENGTH_SHORT).show() }
+}
+
+/** The stored background, decoded no larger than the display it is drawn across. */
+private fun loadBackground(activity: ComponentActivity): ImageBitmap? {
+    val display = activity.resources.displayMetrics
+    return AppBackground.load(activity, display.widthPixels, display.heightPixels)?.asImageBitmap()
 }
 
 /** Where the dimming slider starts when dimming is first switched on. */
@@ -2139,11 +2152,19 @@ private fun SelectionThumbnail(
             Icon(Icons.Filled.Image, contentDescription = null)
         }
 
+        // Kept small: at the default touch target it covers a quarter of the preview, and a tap
+        // meant for the image lands on it instead.
         IconButton(
             onClick = onClose,
-            modifier = Modifier.align(Alignment.TopEnd),
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .size(28.dp),
         ) {
-            Icon(Icons.Filled.Close, contentDescription = "Close preview")
+            Icon(
+                Icons.Filled.Close,
+                contentDescription = "Close preview",
+                modifier = Modifier.size(16.dp),
+            )
         }
     }
 }
@@ -4526,7 +4547,7 @@ private fun DirectoryPane(
                                     keyboardActions = KeyboardActions(onDone = { onCommitRename() }),
                                     modifier = Modifier
                                         .weight(1f)
-                                        .padding(start = 6.dp)
+                                        .padding(start = metrics.rowIconGap)
                                         .focusRequester(focusRequester),
                                 )
                                 TextButton(onClick = onCommitRename, contentPadding = PaddingValues(6.dp)) {
@@ -4536,7 +4557,7 @@ private fun DirectoryPane(
                                 Text(
                                     text = file.name,
                                     modifier = Modifier
-                                        .padding(start = 6.dp)
+                                        .padding(start = metrics.rowIconGap)
                                         .combinedClickable(
                                             onClick = {
                                                 onActivate()
