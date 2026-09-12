@@ -114,6 +114,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -475,7 +476,7 @@ private const val PANE_LEFT = "left"
 private const val PANE_RIGHT = "right"
 private const val THEME_PREF = "app_theme"
 private const val LAYOUT_PREF = "layout_mode"
-private const val BACKGROUND_DIM_PREF = "background_dim"
+private const val BACKGROUND_DIM_PREF = "background_dim_level"
 
 /** Keeps the browsed folder and the current selection across a rotation. */
 private val PaneStateSaver = listSaver<BrowserPaneState, String>(
@@ -620,7 +621,7 @@ private fun HyperBrowserApp() {
     // The image whose "set as" dialog is open, and the one currently behind the file tree.
     var setAsUri by rememberSaveable { mutableStateOf<Uri?>(null) }
     var background by remember { mutableStateOf<ImageBitmap?>(null) }
-    var dimBackground by rememberSaveable { mutableStateOf(prefs.getBoolean(BACKGROUND_DIM_PREF, true)) }
+    var backgroundDim by rememberSaveable { mutableFloatStateOf(prefs.getFloat(BACKGROUND_DIM_PREF, 0f)) }
     LaunchedEffect(Unit) {
         background = withContext(Dispatchers.IO) { AppBackground.load(activity)?.asImageBitmap() }
     }
@@ -933,7 +934,7 @@ private fun HyperBrowserApp() {
                         bitmap = image,
                         contentDescription = null,
                         contentScale = ContentScale.Crop,
-                        alpha = if (dimBackground) 1f - BACKGROUND_DIM else 1f,
+                        alpha = 1f - backgroundDim,
                         modifier = Modifier.fillMaxSize(),
                     )
                 }
@@ -1154,10 +1155,12 @@ private fun HyperBrowserApp() {
         if (setAsTarget != null) {
             SetImageAsDialog(
                 hasBackground = background != null,
-                dim = dimBackground,
+                activity = activity,
+                uri = setAsTarget,
+                dim = backgroundDim,
                 onDimChange = { dim ->
-                    dimBackground = dim
-                    prefs.edit().putBoolean(BACKGROUND_DIM_PREF, dim).apply()
+                    backgroundDim = dim
+                    prefs.edit().putFloat(BACKGROUND_DIM_PREF, dim).apply()
                 },
                 onDismiss = { setAsUri = null },
                 onClearBackground = {
@@ -1381,8 +1384,11 @@ private fun launchExternalApp(
         .onFailure { Toast.makeText(activity, "No app can open this file", Toast.LENGTH_SHORT).show() }
 }
 
-/** How far the background is taken down behind the file tree, so rows stay legible. */
+/** Where the dimming slider starts when dimming is first switched on. */
 private const val BACKGROUND_DIM = 0.15f
+
+/** Past this the image is gone anyway, and the slider would only be choosing shades of black. */
+private const val BACKGROUND_DIM_MAX = 0.9f
 
 /**
  * Puts the image where the dialog asked for it. Both destinations take a decoded bitmap rather
@@ -1969,13 +1975,19 @@ private fun CommandButton(
 @Composable
 private fun SetImageAsDialog(
     hasBackground: Boolean,
-    dim: Boolean,
-    onDimChange: (Boolean) -> Unit,
+    activity: ComponentActivity,
+    uri: Uri,
+    dim: Float,
+    onDimChange: (Float) -> Unit,
     onApply: (WallpaperTarget) -> Unit,
     onClearBackground: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     var choice by remember { mutableStateOf(WallpaperTarget.APP) }
+    // No dimming is stored as zero; the slider keeps a level to return to when it is switched back
+    // on. It is dragged locally so the preview tracks the finger, and written when it is let go.
+    var dimOn by remember { mutableStateOf(dim > 0f) }
+    var dimming by remember { mutableFloatStateOf(dim.takeIf { it > 0f } ?: BACKGROUND_DIM) }
     HyperDialog(
         onDismissRequest = onDismiss,
         title = { Text("Set image as") },
@@ -1992,21 +2004,39 @@ private fun SetImageAsDialog(
                         Text(target.label)
                     }
                 }
-                Text(
-                    text = "File browser background",
-                    modifier = Modifier.padding(top = 8.dp),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                listOf(true to "Dimmed behind the panes", false to "Full brightness").forEach { (dimmed, label) ->
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onDimChange(dimmed) },
-                    ) {
-                        RadioButton(selected = dim == dimmed, onClick = { onDimChange(dimmed) })
-                        Text(label)
-                    }
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp)
+                        .clickable {
+                            dimOn = !dimOn
+                            onDimChange(if (dimOn) dimming else 0f)
+                        },
+                ) {
+                    Checkbox(
+                        checked = dimOn,
+                        onCheckedChange = {
+                            dimOn = it
+                            onDimChange(if (it) dimming else 0f)
+                        },
+                    )
+                    Text("Dim the file browser background")
+                }
+                if (dimOn) {
+                    Text(
+                        text = "Dimmed ${(dimming * 100).roundToInt()}%",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    BackgroundDimPreview(activity = activity, uri = uri, dim = dimming)
+                    Slider(
+                        value = dimming,
+                        onValueChange = {
+                            dimming = it
+                            onDimChange(it)
+                        },
+                        valueRange = 0f..BACKGROUND_DIM_MAX,
+                    )
                 }
                 if (hasBackground) {
                     TextButton(onClick = onClearBackground) { Text("Remove the file browser background") }
@@ -2016,6 +2046,38 @@ private fun SetImageAsDialog(
         confirmButton = { TextButton(onClick = { onApply(choice) }) { Text("Apply") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
+}
+
+/** The chosen image at the chosen dimming, over the colour the panes are drawn on. */
+@Composable
+private fun BackgroundDimPreview(activity: ComponentActivity, uri: Uri, dim: Float) {
+    val pixels = with(LocalDensity.current) { 160.dp.roundToPx() }
+    val bitmap by produceState<ImageBitmap?>(initialValue = null, uri, pixels) {
+        value = withContext(Dispatchers.IO) { loadBitmap(activity, uri, pixels, pixels) }
+    }
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(96.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(MaterialTheme.colorScheme.background),
+        contentAlignment = Alignment.Center,
+    ) {
+        bitmap?.let { image ->
+            Image(
+                bitmap = image,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                alpha = 1f - dim,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+        Text(
+            text = "File name",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onBackground,
+        )
+    }
 }
 
 @Composable
