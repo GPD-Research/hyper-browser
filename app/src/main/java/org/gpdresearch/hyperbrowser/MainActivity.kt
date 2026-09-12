@@ -1,6 +1,7 @@
 package org.gpdresearch.hyperbrowser
 
 import android.Manifest
+import android.app.WallpaperManager
 import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
@@ -92,6 +93,7 @@ import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Wallpaper
 import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.material.icons.filled.ZoomOut
 import androidx.compose.material3.AlertDialog
@@ -1289,6 +1291,33 @@ private fun launchExternalApp(
     }
     runCatching { activity.startActivity(Intent.createChooser(intent, title)) }
         .onFailure { Toast.makeText(activity, "No app can open this file", Toast.LENGTH_SHORT).show() }
+}
+
+/**
+ * Offers the image to the device's own wallpaper handling: the "Set as" targets, plus the platform
+ * cropper, which on stock Android is the only thing that can set a wallpaper from a file.
+ */
+private fun setAsWallpaper(activity: ComponentActivity, uri: Uri, mimeType: String?) {
+    val shared = if (DriveUris.isDrive(uri)) null else shareableUri(activity, uri)
+    if (shared == null) {
+        Toast.makeText(activity, "Copy this image to local storage to set it as wallpaper", Toast.LENGTH_SHORT).show()
+        return
+    }
+    val type = mimeType?.takeIf { it.isNotBlank() } ?: "image/*"
+    val attach = Intent(Intent.ACTION_ATTACH_DATA).apply {
+        setDataAndType(shared, type)
+        putExtra("mimeType", type)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    // Throws on anything the cropper cannot read, so its absence is a normal outcome.
+    val cropper = runCatching {
+        WallpaperManager.getInstance(activity).getCropAndSetWallpaperIntent(shared)
+    }.getOrNull()?.apply { addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+    val chooser = Intent.createChooser(attach, "Set as wallpaper").apply {
+        if (cropper != null) putExtra(Intent.EXTRA_INITIAL_INTENTS, arrayOf(cropper))
+    }
+    runCatching { activity.startActivity(chooser) }
+        .onFailure { Toast.makeText(activity, "No app on this device sets wallpapers", Toast.LENGTH_SHORT).show() }
 }
 
 private fun planTransfer(
@@ -2944,6 +2973,9 @@ private fun ImageViewerScreen(
                                 resetTransform()
                             }
                         }
+                        GalleryAction(Icons.Filled.Wallpaper, "Set as wallpaper") {
+                            setAsWallpaper(activity, currentUri, currentMimeType)
+                        }
                         GalleryAction(Icons.Filled.ZoomOut, "Zoom out") { zoomOut() }
                         GalleryAction(Icons.Filled.ZoomIn, "Zoom in") { zoomIn() }
                         GalleryAction(Icons.Filled.Info, "Image information") { showExif = true }
@@ -3265,6 +3297,11 @@ private fun ImageViewerScreen(
                                 )
                                 imageActionUri = null
                             }) { Text("Edit in external editor") }
+                            Button(onClick = {
+                                val target = imageActionUri ?: return@Button
+                                imageActionUri = null
+                                setAsWallpaper(activity, target, null)
+                            }) { Text("Set as wallpaper") }
                             Button(onClick = {
                                 val target = imageActionUri ?: return@Button
                                 imageActionUri = null

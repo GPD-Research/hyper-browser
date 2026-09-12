@@ -79,6 +79,10 @@ embedded preview rather than presented as sensor data.
 - Opens a selected image in view mode within its folder, a selected folder as a thumbnail grid,
   and the pane's current folder as a grid when nothing is selected. Previously it did nothing
   unless a single image file was selected.
+- Viewing a single image, the top bar has a "Set as wallpaper" action. It hands the image to the
+  device's own wallpaper handling — the system "Set as" targets plus the platform cropper — rather
+  than setting the wallpaper itself, so whatever wallpaper apps are installed are what you get. It
+  is also on the long-press image menu. Drive items must be copied to local storage first.
 
 ### Verification
 
