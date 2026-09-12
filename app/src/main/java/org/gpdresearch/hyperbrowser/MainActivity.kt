@@ -36,6 +36,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -290,8 +291,11 @@ private const val MAX_TEXTURE_EDGE = 8192
 /** High enough to reach 1:1 pixels on a gigapixel source; tiles keep the memory cost flat. */
 private const val MAX_SINGLE_ZOOM = 64f
 
-/** A touch older than this has had its double-tap window; the selection it makes has landed. */
-private const val SELECTION_SETTLE_MS = 350L
+/**
+ * A row tap turns into a selection one double-tap timeout (300ms) after the finger lifts, so a
+ * touch older than this has had its window and the selection it makes has landed.
+ */
+private const val SELECTION_SETTLE_MS = 450L
 
 private enum class LayoutMode(val label: String) {
     PHONE("Phone"),
@@ -328,18 +332,18 @@ private fun metricsFor(mode: LayoutMode): LayoutMetrics = when (mode) {
         paneHeaderSize = 12.sp,
         activePaneWeight = 1f,
     )
-    // Only the controls grow with the screen. List text and row padding stay close to phone
-    // density: a tablet is meant to show more of each tree, not the same rows written larger.
+    // Only the controls grow with the screen; the lists keep phone density, so the extra dp of a
+    // tablet go into more visible rows rather than into the same rows written larger.
     LayoutMode.TABLET_BALANCED -> LayoutMetrics(
         stripWidth = 80.dp,
         previewSize = 288.dp,
         commandHeight = 72.dp,
         commandIcon = 26.dp,
         commandLabel = 11.sp,
-        rowIcon = 16.dp,
-        rowFontSize = 13.sp,
-        rowPadding = 5.dp,
-        paneHeaderSize = 13.sp,
+        rowIcon = 14.dp,
+        rowFontSize = 12.sp,
+        rowPadding = 4.dp,
+        paneHeaderSize = 12.sp,
         activePaneWeight = 1f,
     )
 }
@@ -3728,11 +3732,14 @@ private fun DirectoryPane(
                                     Modifier
                                 }
                             )
-                            // Reported on the down event, ahead of the click the double-tap window
-                            // holds back, so commands know a selection is on its way.
+                            // Reported as the finger goes down and again as it lifts, ahead of the
+                            // click the double-tap window holds back, so commands know a selection
+                            // is on its way and how long ago its window started.
                             .pointerInput(Unit) {
                                 awaitEachGesture {
                                     awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                                    onRowTouched()
+                                    waitForUpOrCancellation(pass = PointerEventPass.Initial)
                                     onRowTouched()
                                 }
                             }
