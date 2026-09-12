@@ -2,6 +2,43 @@
 
 Lean Android dual-pane file browser built with Kotlin and Jetpack Compose.
 
+## Version 3.1.0 (September 2026)
+
+### Commands follow the selection, not the arrow
+
+- Delete, rename, gallery and the other single-item commands act on whichever pane holds the
+  selection. Only copy and move read the transfer arrow, so a folder picked in the pane the arrow
+  points at is no longer deleted from the other side.
+
+### Warnings before wholesale changes
+
+- Deleting more than one folder at once lists each folder with the number of files and subfolders
+  inside it, and needs the "yes, delete all" box ticked. Deleting files stays a single tap.
+- Copying or moving more than one folder into a destination lists the folders and where they are
+  headed, and needs the same acknowledgement.
+
+### Undo
+
+- The last delete, copy or move can be undone from the command strip. Deleted items are parked in
+  a hidden `.HyperBrowserTrash` folder beside where they came from and put back on undo; undoing a
+  copy removes the copies. Backends that cannot move an item still delete it outright, and nothing
+  is offered to undo in that case.
+- Undo survives a rotation or a window resize.
+
+### Layout
+
+- The command strip runs the full height of the window, so the root chips and the direction arrow
+  sit centred over their own panes and there is room for more commands. It still scrolls when the
+  window is too short for all of them.
+- The preview that follows a selected image is twice its old size in phone mode and three times it
+  in tablet mode, and is decoded at that size rather than upscaled. The "tablet wide" layout mode
+  is gone; the two remaining modes are phone and tablet.
+- The root button above each pane shows the full path, right-aligned and truncated from the left,
+  so the folder you are actually in stays visible as the path deepens. Shared storage is named
+  "Internal Storage" rather than the "0" it is called on disk.
+- Tablet mode enlarges the controls only. The file lists keep the same text size and row height as
+  phone mode, so a larger screen shows more of each tree instead of the same rows written larger.
+
 ## Version 3.0.2 (September 2026)
 
 ### Immersive image viewing
@@ -42,6 +79,10 @@ embedded preview rather than presented as sensor data.
 - Opens a selected image in view mode within its folder, a selected folder as a thumbnail grid,
   and the pane's current folder as a grid when nothing is selected. Previously it did nothing
   unless a single image file was selected.
+- Viewing a single image, the top bar has a "Set as wallpaper" action. It hands the image to the
+  device's own wallpaper handling — the system "Set as" targets plus the platform cropper — rather
+  than setting the wallpaper itself, so whatever wallpaper apps are installed are what you get. It
+  is also on the long-press image menu. Drive items must be copied to local storage first.
 
 ### Verification
 

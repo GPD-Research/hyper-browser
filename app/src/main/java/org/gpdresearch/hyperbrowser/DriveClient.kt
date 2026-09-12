@@ -197,16 +197,29 @@ object DriveClient {
         }.getOrNull()
     }
 
-    fun upload(parentId: String, name: String, mimeType: String?, input: InputStream): Boolean {
-        val drive = service ?: return false
+    fun upload(parentId: String, name: String, mimeType: String?, input: InputStream): FileEntry? {
+        val drive = service ?: return null
         val metadata = DriveFile().apply {
             this.name = name
             parents = listOf(parentId)
         }
         val content = InputStreamContent(mimeType ?: "application/octet-stream", input)
         return runCatching {
-            drive.files().create(metadata, content).setFields("id").setSupportsAllDrives(true).execute()
-        }.isSuccess
+            drive.files().create(metadata, content).setFields(DRIVE_FIELDS).setSupportsAllDrives(true).execute().toEntry()
+        }.onFailure { Log.e("DriveClient", "Failed to upload $name", it) }.getOrNull()
+    }
+
+    fun move(fileId: String, addParentId: String, removeParentId: String): FileEntry? {
+        val drive = service ?: return null
+        return runCatching {
+            drive.files().update(fileId, null)
+                .setAddParents(addParentId)
+                .setRemoveParents(removeParentId)
+                .setFields(DRIVE_FIELDS)
+                .setSupportsAllDrives(true)
+                .execute()
+                .toEntry()
+        }.onFailure { Log.e("DriveClient", "Failed to move $fileId", it) }.getOrNull()
     }
 
     fun delete(fileId: String): Boolean {

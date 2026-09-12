@@ -1,6 +1,7 @@
 package org.gpdresearch.hyperbrowser
 
 import android.Manifest
+import android.app.WallpaperManager
 import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
@@ -13,6 +14,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.os.SystemClock
 import android.os.storage.StorageManager
 import android.provider.DocumentsContract
 import android.provider.Settings
@@ -35,6 +37,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -50,6 +53,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -75,6 +79,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.DriveFileMove
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
+import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
@@ -88,6 +93,7 @@ import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Wallpaper
 import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.material.icons.filled.ZoomOut
 import androidx.compose.material3.AlertDialog
@@ -100,6 +106,7 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalContentColor
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
@@ -114,6 +121,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -132,12 +140,15 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -285,19 +296,26 @@ private const val MAX_TEXTURE_EDGE = 8192
 /** High enough to reach 1:1 pixels on a gigapixel source; tiles keep the memory cost flat. */
 private const val MAX_SINGLE_ZOOM = 64f
 
+/**
+ * A row tap turns into a selection one double-tap timeout (300ms) after the finger lifts, so a
+ * touch older than this has had its window and the selection it makes has landed.
+ */
+private const val SELECTION_SETTLE_MS = 450L
+
+private const val INTERNAL_STORAGE_LABEL = "Internal Storage"
+
 private enum class LayoutMode(val label: String) {
     PHONE("Phone"),
-    TABLET_BALANCED("Tablet balanced"),
-    TABLET_WIDE("Tablet wide"),
+    TABLET_BALANCED("Tablet"),
 }
 
 /**
  * The layout modes used to differ only in a few dp of strip width, which was invisible in practice.
- * Each mode now drives control size, list density and — on [LayoutMode.TABLET_WIDE] — how much
- * extra width the focused pane takes from the other one.
+ * Each mode now drives control size, list density and the size of the floating selection preview.
  */
 private data class LayoutMetrics(
     val stripWidth: Dp,
+    val previewSize: Dp,
     val commandHeight: Dp,
     val commandIcon: Dp,
     val commandLabel: TextUnit,
@@ -311,6 +329,7 @@ private data class LayoutMetrics(
 private fun metricsFor(mode: LayoutMode): LayoutMetrics = when (mode) {
     LayoutMode.PHONE -> LayoutMetrics(
         stripWidth = 56.dp,
+        previewSize = 192.dp,
         commandHeight = 60.dp,
         commandIcon = 20.dp,
         commandLabel = 9.sp,
@@ -320,33 +339,24 @@ private fun metricsFor(mode: LayoutMode): LayoutMetrics = when (mode) {
         paneHeaderSize = 12.sp,
         activePaneWeight = 1f,
     )
+    // Only the controls grow with the screen; the lists keep phone density, so the extra dp of a
+    // tablet go into more visible rows rather than into the same rows written larger.
     LayoutMode.TABLET_BALANCED -> LayoutMetrics(
-        stripWidth = 92.dp,
-        commandHeight = 86.dp,
-        commandIcon = 30.dp,
-        commandLabel = 13.sp,
-        rowIcon = 22.dp,
-        rowFontSize = 16.sp,
-        rowPadding = 9.dp,
-        paneHeaderSize = 16.sp,
+        stripWidth = 80.dp,
+        previewSize = 288.dp,
+        commandHeight = 72.dp,
+        commandIcon = 26.dp,
+        commandLabel = 11.sp,
+        rowIcon = 14.dp,
+        rowFontSize = 12.sp,
+        rowPadding = 4.dp,
+        paneHeaderSize = 12.sp,
         activePaneWeight = 1f,
-    )
-    LayoutMode.TABLET_WIDE -> LayoutMetrics(
-        stripWidth = 112.dp,
-        commandHeight = 100.dp,
-        commandIcon = 36.dp,
-        commandLabel = 15.sp,
-        rowIcon = 26.dp,
-        rowFontSize = 19.sp,
-        rowPadding = 13.dp,
-        paneHeaderSize = 19.sp,
-        activePaneWeight = 1.8f,
     )
 }
 
 /** Best guess for a first run; the user can still pick any mode in settings. */
 private fun defaultLayoutMode(smallestWidthDp: Int): LayoutMode = when {
-    smallestWidthDp >= 720 -> LayoutMode.TABLET_WIDE
     smallestWidthDp >= 600 -> LayoutMode.TABLET_BALANCED
     else -> LayoutMode.PHONE
 }
@@ -354,6 +364,41 @@ private fun defaultLayoutMode(smallestWidthDp: Int): LayoutMode = when {
 private data class FileDisplayOptions(
     val showHiddenFiles: Boolean = false,
     val showTrashFiles: Boolean = false,
+)
+
+/** Flattened to strings: label, then one entry per trashed triple and per created URI. */
+private val UndoRecordSaver = listSaver<UndoRecord?, String>(
+    save = { record ->
+        if (record == null) {
+            emptyList()
+        } else {
+            listOf(record.label, record.trashed.size.toString()) +
+                record.trashed.flatMap {
+                    listOf(it.originalParent.toString(), it.originalName, it.trashedUri.toString())
+                } +
+                record.created.map(Uri::toString)
+        }
+    },
+    restore = { stored ->
+        if (stored.isEmpty()) {
+            null
+        } else {
+            val trashedCount = stored[1].toInt()
+            val trashed = (0 until trashedCount).map { index ->
+                val base = 2 + index * 3
+                TrashedItem(
+                    originalParent = Uri.parse(stored[base]),
+                    originalName = stored[base + 1],
+                    trashedUri = Uri.parse(stored[base + 2]),
+                )
+            }
+            UndoRecord(
+                label = stored[0],
+                trashed = trashed,
+                created = stored.drop(2 + trashedCount * 3).map(Uri::parse),
+            )
+        }
+    },
 )
 
 private val FileDisplayOptionsSaver = listSaver<FileDisplayOptions, Boolean>(
@@ -477,6 +522,13 @@ private data class FilesIntoFolderPrompt(
     val targetName: String,
 )
 
+private data class BulkFolderPrompt(
+    val request: TransferRequest,
+    val folderNames: List<String>,
+    val fileCount: Int,
+    val targetName: String,
+)
+
 private sealed interface TransferPlan {
     /** The selection is valid, so the operation only stages the clipboard. */
     object Staged : TransferPlan
@@ -488,6 +540,9 @@ private sealed interface TransferPlan {
 
     /** Files are selected on both sides, so the destination folder has to be inferred. */
     data class FilesIntoFolder(val prompt: FilesIntoFolderPrompt) : TransferPlan
+
+    /** Several folders at once can bury a destination, so they are listed before anything moves. */
+    data class BulkFolders(val prompt: BulkFolderPrompt) : TransferPlan
 }
 
 private data class SelectionInfo(
@@ -528,8 +583,12 @@ private fun HyperBrowserApp() {
     var pendingRequest by remember { mutableStateOf<TransferRequest?>(null) }
     var pendingFolderTransfer by remember { mutableStateOf<FolderTransferPrompt?>(null) }
     var pendingFilesTransfer by remember { mutableStateOf<FilesIntoFolderPrompt?>(null) }
+    var pendingBulkFolders by remember { mutableStateOf<BulkFolderPrompt?>(null) }
     var reversePrompt by remember { mutableStateOf<TransferMode?>(null) }
-    var pendingDelete by remember { mutableStateOf<Set<Uri>?>(null) }
+    var pendingDelete by remember { mutableStateOf<DeletePlan?>(null) }
+    // Saveable: a rotation or resize would otherwise strand the last operation with no way back.
+    var undoRecord by rememberSaveable(stateSaver = UndoRecordSaver) { mutableStateOf<UndoRecord?>(null) }
+    var lastRowTouchAt by remember { mutableLongStateOf(0L) }
     var propertiesUri by remember { mutableStateOf<Uri?>(null) }
     // Saved, so rotating while an image is open comes back to the gallery instead of the file tree.
     var galleryUri by rememberSaveable { mutableStateOf<Uri?>(null) }
@@ -556,12 +615,27 @@ private fun HyperBrowserApp() {
     }
     val metrics = metricsFor(layoutMode)
 
-    val sourcePane = if (transferDirection == TransferDirection.LEFT_TO_RIGHT) Pane.LEFT else Pane.RIGHT
-    val destinationPane = if (sourcePane == Pane.LEFT) Pane.RIGHT else Pane.LEFT
-    val sourceState = if (sourcePane == Pane.LEFT) leftPane else rightPane
-    val destinationState = if (destinationPane == Pane.LEFT) leftPane else rightPane
     val scope = rememberCoroutineScope()
-    val selected = sourceState.selected
+    // Single-item commands follow the selection itself; only transfers care about the arrow.
+    // Read through the states rather than a captured value, so a command tapped before the
+    // recomposition that follows a selection still acts on what is selected now. Only the pane
+    // the user is in counts: falling back to the other pane would aim a delete at whatever was
+    // left selected over there.
+    fun commandPane(): BrowserPaneState = if (activePane == Pane.LEFT) leftPane else rightPane
+
+    fun transferPanes(): Pair<BrowserPaneState, BrowserPaneState> =
+        if (transferDirection == TransferDirection.LEFT_TO_RIGHT) leftPane to rightPane else rightPane to leftPane
+
+    // A row tap only becomes a selection once the double-tap window has passed. A command tapped
+    // inside that window would otherwise run against the previous selection, so every command
+    // waits the rest of the window out before reading one.
+    suspend fun awaitSelectionSettled() {
+        val pending = SELECTION_SETTLE_MS - (SystemClock.uptimeMillis() - lastRowTouchAt)
+        if (pending > 0) delay(pending)
+    }
+
+    val commandState = commandPane()
+    val selected = commandState.selected
     val selectedFile = selected.singleOrNull()
     val selectedMimeType by produceState(initialValue = "", selectedFile) {
         value = selectedFile?.let { uri -> withContext(Dispatchers.IO) { Storage.mimeType(activity, uri) } } ?: ""
@@ -585,9 +659,10 @@ private fun HyperBrowserApp() {
         value = uri?.let { withContext(Dispatchers.IO) { resolveDisplayPath(activity, it) } } ?: "Choose right root"
     }
 
+    // Both selections are dropped: after a write their URIs may point at items that no longer exist.
     fun refreshPanesAfterWrite() {
-        leftPane = leftPane.copy(refreshKey = leftPane.refreshKey + 1, selected = if (sourcePane == Pane.LEFT) emptySet() else leftPane.selected)
-        rightPane = rightPane.copy(refreshKey = rightPane.refreshKey + 1, selected = if (sourcePane == Pane.RIGHT) emptySet() else rightPane.selected)
+        leftPane = leftPane.copy(refreshKey = leftPane.refreshKey + 1, selected = emptySet())
+        rightPane = rightPane.copy(refreshKey = rightPane.refreshKey + 1, selected = emptySet())
     }
 
     fun commitRename() {
@@ -641,14 +716,13 @@ private fun HyperBrowserApp() {
             commitRename()
             return
         }
-        val active = if (activePane == Pane.LEFT) leftPane else rightPane
-        val other = if (activePane == Pane.LEFT) rightPane else leftPane
-        val target = active.selected.singleOrNull() ?: other.selected.singleOrNull()
-        if (target == null) {
-            Toast.makeText(activity, "Select a single item to rename", Toast.LENGTH_SHORT).show()
-            return
-        }
         scope.launch {
+            awaitSelectionSettled()
+            val target = commandPane().selected.singleOrNull()
+            if (target == null) {
+                Toast.makeText(activity, "Select a single item to rename", Toast.LENGTH_SHORT).show()
+                return@launch
+            }
             renameValue = withContext(Dispatchers.IO) { Storage.entry(activity, target)?.name }
                 ?: target.lastPathSegment
                 ?: return@launch
@@ -658,16 +732,65 @@ private fun HyperBrowserApp() {
 
     fun runTransfer(request: TransferRequest) {
         scope.launch {
-            val failures = withContext(Dispatchers.IO) { executeTransfer(activity, request) }
+            val result = withContext(Dispatchers.IO) { executeTransfer(activity, request) }
+            val verb = if (request.mode == TransferMode.MOVE) "move" else "copy"
+            undoRecord = UndoRecord(verb, result.trashed, result.created).takeIf { !it.isEmpty }
             refreshPanesAfterWrite()
-            if (failures > 0) {
-                Toast.makeText(activity, failureMessage(failures, "transferred"), Toast.LENGTH_LONG).show()
+            if (result.failures > 0) {
+                Toast.makeText(activity, failureMessage(result.failures, "transferred"), Toast.LENGTH_LONG).show()
             }
         }
     }
 
-    fun startOperation(mode: TransferMode, source: BrowserPaneState, target: BrowserPaneState) {
+    fun runUndo() {
+        val record = undoRecord ?: return
+        undoRecord = null
         scope.launch {
+            val failures = withContext(Dispatchers.IO) { undoOperation(activity, record) }
+            refreshPanesAfterWrite()
+            val message = if (failures > 0) {
+                failureMessage(failures, "restored")
+            } else {
+                "Undid the last ${record.label}"
+            }
+            Toast.makeText(activity, message, Toast.LENGTH_LONG).show()
+        }
+    }
+
+    fun startDelete() {
+        scope.launch {
+            awaitSelectionSettled()
+            val items = commandPane().selected
+            if (items.isEmpty()) {
+                Toast.makeText(activity, "Select a file or folder to delete", Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+            val plan = withContext(Dispatchers.IO) { buildDeletePlan(activity, items) }
+            if (plan.entries.isEmpty()) {
+                Toast.makeText(activity, "Nothing left to delete", Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+            pendingDelete = plan
+        }
+    }
+
+    fun runDelete(plan: DeletePlan) {
+        scope.launch {
+            val outcome = withContext(Dispatchers.IO) { deleteItems(activity, plan.uris) }
+            undoRecord = UndoRecord("delete", trashed = outcome.trashed).takeIf { !it.isEmpty }
+            refreshPanesAfterWrite()
+            if (outcome.failures > 0) {
+                Toast.makeText(activity, failureMessage(outcome.failures, "deleted"), Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    fun startOperation(mode: TransferMode, reversed: Boolean = false) {
+        scope.launch {
+            awaitSelectionSettled()
+            val (from, to) = transferPanes()
+            val source = if (reversed) to else from
+            val target = if (reversed) from else to
             when (val plan = withContext(Dispatchers.IO) { planTransfer(activity, source, target, mode) }) {
                 TransferPlan.Staged -> {
                     val sourceDir = source.current ?: source.root ?: return@launch
@@ -684,6 +807,7 @@ private fun HyperBrowserApp() {
                 TransferPlan.ReverseSuggested -> reversePrompt = mode
                 is TransferPlan.FolderIntoFolder -> pendingFolderTransfer = plan.prompt
                 is TransferPlan.FilesIntoFolder -> pendingFilesTransfer = plan.prompt
+                is TransferPlan.BulkFolders -> pendingBulkFolders = plan.prompt
             }
         }
     }
@@ -753,186 +877,194 @@ private fun HyperBrowserApp() {
                     .fillMaxSize()
                     .padding(contentPadding),
             ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize(),
-            ) {
-                if (galleryUri == null) {
-                    MinimalTransferMenu(
-                        direction = transferDirection,
-                        onReverse = {
-                            transferDirection = if (transferDirection == TransferDirection.LEFT_TO_RIGHT) TransferDirection.RIGHT_TO_LEFT else TransferDirection.LEFT_TO_RIGHT
+            if (galleryUri != null) {
+                ImageViewerScreen(
+                    activity = activity,
+                    startingUri = galleryUri!!,
+                    directoryUri = galleryDirectory,
+                    startStage = galleryStage,
+                    sortOrder = gallerySort,
+                    onUndoable = { record -> undoRecord = record },
+                    onClose = { galleryUri = null },
+                )
+            } else {
+                // The strip runs the full height beside everything else, so the root and direction
+                // buttons sit centred over their own panes and the strip has room to grow.
+                Row(modifier = Modifier.fillMaxSize()) {
+                    CommandStrip(
+                        metrics = metrics,
+                        onCopy = { startOperation(TransferMode.COPY) },
+                        onMove = { startOperation(TransferMode.MOVE) },
+                        onDelete = { startDelete() },
+                        onNewFolder = { startNewFolder() },
+                        onRename = { startRename() },
+                        renameActive = renameTarget != null,
+                        onGallery = {
+                            val target = selectedFile
+                            when {
+                                // An image opens in view mode among the rest of its folder.
+                                target != null && isImageSelected ->
+                                    openGallery(target, commandState.current)
+                                // A folder — chosen, or just the one the pane is showing —
+                                // opens as a grid of what is in it.
+                                target != null && isDirectorySelected ->
+                                    openGallery(target, target, GalleryStage.GRID_SMALL)
+                                else -> commandState.current?.let { directory ->
+                                    openGallery(directory, directory, GalleryStage.GRID_SMALL)
+                                }
+                            }
                         },
-                        onChooseLeftRoot = { showLeftPicker = true },
-                        onChooseRightRoot = { showRightPicker = true },
-                        leftLabel = leftLabel,
-                        rightLabel = rightLabel,
+                        undoLabel = undoRecord?.label,
+                        onUndo = { runUndo() },
+                        multiSelect = multiSelect,
+                        // Leaving multi mode doubles as "I changed my mind" and drops the payload.
+                        onToggleMulti = {
+                            if (multiSelect) {
+                                multiSelect = false
+                                leftPane = leftPane.copy(selected = emptySet())
+                                rightPane = rightPane.copy(selected = emptySet())
+                            } else {
+                                multiSelect = true
+                            }
+                        },
+                        selectionActive = leftPane.selected.isNotEmpty() || rightPane.selected.isNotEmpty(),
+                        onDeselect = {
+                            leftPane = leftPane.copy(selected = emptySet())
+                            rightPane = rightPane.copy(selected = emptySet())
+                        },
+                        onOpenSettings = { showLayoutSettings = true },
                     )
-                }
 
-                if (galleryUri != null) {
-                    ImageViewerScreen(
-                        activity = activity,
-                        startingUri = galleryUri!!,
-                        directoryUri = galleryDirectory,
-                        startStage = galleryStage,
-                        sortOrder = gallerySort,
-                        onClose = { galleryUri = null },
-                    )
-                } else {
-                    Box(modifier = Modifier.weight(1f)) {
-                        Row(
-                            modifier = Modifier.fillMaxSize(),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            CommandStrip(
-                                metrics = metrics,
-                                onCopy = { startOperation(TransferMode.COPY, sourceState, destinationState) },
-                                onMove = { startOperation(TransferMode.MOVE, sourceState, destinationState) },
-                                onDelete = {
-                                    val items = sourceState.selected.ifEmpty { setOfNotNull(sourceState.current) }
-                                    if (items.isNotEmpty()) {
-                                        pendingDelete = items
-                                    }
-                                },
-                                onNewFolder = { startNewFolder() },
-                                onRename = { startRename() },
-                                renameActive = renameTarget != null,
-                                onGallery = {
-                                    val target = selectedFile
-                                    when {
-                                        // An image opens in view mode among the rest of its folder.
-                                        target != null && isImageSelected ->
-                                            openGallery(target, sourceState.current)
-                                        // A folder — chosen, or just the one the pane is showing —
-                                        // opens as a grid of what is in it.
-                                        target != null && isDirectorySelected ->
-                                            openGallery(target, target, GalleryStage.GRID_SMALL)
-                                        else -> sourceState.current?.let { directory ->
-                                            openGallery(directory, directory, GalleryStage.GRID_SMALL)
-                                        }
-                                    }
-                                },
-                                multiSelect = multiSelect,
-                                // Leaving multi mode doubles as "I changed my mind" and drops the payload.
-                                onToggleMulti = {
-                                    if (multiSelect) {
-                                        multiSelect = false
-                                        leftPane = leftPane.copy(selected = emptySet())
-                                        rightPane = rightPane.copy(selected = emptySet())
-                                    } else {
-                                        multiSelect = true
-                                    }
-                                },
-                                selectionActive = leftPane.selected.isNotEmpty() || rightPane.selected.isNotEmpty(),
-                                onDeselect = {
-                                    leftPane = leftPane.copy(selected = emptySet())
-                                    rightPane = rightPane.copy(selected = emptySet())
-                                },
-                                onOpenSettings = { showLayoutSettings = true },
-                            )
+                    Column(modifier = Modifier.weight(1f)) {
+                        MinimalTransferMenu(
+                            direction = transferDirection,
+                            onReverse = {
+                                transferDirection = if (transferDirection == TransferDirection.LEFT_TO_RIGHT) TransferDirection.RIGHT_TO_LEFT else TransferDirection.LEFT_TO_RIGHT
+                            },
+                            onChooseLeftRoot = { showLeftPicker = true },
+                            onChooseRightRoot = { showRightPicker = true },
+                            leftLabel = leftLabel,
+                            rightLabel = rightLabel,
+                        )
 
-                            DirectoryPane(
-                                state = leftPane,
-                                isActive = activePane == Pane.LEFT,
-                                modifier = Modifier.weight(if (activePane == Pane.LEFT) metrics.activePaneWeight else 1f),
-                                onActivate = { activePane = Pane.LEFT },
-                                onNavigate = { directory ->
-                                    commitRename()
-                                    leftPane = leftPane.copy(current = directory, selected = emptySet())
-                                },
-                                onOpenFile = { uri -> openFileTarget(uri, leftPane.current ?: leftPane.root) },
-                                onOpenWith = { uri -> openWith(uri) },
-                                onShowProperties = { uri -> propertiesUri = uri },
-                                onMoveUp = {
-                                    commitRename()
-                                    scope.launch {
-                                        val parent = withContext(Dispatchers.IO) {
-                                            leftPane.current?.let { Storage.parent(activity, it) }
+                        Box(modifier = Modifier.weight(1f)) {
+                            Row(
+                                modifier = Modifier.fillMaxSize(),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                DirectoryPane(
+                                    state = leftPane,
+                                    isActive = activePane == Pane.LEFT,
+                                    modifier = Modifier.weight(if (activePane == Pane.LEFT) metrics.activePaneWeight else 1f),
+                                    onActivate = { activePane = Pane.LEFT },
+                                    onNavigate = { directory ->
+                                        commitRename()
+                                        leftPane = leftPane.copy(current = directory, selected = emptySet())
+                                    },
+                                    onOpenFile = { uri -> openFileTarget(uri, leftPane.current ?: leftPane.root) },
+                                    onOpenWith = { uri -> openWith(uri) },
+                                    onShowProperties = { uri -> propertiesUri = uri },
+                                    onMoveUp = {
+                                        commitRename()
+                                        scope.launch {
+                                            val parent = withContext(Dispatchers.IO) {
+                                                leftPane.current?.let { Storage.parent(activity, it) }
+                                            }
+                                            if (parent != null) {
+                                                leftPane = leftPane.copy(current = parent, selected = emptySet())
+                                            }
                                         }
-                                        if (parent != null) {
-                                            leftPane = leftPane.copy(current = parent, selected = emptySet())
+                                    },
+                                    onSelectionChange = { selectedSet ->
+                                        // Moving to another file is the second way to commit a rename.
+                                        if (renameTarget != null && renameTarget !in selectedSet) commitRename()
+                                        leftPane = leftPane.copy(selected = selectedSet)
+                                        // One selection at a time across the two panes, so a command
+                                        // never has two candidate targets to choose between.
+                                        if (selectedSet.isNotEmpty() && rightPane.selected.isNotEmpty()) {
+                                            rightPane = rightPane.copy(selected = emptySet())
                                         }
-                                    }
-                                },
-                                onSelectionChange = { selectedSet ->
-                                    // Moving to another file is the second way to commit a rename.
-                                    if (renameTarget != null && renameTarget !in selectedSet) commitRename()
-                                    leftPane = leftPane.copy(selected = selectedSet)
-                                },
-                                multiSelect = multiSelect,
-                                selectionOutline = selectionOutlineColor(appTheme),
-                                showHiddenFiles = fileDisplayOptions.showHiddenFiles,
-                                showTrashFiles = fileDisplayOptions.showTrashFiles,
-                                sortOptions = sortOptions,
-                                metrics = metrics,
-                                renameTarget = renameTarget,
-                                renameValue = renameValue,
-                                onRenameValueChange = { renameValue = it },
-                                onCommitRename = { commitRename() },
-                            )
+                                    },
+                                    onRowTouched = { lastRowTouchAt = SystemClock.uptimeMillis() },
+                                    multiSelect = multiSelect,
+                                    selectionOutline = selectionOutlineColor(appTheme),
+                                    showHiddenFiles = fileDisplayOptions.showHiddenFiles,
+                                    showTrashFiles = fileDisplayOptions.showTrashFiles,
+                                    sortOptions = sortOptions,
+                                    metrics = metrics,
+                                    renameTarget = renameTarget,
+                                    renameValue = renameValue,
+                                    onRenameValueChange = { renameValue = it },
+                                    onCommitRename = { commitRename() },
+                                )
 
-                            DirectoryPane(
-                                state = rightPane,
-                                isActive = activePane == Pane.RIGHT,
-                                modifier = Modifier.weight(if (activePane == Pane.RIGHT) metrics.activePaneWeight else 1f),
-                                onActivate = { activePane = Pane.RIGHT },
-                                onNavigate = { directory ->
-                                    commitRename()
-                                    rightPane = rightPane.copy(current = directory, selected = emptySet())
-                                },
-                                onOpenFile = { uri -> openFileTarget(uri, rightPane.current ?: rightPane.root) },
-                                onOpenWith = { uri -> openWith(uri) },
-                                onShowProperties = { uri -> propertiesUri = uri },
-                                onMoveUp = {
-                                    commitRename()
-                                    scope.launch {
-                                        val parent = withContext(Dispatchers.IO) {
-                                            rightPane.current?.let { Storage.parent(activity, it) }
+                                DirectoryPane(
+                                    state = rightPane,
+                                    isActive = activePane == Pane.RIGHT,
+                                    modifier = Modifier.weight(if (activePane == Pane.RIGHT) metrics.activePaneWeight else 1f),
+                                    onActivate = { activePane = Pane.RIGHT },
+                                    onNavigate = { directory ->
+                                        commitRename()
+                                        rightPane = rightPane.copy(current = directory, selected = emptySet())
+                                    },
+                                    onOpenFile = { uri -> openFileTarget(uri, rightPane.current ?: rightPane.root) },
+                                    onOpenWith = { uri -> openWith(uri) },
+                                    onShowProperties = { uri -> propertiesUri = uri },
+                                    onMoveUp = {
+                                        commitRename()
+                                        scope.launch {
+                                            val parent = withContext(Dispatchers.IO) {
+                                                rightPane.current?.let { Storage.parent(activity, it) }
+                                            }
+                                            if (parent != null) {
+                                                rightPane = rightPane.copy(current = parent, selected = emptySet())
+                                            }
                                         }
-                                        if (parent != null) {
-                                            rightPane = rightPane.copy(current = parent, selected = emptySet())
+                                    },
+                                    onSelectionChange = { selectedSet ->
+                                        if (renameTarget != null && renameTarget !in selectedSet) commitRename()
+                                        rightPane = rightPane.copy(selected = selectedSet)
+                                        if (selectedSet.isNotEmpty() && leftPane.selected.isNotEmpty()) {
+                                            leftPane = leftPane.copy(selected = emptySet())
                                         }
-                                    }
-                                },
-                                onSelectionChange = { selectedSet ->
-                                    if (renameTarget != null && renameTarget !in selectedSet) commitRename()
-                                    rightPane = rightPane.copy(selected = selectedSet)
-                                },
-                                multiSelect = multiSelect,
-                                selectionOutline = selectionOutlineColor(appTheme),
-                                showHiddenFiles = fileDisplayOptions.showHiddenFiles,
-                                showTrashFiles = fileDisplayOptions.showTrashFiles,
-                                sortOptions = sortOptions,
-                                metrics = metrics,
-                                renameTarget = renameTarget,
-                                renameValue = renameValue,
-                                onRenameValueChange = { renameValue = it },
-                                onCommitRename = { commitRename() },
-                            )
+                                    },
+                                    onRowTouched = { lastRowTouchAt = SystemClock.uptimeMillis() },
+                                    multiSelect = multiSelect,
+                                    selectionOutline = selectionOutlineColor(appTheme),
+                                    showHiddenFiles = fileDisplayOptions.showHiddenFiles,
+                                    showTrashFiles = fileDisplayOptions.showTrashFiles,
+                                    sortOptions = sortOptions,
+                                    metrics = metrics,
+                                    renameTarget = renameTarget,
+                                    renameValue = renameValue,
+                                    onRenameValueChange = { renameValue = it },
+                                    onCommitRename = { commitRename() },
+                                )
+                            }
+
+                            if (selectedFile != null && isImageSelected && galleryUri == null && selectionPreviewVisible) {
+                                SelectionThumbnail(
+                                    activity = activity,
+                                    uri = selectedFile,
+                                    size = metrics.previewSize,
+                                    offset = selectionPreviewOffset,
+                                    onOffsetChange = { selectionPreviewOffset = it },
+                                    onClose = { selectionPreviewVisible = false },
+                                    modifier = Modifier
+                                        .align(Alignment.BottomEnd)
+                                        .padding(12.dp),
+                                )
+                            }
                         }
 
-                        if (selectedFile != null && isImageSelected && galleryUri == null && selectionPreviewVisible) {
-                            SelectionThumbnail(
-                                activity = activity,
-                                uri = selectedFile,
-                                offset = selectionPreviewOffset,
-                                onOffsetChange = { selectionPreviewOffset = it },
-                                onClose = { selectionPreviewVisible = false },
-                                modifier = Modifier
-                                    .align(Alignment.BottomEnd)
-                                    .padding(12.dp),
-                            )
-                        }
+                        PreviewDetailPane(
+                            info = selectionInfo,
+                            selectedFile = selectedFile,
+                            isImage = isImageSelected,
+                            onOpen = { selectedFile?.let { uri -> openWith(uri) } },
+                            onView = { selectedFile?.let { if (isImageSelected) openGallery(it, commandState.current) } },
+                        )
                     }
-
-                    PreviewDetailPane(
-                        info = selectionInfo,
-                        selectedFile = selectedFile,
-                        isImage = isImageSelected,
-                        onOpen = { selectedFile?.let { uri -> openWith(uri) } },
-                        onView = { selectedFile?.let { if (isImageSelected) openGallery(it, sourceState.current) } },
-                    )
                 }
             }
             }
@@ -957,7 +1089,7 @@ private fun HyperBrowserApp() {
                     val mode = reversePrompt!!
                     reversePrompt = null
                     transferDirection = if (transferDirection == TransferDirection.LEFT_TO_RIGHT) TransferDirection.RIGHT_TO_LEFT else TransferDirection.LEFT_TO_RIGHT
-                    startOperation(mode, destinationState, sourceState)
+                    startOperation(mode, reversed = true)
                 },
             )
         }
@@ -984,20 +1116,25 @@ private fun HyperBrowserApp() {
             )
         }
 
-        if (pendingDelete != null) {
-            ConfirmDeleteDialog(
-                count = pendingDelete!!.size,
+        if (pendingBulkFolders != null) {
+            ConfirmBulkFolderTransferDialog(
+                prompt = pendingBulkFolders!!,
+                onDismiss = { pendingBulkFolders = null },
+                onConfirm = { request ->
+                    pendingBulkFolders = null
+                    runTransfer(request)
+                },
+            )
+        }
+
+        val deletePlan = pendingDelete
+        if (deletePlan != null) {
+            ConfirmDeletePlanDialog(
+                plan = deletePlan,
                 onDismiss = { pendingDelete = null },
                 onConfirm = {
-                    val items = pendingDelete!!
                     pendingDelete = null
-                    scope.launch {
-                        val failures = withContext(Dispatchers.IO) { deleteItems(activity, items) }
-                        refreshPanesAfterWrite()
-                        if (failures > 0) {
-                            Toast.makeText(activity, failureMessage(failures, "deleted"), Toast.LENGTH_LONG).show()
-                        }
-                    }
+                    runDelete(deletePlan)
                 },
             )
         }
@@ -1156,6 +1293,33 @@ private fun launchExternalApp(
         .onFailure { Toast.makeText(activity, "No app can open this file", Toast.LENGTH_SHORT).show() }
 }
 
+/**
+ * Offers the image to the device's own wallpaper handling: the "Set as" targets, plus the platform
+ * cropper, which on stock Android is the only thing that can set a wallpaper from a file.
+ */
+private fun setAsWallpaper(activity: ComponentActivity, uri: Uri, mimeType: String?) {
+    val shared = if (DriveUris.isDrive(uri)) null else shareableUri(activity, uri)
+    if (shared == null) {
+        Toast.makeText(activity, "Copy this image to local storage to set it as wallpaper", Toast.LENGTH_SHORT).show()
+        return
+    }
+    val type = mimeType?.takeIf { it.isNotBlank() } ?: "image/*"
+    val attach = Intent(Intent.ACTION_ATTACH_DATA).apply {
+        setDataAndType(shared, type)
+        putExtra("mimeType", type)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    // Throws on anything the cropper cannot read, so its absence is a normal outcome.
+    val cropper = runCatching {
+        WallpaperManager.getInstance(activity).getCropAndSetWallpaperIntent(shared)
+    }.getOrNull()?.apply { addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+    val chooser = Intent.createChooser(attach, "Set as wallpaper").apply {
+        if (cropper != null) putExtra(Intent.EXTRA_INITIAL_INTENTS, arrayOf(cropper))
+    }
+    runCatching { activity.startActivity(chooser) }
+        .onFailure { Toast.makeText(activity, "No app on this device sets wallpapers", Toast.LENGTH_SHORT).show() }
+}
+
 private fun planTransfer(
     activity: ComponentActivity,
     source: BrowserPaneState,
@@ -1170,6 +1334,27 @@ private fun planTransfer(
     // A folder can only land inside another folder, never inside the selected files.
     if (sourceFolders.isNotEmpty() && targetDocs.any { !it.isDirectory }) {
         return TransferPlan.ReverseSuggested
+    }
+
+    if (sourceFolders.size > 1) {
+        val targetDir = targetFolders.singleOrNull()?.uri ?: target.current ?: target.root
+        val sourceDir = source.current ?: source.root
+        if (targetDir != null && sourceDir != null) {
+            return TransferPlan.BulkFolders(
+                BulkFolderPrompt(
+                    request = TransferRequest(
+                        sourceDir = sourceDir,
+                        targetDir = targetDir,
+                        selected = sourceDocs.map { it.uri }.toSet(),
+                        wholeDirectory = false,
+                        mode = mode,
+                    ),
+                    folderNames = sourceFolders.map { it.name },
+                    fileCount = sourceDocs.count { !it.isDirectory },
+                    targetName = resolveDisplayPath(activity, targetDir),
+                ),
+            )
+        }
     }
 
     if (sourceDocs.isNotEmpty() && sourceFolders.isEmpty() && targetDocs.isNotEmpty() && targetFolders.isEmpty()) {
@@ -1226,29 +1411,40 @@ private fun isRemoteOrRemovableUri(uri: Uri): Boolean {
     return !documentId.startsWith("primary:")
 }
 
-private fun executeTransfer(activity: ComponentActivity, request: TransferRequest): Int {
-    val copyMode = request.mode == TransferMode.COPY
+private data class TransferResult(
+    val failures: Int,
+    val created: List<Uri> = emptyList(),
+    val trashed: List<TrashedItem> = emptyList(),
+)
+
+private fun executeTransfer(activity: ComponentActivity, request: TransferRequest): TransferResult {
     val takenNames = Storage.childNames(activity, request.targetDir)
-    var failures = 0
-    if (request.wholeDirectory) {
-        val source = Storage.entry(activity, request.sourceDir) ?: return 1
-        if (!transferEntry(activity, source, request.targetDir, takenNames, copyMode)) failures += 1
-        return failures
-    }
-    request.selected.forEach { uri ->
-        val source = Storage.entry(activity, uri)
-        if (source == null || !transferEntry(activity, source, request.targetDir, takenNames, copyMode)) {
-            failures += 1
+    val wanted = if (request.wholeDirectory) listOf(request.sourceDir) else request.selected.toList()
+    val sources = wanted.mapNotNull { Storage.entry(activity, it) }
+    var failures = wanted.size - sources.size
+    val created = mutableListOf<Uri>()
+    val trashed = mutableListOf<TrashedItem>()
+    sources.forEach { source ->
+        val outcome = transferEntry(activity, source, request.targetDir, takenNames)
+        failures += outcome.failures
+        val copy = outcome.created ?: return@forEach
+        created += copy
+        // A move is a copy plus a trashed original, which keeps the whole operation reversible.
+        if (request.mode == TransferMode.MOVE && outcome.failures == 0) {
+            val parked = moveToTrash(activity, source.uri)
+            when {
+                parked != null -> trashed += parked
+                !Storage.delete(activity, source.uri) -> failures += 1
+            }
         }
     }
-    return failures
+    return TransferResult(failures, created, trashed)
 }
-
-private fun deleteItems(activity: ComponentActivity, uris: Set<Uri>): Int =
-    uris.count { uri -> !Storage.delete(activity, uri) }
 
 private fun failureMessage(count: Int, verb: String): String =
     if (count == 1) "1 item could not be $verb" else "$count items could not be $verb"
+
+private data class EntryOutcome(val created: Uri?, val failures: Int)
 
 /** [takenNames] is threaded through so a batch transfer does not re-list the destination per item. */
 private fun transferEntry(
@@ -1256,30 +1452,22 @@ private fun transferEntry(
     source: FileEntry,
     targetDir: Uri,
     takenNames: MutableSet<String>,
-    copyMode: Boolean,
-): Boolean {
+): EntryOutcome {
     if (source.isDirectory) {
         val folderName = nextAvailableName(takenNames, source.name)
-        val destination = Storage.createFolder(context, targetDir, folderName) ?: return false
+        val destination = Storage.createFolder(context, targetDir, folderName)
+            ?: return EntryOutcome(null, 1)
         val childNames = mutableSetOf<String>()
-        var ok = true
+        var failures = 0
         Storage.children(context, source.uri).forEach { child ->
             if (child.uri == destination.uri) return@forEach
-            if (!transferEntry(context, child, destination.uri, childNames, copyMode)) {
-                ok = false
-            }
+            failures += transferEntry(context, child, destination.uri, childNames).failures
         }
-        if (!copyMode && ok) {
-            Storage.delete(context, source.uri)
-        }
-        return ok
+        return EntryOutcome(destination.uri, failures)
     }
 
-    if (!copyFileContents(context, source, targetDir, takenNames)) return false
-    if (!copyMode) {
-        Storage.delete(context, source.uri)
-    }
-    return true
+    val copy = copyFileContents(context, source, targetDir, takenNames)
+    return EntryOutcome(copy, if (copy == null) 1 else 0)
 }
 
 private fun copyFileContents(
@@ -1287,15 +1475,15 @@ private fun copyFileContents(
     source: FileEntry,
     targetDir: Uri,
     takenNames: MutableSet<String>,
-): Boolean {
-    val content = Storage.read(context, source) ?: return false
+): Uri? {
+    val content = Storage.read(context, source) ?: return null
     val name = nextAvailableName(takenNames, content.fileName)
     return runCatching {
         content.stream.use { input -> Storage.writeChild(context, targetDir, name, content.mimeType, input) }
-    }.getOrDefault(false)
+    }.getOrNull()
 }
 
-private fun nextAvailableName(takenNames: MutableSet<String>, preferredName: String): String {
+internal fun nextAvailableName(takenNames: MutableSet<String>, preferredName: String): String {
     fun claim(name: String): String {
         takenNames += name
         return name
@@ -1312,8 +1500,45 @@ private fun nextAvailableName(takenNames: MutableSet<String>, preferredName: Str
     }
 }
 
-private fun resolveDisplayPath(context: Context, uri: Uri): String =
-    Storage.entry(context, uri)?.name ?: uri.lastPathSegment ?: "unknown"
+/**
+ * The whole path rather than the last folder name, so a pane says where it is and not merely what
+ * it is in. The shared storage root is named "0" on disk, which tells the user nothing.
+ */
+private fun resolveDisplayPath(context: Context, uri: Uri): String {
+    if (DriveUris.isDrive(uri)) {
+        val name = Storage.entry(context, uri)?.name.orEmpty()
+        return if (name.isBlank()) "Google Drive" else "Google Drive/$name"
+    }
+    if (uri.scheme == ContentResolver.SCHEME_FILE) {
+        return uri.path?.let(::labelForFilePath) ?: INTERNAL_STORAGE_LABEL
+    }
+    val documentId = runCatching {
+        if (DocumentsContract.isDocumentUri(context, uri)) {
+            DocumentsContract.getDocumentId(uri)
+        } else {
+            DocumentsContract.getTreeDocumentId(uri)
+        }
+    }.getOrNull()
+    if (documentId != null) {
+        val volume = documentId.substringBefore(':', "")
+        val relative = documentId.substringAfter(':', "").trim('/')
+        val root = if (volume.isBlank() || volume == "primary") INTERNAL_STORAGE_LABEL else volume
+        return if (relative.isEmpty()) root else "$root/$relative"
+    }
+    return Storage.entry(context, uri)?.name ?: uri.lastPathSegment ?: "unknown"
+}
+
+private fun labelForFilePath(path: String): String {
+    val trimmed = path.trimEnd('/')
+    val externalRoot = Environment.getExternalStorageDirectory().path.trimEnd('/')
+    val emulatedRoot = Regex("^/storage/emulated/\\d+").find(trimmed)?.value
+        ?: externalRoot.takeIf { it.isNotEmpty() && (trimmed == it || trimmed.startsWith("$it/")) }
+    if (emulatedRoot != null) {
+        val relative = trimmed.removePrefix(emulatedRoot).trim('/')
+        return if (relative.isEmpty()) INTERNAL_STORAGE_LABEL else "$INTERNAL_STORAGE_LABEL/$relative"
+    }
+    return trimmed.ifEmpty { "/" }
+}
 
 private fun isImageMimeType(value: String): Boolean = value.startsWith("image/")
 
@@ -1388,6 +1613,43 @@ private fun formatBytes(size: Long): String {
     return String.format("%.1f %s", value, units[index])
 }
 
+/**
+ * Truncates from the left and sits against the right edge, so the deepest folder — the part that
+ * says where the pane is — stays on screen however long the path in front of it grows.
+ */
+@Composable
+private fun PathLabel(path: String) {
+    val measurer = rememberTextMeasurer()
+    val style = LocalTextStyle.current.copy(fontSize = 10.sp)
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        val available = constraints.maxWidth
+        val shown = remember(path, available, style) {
+            fun fits(candidate: String) =
+                measurer.measure(candidate, style, softWrap = false, maxLines = 1).size.width <= available
+            if (fits(path)) {
+                path
+            } else {
+                // Longest suffix that still fits, found by halving rather than character by character.
+                var low = 0
+                var high = path.length
+                while (low < high) {
+                    val mid = (low + high) / 2
+                    if (fits("…" + path.substring(mid))) high = mid else low = mid + 1
+                }
+                "…" + path.substring(low)
+            }
+        }
+        Text(
+            text = shown,
+            style = style,
+            softWrap = false,
+            maxLines = 1,
+            textAlign = TextAlign.End,
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
+}
+
 @Composable
 private fun MinimalTransferMenu(
     direction: TransferDirection,
@@ -1407,7 +1669,7 @@ private fun MinimalTransferMenu(
         ) {
             AssistChip(
                 onClick = onChooseLeftRoot,
-                label = { Text(leftLabel, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                label = { PathLabel(leftLabel) },
                 leadingIcon = { Icon(Icons.Filled.FolderOpen, contentDescription = null, Modifier.size(14.dp)) },
                 modifier = Modifier.weight(1f),
             )
@@ -1429,7 +1691,7 @@ private fun MinimalTransferMenu(
 
             AssistChip(
                 onClick = onChooseRightRoot,
-                label = { Text(rightLabel, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                label = { PathLabel(rightLabel) },
                 leadingIcon = { Icon(Icons.Filled.FolderOpen, contentDescription = null, Modifier.size(14.dp)) },
                 modifier = Modifier.weight(1f),
             )
@@ -1507,6 +1769,8 @@ private fun CommandStrip(
     onRename: () -> Unit,
     renameActive: Boolean,
     onGallery: () -> Unit,
+    undoLabel: String?,
+    onUndo: () -> Unit,
     multiSelect: Boolean,
     onToggleMulti: () -> Unit,
     selectionActive: Boolean,
@@ -1534,6 +1798,9 @@ private fun CommandStrip(
             active = renameActive,
         )
         CommandButton(metrics, "Gallery", Icons.Filled.Image, onGallery)
+        if (undoLabel != null) {
+            CommandButton(metrics, "Undo $undoLabel", Icons.AutoMirrored.Filled.Undo, onUndo)
+        }
         CommandButton(metrics, "Multi", Icons.Filled.SelectAll, onToggleMulti, active = multiSelect)
         if (selectionActive) {
             CommandButton(metrics, "Deselect", Icons.Filled.Deselect, onDeselect)
@@ -1586,20 +1853,23 @@ private fun CommandButton(
 private fun SelectionThumbnail(
     activity: ComponentActivity,
     uri: Uri,
+    size: Dp,
     offset: Offset,
     onOffsetChange: (Offset) -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val bitmap by produceState<ImageBitmap?>(initialValue = null, uri) {
-        value = withContext(Dispatchers.IO) { loadBitmap(activity, uri, 160, 160) }
+    // Decoded at the density-resolved pixel size so the larger preview is not an upscaled thumbnail.
+    val pixels = with(LocalDensity.current) { size.roundToPx() }
+    val bitmap by produceState<ImageBitmap?>(initialValue = null, uri, pixels) {
+        value = withContext(Dispatchers.IO) { loadBitmap(activity, uri, pixels, pixels) }
     }
     var currentOffset by remember(offset) { mutableStateOf(offset) }
 
     Box(
         modifier = modifier
             .offset { IntOffset(currentOffset.x.roundToInt(), currentOffset.y.roundToInt()) }
-            .size(96.dp)
+            .size(size)
             .clip(RoundedCornerShape(12.dp))
             .background(MaterialTheme.colorScheme.surfaceVariant)
             .pointerInput(Unit) {
@@ -1785,10 +2055,110 @@ private fun ConfirmDeleteDialog(
     HyperDialog(
         onDismissRequest = onDismiss,
         title = { Text("Delete") },
-        text = { Text(if (count == 1) "Delete this item permanently?" else "Delete $count items permanently?") },
+        text = { Text(if (count == 1) "Delete this item?" else "Delete $count items?") },
         confirmButton = { TextButton(onClick = onConfirm) { Text("Delete") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
+}
+
+@Composable
+private fun ConfirmDeletePlanDialog(
+    plan: DeletePlan,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    var acknowledged by remember(plan) { mutableStateOf(false) }
+    val folders = plan.directories
+
+    HyperDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (plan.needsAcknowledgement) "Delete ${folders.size} folders?" else "Delete") },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+            ) {
+                if (plan.needsAcknowledgement) {
+                    Text(
+                        "Deleting several folders at once is unusual. Everything listed below goes, " +
+                            "including what is inside each folder.",
+                    )
+                }
+                folders.forEach { folder ->
+                    Text("▸ ${folder.name} — ${countLabel(folder.files, folder.folders)}")
+                }
+                if (plan.files.isNotEmpty()) {
+                    val names = plan.files.take(MAX_LISTED_NAMES).joinToString(", ") { it.name }
+                    val extra = plan.files.size - MAX_LISTED_NAMES
+                    Text(if (extra > 0) "$names, and $extra more" else names)
+                }
+                Text(
+                    "Deleted items go to a $TRASH_FOLDER_NAME folder beside them, so Undo can put them back.",
+                    style = MaterialTheme.typography.labelSmall,
+                )
+                if (plan.needsAcknowledgement) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(checked = acknowledged, onCheckedChange = { acknowledged = it })
+                        Text("Yes, delete all ${folders.size} folders")
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onConfirm,
+                enabled = acknowledged || !plan.needsAcknowledgement,
+            ) {
+                Text("Delete")
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
+private fun ConfirmBulkFolderTransferDialog(
+    prompt: BulkFolderPrompt,
+    onDismiss: () -> Unit,
+    onConfirm: (TransferRequest) -> Unit,
+) {
+    var acknowledged by remember(prompt) { mutableStateOf(false) }
+    val verb = if (prompt.request.mode == TransferMode.MOVE) "Move" else "Copy"
+
+    HyperDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("$verb ${prompt.folderNames.size} folders?") },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+            ) {
+                Text("${verb.lowercase()} into ${prompt.targetName}, with everything inside them:")
+                prompt.folderNames.take(MAX_LISTED_NAMES).forEach { name -> Text("▸ $name") }
+                val extra = prompt.folderNames.size - MAX_LISTED_NAMES
+                if (extra > 0) Text("▸ and $extra more")
+                if (prompt.fileCount > 0) {
+                    Text("Plus ${prompt.fileCount} loose ${if (prompt.fileCount == 1) "file" else "files"}.")
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = acknowledged, onCheckedChange = { acknowledged = it })
+                    Text("Yes, ${verb.lowercase()} all ${prompt.folderNames.size} folders")
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(prompt.request) }, enabled = acknowledged) { Text(verb) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+private const val MAX_LISTED_NAMES = 10
+
+private fun countLabel(files: Int, folders: Int): String {
+    val filePart = if (files == 1) "1 file" else "$files files"
+    val folderPart = if (folders == 1) "1 subfolder" else "$folders subfolders"
+    return "$filePart, $folderPart"
 }
 
 @Composable
@@ -2180,7 +2550,7 @@ private fun ConfirmFilesIntoFolderDialog(
     )
 }
 
-private data class FolderStats(
+internal data class FolderStats(
     val directFiles: Int,
     val directFolders: Int,
     val totalFiles: Int,
@@ -2189,7 +2559,7 @@ private data class FolderStats(
 )
 
 /** Walks the tree iteratively; recursion would blow the stack on a deep folder. */
-private fun scanFolder(context: Context, uri: Uri): FolderStats {
+internal fun scanFolder(context: Context, uri: Uri): FolderStats {
     val direct = Storage.children(context, uri)
     var totalFiles = 0
     var totalFolders = 0
@@ -2342,6 +2712,7 @@ private fun ImageViewerScreen(
     directoryUri: Uri?,
     startStage: GalleryStage,
     sortOrder: SortOrder,
+    onUndoable: (UndoRecord?) -> Unit,
     onClose: () -> Unit,
 ) {
     var currentUri by rememberSaveable(startingUri) { mutableStateOf(startingUri) }
@@ -2530,7 +2901,8 @@ private fun ImageViewerScreen(
 
     fun deleteImages(targets: Set<Uri>) {
         scope.launch {
-            withContext(Dispatchers.IO) { targets.forEach { Storage.delete(activity, it) } }
+            val outcome = withContext(Dispatchers.IO) { deleteItems(activity, targets) }
+            onUndoable(UndoRecord("delete", trashed = outcome.trashed).takeIf { !it.isEmpty })
             val remaining = images.filterNot { it.uri in targets }
             selectedImages = emptySet()
             selectionMode = false
@@ -2600,6 +2972,9 @@ private fun ImageViewerScreen(
                                 inspect = !inspect
                                 resetTransform()
                             }
+                        }
+                        GalleryAction(Icons.Filled.Wallpaper, "Set as wallpaper") {
+                            setAsWallpaper(activity, currentUri, currentMimeType)
                         }
                         GalleryAction(Icons.Filled.ZoomOut, "Zoom out") { zoomOut() }
                         GalleryAction(Icons.Filled.ZoomIn, "Zoom in") { zoomIn() }
@@ -2922,6 +3297,11 @@ private fun ImageViewerScreen(
                                 )
                                 imageActionUri = null
                             }) { Text("Edit in external editor") }
+                            Button(onClick = {
+                                val target = imageActionUri ?: return@Button
+                                imageActionUri = null
+                                setAsWallpaper(activity, target, null)
+                            }) { Text("Set as wallpaper") }
                             Button(onClick = {
                                 val target = imageActionUri ?: return@Button
                                 imageActionUri = null
@@ -3375,6 +3755,7 @@ private fun DirectoryPane(
     onShowProperties: (Uri) -> Unit,
     onMoveUp: () -> Unit,
     onSelectionChange: (Set<Uri>) -> Unit,
+    onRowTouched: () -> Unit,
     multiSelect: Boolean,
     selectionOutline: Color,
     showHiddenFiles: Boolean,
@@ -3467,6 +3848,17 @@ private fun DirectoryPane(
                                     Modifier
                                 }
                             )
+                            // Reported as the finger goes down and again as it lifts, ahead of the
+                            // click the double-tap window holds back, so commands know a selection
+                            // is on its way and how long ago its window started.
+                            .pointerInput(Unit) {
+                                awaitEachGesture {
+                                    awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                                    onRowTouched()
+                                    waitForUpOrCancellation(pass = PointerEventPass.Initial)
+                                    onRowTouched()
+                                }
+                            }
                             .combinedClickable(
                                 onClick = {
                                     onActivate()
