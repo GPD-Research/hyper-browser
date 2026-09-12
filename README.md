@@ -31,6 +31,9 @@ Lean Android dual-pane file browser built with Kotlin and Jetpack Compose.
   second radio pair to show it at full brightness instead.
 - Both destinations take the decoded image rather than the file, so RAW, TIFF and Drive images can
   be used as wallpaper too.
+- Nothing is stretched: the wallpaper is scaled by one factor until it covers the screen and the
+  middle is kept, so a landscape photo on a portrait screen fills top to bottom and loses its sides.
+  The file browser background is cropped the same way as the panes are laid out.
 
 ### The inspector and moving between images
 
