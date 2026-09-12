@@ -164,8 +164,10 @@ object RawImage {
         embeddedPreview(source, targetWidth, targetHeight, lowQuality)
             ?: openTiff(source)?.render(targetWidth, targetHeight, null)
 
-    fun orientationDegrees(bytes: ByteArray): Int {
-        val exif = runCatching { ExifInterface(ByteArrayInputStream(bytes)) }.getOrNull() ?: return 0
+    fun orientationDegrees(bytes: ByteArray): Int = orientationDegrees(ByteArrayInputStream(bytes))
+
+    fun orientationDegrees(stream: InputStream): Int {
+        val exif = runCatching { ExifInterface(stream) }.getOrNull() ?: return 0
         return exifOrientationToDegrees(
             exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
         )

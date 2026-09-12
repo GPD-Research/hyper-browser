@@ -10,6 +10,18 @@ Lean Android dual-pane file browser built with Kotlin and Jetpack Compose.
   selection. Only copy and move read the transfer arrow, so a folder picked in the pane the arrow
   points at is no longer deleted from the other side.
 
+### Rotate
+
+- Single-image view has a rotate-90°-clockwise button that saves to the same file. The turn is
+  written as the orientation tag — in IFD0 for TIFF and the RAW formats built on it, through EXIF
+  for JPEG, PNG and WebP — so the pixels, and a RAW file's sensor data, are never re-encoded.
+- Because the write is a handful of bytes, the cost is redrawing the file afterwards. For RAW and
+  TIFF whose decode would need more than about 60% of the heap this device grants the app, a
+  prompt says so before anything is written.
+- Orientation is now honoured when showing ordinary JPEG and PNG images too; previously only RAW
+  and TIFF were turned to match their tag.
+- Rotating a Google Drive image is not supported; copy it locally first.
+
 ### RAW inspector: compressed or uncompressed
 
 - Inspecting a RAW file, a second toolbar button switches between the sensor data (uncompressed,

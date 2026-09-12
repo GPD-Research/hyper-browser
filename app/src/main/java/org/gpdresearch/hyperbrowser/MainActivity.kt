@@ -92,6 +92,7 @@ import androidx.compose.material.icons.filled.DriveFileRenameOutline
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Wallpaper
@@ -2727,6 +2728,9 @@ private fun ImageViewerScreen(
     var selectionMode by rememberSaveable { mutableStateOf(false) }
     var selectedImages by remember { mutableStateOf(emptySet<Uri>()) }
     var pendingGalleryDelete by remember { mutableStateOf<Set<Uri>?>(null) }
+    var pendingRotate by remember { mutableStateOf<ImageRotation.Cost?>(null) }
+    // Bumped when the file on disk changes, so the viewer decodes it again.
+    var imageRevision by remember { mutableIntStateOf(0) }
     // The inspector shows the file's own pixels — TIFF at full resolution, RAW as sensor data —
     // instead of the embedded preview browsing uses.
     var inspect by rememberSaveable { mutableStateOf(false) }
@@ -2787,7 +2791,7 @@ private fun ImageViewerScreen(
     // Sensor data of a 40-megapixel frame takes seconds to decode; without this the previous
     // image sits there looking as though nothing happened.
     var loading by remember { mutableStateOf(false) }
-    LaunchedEffect(currentUri, stage, viewport, inspect, inspectCompressed) {
+    LaunchedEffect(currentUri, stage, viewport, inspect, inspectCompressed, imageRevision) {
         detail = null
         single = if (stage == GalleryStage.SINGLE) {
             loading = true
@@ -2904,6 +2908,27 @@ private fun ImageViewerScreen(
         resetTransform()
     }
 
+    fun rotateCurrent() {
+        scope.launch {
+            val outcome = withContext(Dispatchers.IO) { ImageRotation.rotateClockwise(activity, currentUri) }
+            when (outcome) {
+                is ImageRotation.Outcome.Rotated -> {
+                    ThumbnailCache.forget(currentUri)
+                    resetTransform()
+                    imageRevision += 1
+                    listingRefresh += 1
+                }
+                is ImageRotation.Outcome.Failed ->
+                    Toast.makeText(activity, outcome.message, Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    fun requestRotate() {
+        val cost = ImageRotation.cost(activity, currentDoc?.size ?: 0L, isRawFile)
+        if (inspectable && cost.risky) pendingRotate = cost else rotateCurrent()
+    }
+
     fun deleteImages(targets: Set<Uri>) {
         scope.launch {
             val outcome = withContext(Dispatchers.IO) { deleteItems(activity, targets) }
@@ -2996,6 +3021,7 @@ private fun ImageViewerScreen(
                                 resetTransform()
                             }
                         }
+                        GalleryAction(Icons.Filled.RotateRight, "Rotate 90° clockwise") { requestRotate() }
                         GalleryAction(Icons.Filled.Wallpaper, "Set as wallpaper") {
                             setAsWallpaper(activity, currentUri, currentMimeType)
                         }
@@ -3353,6 +3379,30 @@ private fun ImageViewerScreen(
                 )
             }
 
+            pendingRotate?.let { cost ->
+                HyperDialog(
+                    onDismissRequest = { pendingRotate = null },
+                    title = { Text("Rotate this file?") },
+                    text = {
+                        Text(
+                            "The turn itself only rewrites the orientation tag, but drawing this " +
+                                "file again afterwards is " + cost.summary +
+                                ". On this device that may take a long time, or run out of memory " +
+                                "and close the app.",
+                        )
+                    },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            pendingRotate = null
+                            rotateCurrent()
+                        }) { Text("Rotate") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { pendingRotate = null }) { Text("Cancel") }
+                    },
+                )
+            }
+
             if (pendingGalleryDelete != null) {
                 ConfirmDeleteDialog(
                     count = pendingGalleryDelete!!.size,
@@ -3502,13 +3552,16 @@ private fun loadSingleImage(
         val options = BitmapFactory.Options().apply { inSampleSize = sample }
         val bitmap = source.open()?.use { BitmapFactory.decodeStream(it, null, options) }
         if (bitmap != null) {
+            val degrees = source.open()?.use { RawImage.orientationDegrees(it) } ?: 0
+            val turned = degrees == 90 || degrees == 270
             return SingleImage(
-                overview = bitmap.asImageBitmap(),
-                width = bounds.outWidth,
-                height = bounds.outHeight,
+                overview = RawImage.rotate(bitmap, degrees).asImageBitmap(),
+                width = if (turned) bounds.outHeight else bounds.outWidth,
+                height = if (turned) bounds.outWidth else bounds.outHeight,
                 sample = sample,
-                // Tiling only pays off once the overview itself had to be downscaled.
-                canTile = sample > 1 && source.seekable,
+                // Tiling only pays off once the overview itself had to be downscaled, and a
+                // region decoder works in the file's own orientation rather than the shown one.
+                canTile = sample > 1 && source.seekable && degrees == 0,
                 // Reached with the inspector on only when the file's own pixels could not be
                 // read; saying so beats passing a preview off as them.
                 source = if (inspect) "Embedded preview ${bounds.outWidth}\u00d7${bounds.outHeight}" else null,
@@ -3763,7 +3816,10 @@ private fun loadBitmap(
             )
             if (lowQuality) inPreferredConfig = Bitmap.Config.RGB_565
         }
-        open()?.use { BitmapFactory.decodeStream(it, null, opts) }?.let { return it.asImageBitmap() }
+        open()?.use { BitmapFactory.decodeStream(it, null, opts) }?.let { bitmap ->
+            val degrees = open()?.use { RawImage.orientationDegrees(it) } ?: 0
+            return RawImage.rotate(bitmap, degrees).asImageBitmap()
+        }
     }
 
     // RAW and TIFF are invisible to BitmapFactory and go through the embedded preview decoder.
@@ -3788,6 +3844,11 @@ private object ThumbnailCache {
 
     fun put(uri: Uri, sizePx: Int, bitmap: ImageBitmap) {
         cache.put("$uri@$sizePx", bitmap)
+    }
+
+    /** Drops every size of one image, for when the file behind it has changed. */
+    fun forget(uri: Uri) {
+        cache.snapshot().keys.filter { it.startsWith("$uri@") }.forEach { cache.remove(it) }
     }
 }
 
