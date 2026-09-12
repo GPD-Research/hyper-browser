@@ -2,6 +2,17 @@
 
 Lean Android dual-pane file browser built with Kotlin and Jetpack Compose.
 
+## Version 4.0.1 (September 2026)
+
+### Background dimming
+
+- The background was drawn at 15% opacity rather than dimmed by 15%, leaving the image all but
+  black behind the panes. It is now drawn at the brightness the setting names.
+- Dimming is off by default and chosen rather than fixed: "Dim the file browser background" in the
+  "Set image as" dialog reveals a slider, starting at 15% and stopping at 90% so the image cannot
+  be taken to solid black, next to a preview of the image at that level. The file tree behind the
+  dialog follows the slider as it moves, and the amount is remembered across restarts.
+
 ## Version 4.0.0 (September 2026)
 
 ### Rotate
@@ -21,9 +32,8 @@ Lean Android dual-pane file browser built with Kotlin and Jetpack Compose.
 - Tapping the preview box in file-tree mode opens a "Set image as" dialog: file browser background,
   home screen, lock screen, home and lock, or all three. Choose one and apply, or cancel.
 - The file browser background is copied into app storage and survives restarts; the dialog offers to
-  remove it once one is set. It is drawn behind both panes at full brightness unless "Dim the file
-  browser background" is ticked, which reveals a slider (starting at 15%, up to 90%) and a preview
-  of the image at that level.
+  remove it once one is set. It is drawn behind both panes, dimmed by default, and the dialog has a
+  second radio pair to show it at full brightness instead.
 - Both destinations take the decoded image rather than the file, so RAW, TIFF and Drive images can
   be used as wallpaper too.
 - Nothing is stretched: the wallpaper is scaled by one factor until it covers the screen and the
