@@ -576,12 +576,11 @@ private fun HyperBrowserApp() {
     val scope = rememberCoroutineScope()
     // Single-item commands follow the selection itself; only transfers care about the arrow.
     // Read through the states rather than a captured value, so a command tapped before the
-    // recomposition that follows a selection still acts on what is selected now.
-    fun commandPane(): BrowserPaneState {
-        val active = if (activePane == Pane.LEFT) leftPane else rightPane
-        val other = if (activePane == Pane.LEFT) rightPane else leftPane
-        return if (active.selected.isNotEmpty()) active else other
-    }
+    // recomposition that follows a selection still acts on what is selected now. Only the pane
+    // the user is in counts: a click activates its pane immediately but commits the selection
+    // after the double-tap window, and falling back to the other pane in that gap would aim a
+    // delete at whatever was left selected over there.
+    fun commandPane(): BrowserPaneState = if (activePane == Pane.LEFT) leftPane else rightPane
 
     val commandState = commandPane()
     val selected = commandState.selected
@@ -665,9 +664,7 @@ private fun HyperBrowserApp() {
             commitRename()
             return
         }
-        val active = if (activePane == Pane.LEFT) leftPane else rightPane
-        val other = if (activePane == Pane.LEFT) rightPane else leftPane
-        val target = active.selected.singleOrNull() ?: other.selected.singleOrNull()
+        val target = commandPane().selected.singleOrNull()
         if (target == null) {
             Toast.makeText(activity, "Select a single item to rename", Toast.LENGTH_SHORT).show()
             return
@@ -924,6 +921,11 @@ private fun HyperBrowserApp() {
                                         // Moving to another file is the second way to commit a rename.
                                         if (renameTarget != null && renameTarget !in selectedSet) commitRename()
                                         leftPane = leftPane.copy(selected = selectedSet)
+                                        // One selection at a time across the two panes, so a command
+                                        // never has two candidate targets to choose between.
+                                        if (selectedSet.isNotEmpty() && rightPane.selected.isNotEmpty()) {
+                                            rightPane = rightPane.copy(selected = emptySet())
+                                        }
                                     },
                                     multiSelect = multiSelect,
                                     selectionOutline = selectionOutlineColor(appTheme),
@@ -963,6 +965,9 @@ private fun HyperBrowserApp() {
                                     onSelectionChange = { selectedSet ->
                                         if (renameTarget != null && renameTarget !in selectedSet) commitRename()
                                         rightPane = rightPane.copy(selected = selectedSet)
+                                        if (selectedSet.isNotEmpty() && leftPane.selected.isNotEmpty()) {
+                                            leftPane = leftPane.copy(selected = emptySet())
+                                        }
                                     },
                                     multiSelect = multiSelect,
                                     selectionOutline = selectionOutlineColor(appTheme),
