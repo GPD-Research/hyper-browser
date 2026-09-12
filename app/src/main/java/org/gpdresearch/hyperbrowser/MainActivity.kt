@@ -70,6 +70,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -604,6 +605,8 @@ private fun HyperBrowserApp() {
     var galleryDirectory by rememberSaveable { mutableStateOf<Uri?>(null) }
     // A chosen image opens on itself; a chosen folder opens on its contents.
     var galleryStage by rememberSaveable { mutableStateOf(GalleryStage.SINGLE) }
+    // Which pane the gallery was opened from, so closing it puts the selection back there.
+    var galleryPane by rememberSaveable { mutableStateOf(Pane.LEFT) }
     var showLayoutSettings by rememberSaveable { mutableStateOf(false) }
     var fileDisplayOptions by rememberSaveable(stateSaver = FileDisplayOptionsSaver) { mutableStateOf(FileDisplayOptions()) }
     var sortOptions by rememberSaveable(stateSaver = SortOptionsSaver) { mutableStateOf(SortOptions()) }
@@ -821,10 +824,27 @@ private fun HyperBrowserApp() {
         }
     }
 
-    fun openGallery(uri: Uri, directory: Uri?, stage: GalleryStage = GalleryStage.SINGLE) {
+    fun openGallery(uri: Uri, directory: Uri?, stage: GalleryStage = GalleryStage.SINGLE, pane: Pane = activePane) {
+        galleryPane = pane
         galleryDirectory = directory
         galleryStage = stage
         galleryUri = uri
+    }
+
+    /**
+     * Returns from the gallery onto whichever image was last on screen: it becomes the pane's
+     * selection, which is what the list then scrolls back to, so a swipe through a folder does
+     * not land the user back at the file they started from.
+     */
+    fun closeGallery(shown: Uri?) {
+        galleryUri = null
+        val target = shown ?: return
+        activePane = galleryPane
+        if (galleryPane == Pane.LEFT) {
+            if (leftPane.current == galleryDirectory) leftPane = leftPane.copy(selected = setOf(target))
+        } else {
+            if (rightPane.current == galleryDirectory) rightPane = rightPane.copy(selected = setOf(target))
+        }
     }
 
     fun openWith(uri: Uri) {
@@ -834,11 +854,11 @@ private fun HyperBrowserApp() {
         }
     }
 
-    fun openFileTarget(uri: Uri, directory: Uri?) {
+    fun openFileTarget(uri: Uri, directory: Uri?, pane: Pane) {
         scope.launch {
             val mime = withContext(Dispatchers.IO) { Storage.mimeType(activity, uri) }
             if (mime.startsWith("image/")) {
-                openGallery(uri, directory)
+                openGallery(uri, directory, pane = pane)
             } else {
                 launchExternalApp(activity, uri, mime)
             }
@@ -894,7 +914,7 @@ private fun HyperBrowserApp() {
                     startStage = galleryStage,
                     sortOrder = gallerySort,
                     onUndoable = { record -> undoRecord = record },
-                    onClose = { galleryUri = null },
+                    onClose = { shown -> closeGallery(shown) },
                 )
             } else {
                 // The strip runs the full height beside everything else, so the root and direction
@@ -970,7 +990,7 @@ private fun HyperBrowserApp() {
                                         commitRename()
                                         leftPane = leftPane.copy(current = directory, selected = emptySet())
                                     },
-                                    onOpenFile = { uri -> openFileTarget(uri, leftPane.current ?: leftPane.root) },
+                                    onOpenFile = { uri -> openFileTarget(uri, leftPane.current ?: leftPane.root, Pane.LEFT) },
                                     onOpenWith = { uri -> openWith(uri) },
                                     onShowProperties = { uri -> propertiesUri = uri },
                                     onMoveUp = {
@@ -1016,7 +1036,7 @@ private fun HyperBrowserApp() {
                                         commitRename()
                                         rightPane = rightPane.copy(current = directory, selected = emptySet())
                                     },
-                                    onOpenFile = { uri -> openFileTarget(uri, rightPane.current ?: rightPane.root) },
+                                    onOpenFile = { uri -> openFileTarget(uri, rightPane.current ?: rightPane.root, Pane.RIGHT) },
                                     onOpenWith = { uri -> openWith(uri) },
                                     onShowProperties = { uri -> propertiesUri = uri },
                                     onMoveUp = {
@@ -2722,7 +2742,8 @@ private fun ImageViewerScreen(
     startStage: GalleryStage,
     sortOrder: SortOrder,
     onUndoable: (UndoRecord?) -> Unit,
-    onClose: () -> Unit,
+    /** Carries the image last on screen, so the browser can come back to it. */
+    onClose: (Uri?) -> Unit,
 ) {
     var currentUri by rememberSaveable(startingUri) { mutableStateOf(startingUri) }
     var stage by rememberSaveable(startingUri) { mutableStateOf(startStage) }
@@ -2944,7 +2965,7 @@ private fun ImageViewerScreen(
             selectedImages = emptySet()
             selectionMode = false
             if (remaining.isEmpty()) {
-                onClose()
+                onClose(null)
             } else {
                 if (currentUri in targets) {
                     val index = images.indexOfFirst { it.uri == currentUri }
@@ -2956,7 +2977,7 @@ private fun ImageViewerScreen(
     }
 
     // The system back gesture returns to the browser rather than leaving the app.
-    BackHandler(enabled = true) { onClose() }
+    BackHandler(enabled = true) { onClose(currentUri) }
 
     // A single image is shown on its own; the chrome is summoned by a tap, like the menu.
     val immersive = stage == GalleryStage.SINGLE && !showMenu
@@ -2971,7 +2992,7 @@ private fun ImageViewerScreen(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 AssistChip(
-                    onClick = onClose,
+                    onClick = { onClose(currentUri) },
                     label = { Text("File browser", fontSize = 10.sp) },
                     leadingIcon = { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null, Modifier.size(14.dp)) },
                     modifier = Modifier.height(28.dp),
@@ -3246,7 +3267,7 @@ private fun ImageViewerScreen(
                         .padding(8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Button(onClick = onClose) { Text("Back to file browser") }
+                    Button(onClick = { onClose(currentUri) }) { Text("Back to file browser") }
                     Button(onClick = { stage = GalleryStage.GRID_SMALL; resetTransform(); showMenu = false }) { Text("Show thumbnails") }
                     if (inspectable) {
                         Button(onClick = {
@@ -3981,6 +4002,23 @@ private fun DirectoryPane(
     }
     val files = listing?.files ?: emptyList()
     val isLoading = currentUri != null && listing == null
+    val listState = rememberLazyListState()
+
+    // The list is rebuilt from nothing whenever the pane comes back — after the gallery, after a
+    // write — and would start at the top. Bringing the selection back into view is what keeps a
+    // file deep in a large folder from being lost; it is centred rather than scrolled to the
+    // edge, and a row already on screen is left where it is so a tap never shifts the list.
+    LaunchedEffect(files, state.selected) {
+        val target = state.selected.singleOrNull() ?: return@LaunchedEffect
+        val index = files.indexOfFirst { it.uri == target }
+        if (index < 0) return@LaunchedEffect
+        if (listState.layoutInfo.visibleItemsInfo.any { it.index == index }) return@LaunchedEffect
+        listState.scrollToItem(index)
+        val row = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }
+            ?: return@LaunchedEffect
+        val margin = (listState.layoutInfo.viewportSize.height - row.size) / 2
+        if (margin > 0) listState.scrollToItem(index, -margin)
+    }
 
     Column(
         modifier = modifier
@@ -4026,7 +4064,7 @@ private fun DirectoryPane(
                 )
             }
         } else {
-            LazyColumn(Modifier.fillMaxSize()) {
+            LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
                 items(files, key = { it.uri }) { file ->
                     val selected = file.uri in state.selected
                     val renaming = file.uri == renameTarget

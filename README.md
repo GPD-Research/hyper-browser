@@ -22,6 +22,13 @@ Lean Android dual-pane file browser built with Kotlin and Jetpack Compose.
   and TIFF were turned to match their tag.
 - Rotating a Google Drive image is not supported; copy it locally first.
 
+### Coming back from the gallery
+
+- Closing the gallery selects the image that was on screen in the pane it was opened from, so a
+  swipe through a folder comes back to where it ended rather than where it began.
+- The pane scrolls that row back into view, centred, whether the file is near the top of a folder
+  or the bottom of a long one. A row already on screen is left where it is.
+
 ### Large TIFFs
 
 - Opening a TIFF draws the file's own pixels rather than the thumbnail stored inside it. Those
