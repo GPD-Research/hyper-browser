@@ -13,6 +13,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.os.SystemClock
 import android.os.storage.StorageManager
 import android.provider.DocumentsContract
 import android.provider.Settings
@@ -115,6 +116,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -133,10 +135,12 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.ImeAction
@@ -286,19 +290,21 @@ private const val MAX_TEXTURE_EDGE = 8192
 /** High enough to reach 1:1 pixels on a gigapixel source; tiles keep the memory cost flat. */
 private const val MAX_SINGLE_ZOOM = 64f
 
+/** A touch older than this has had its double-tap window; the selection it makes has landed. */
+private const val SELECTION_SETTLE_MS = 350L
+
 private enum class LayoutMode(val label: String) {
     PHONE("Phone"),
     TABLET_BALANCED("Tablet balanced"),
-    TABLET_WIDE("Tablet wide"),
 }
 
 /**
  * The layout modes used to differ only in a few dp of strip width, which was invisible in practice.
- * Each mode now drives control size, list density and — on [LayoutMode.TABLET_WIDE] — how much
- * extra width the focused pane takes from the other one.
+ * Each mode now drives control size, list density and the size of the floating selection preview.
  */
 private data class LayoutMetrics(
     val stripWidth: Dp,
+    val previewSize: Dp,
     val commandHeight: Dp,
     val commandIcon: Dp,
     val commandLabel: TextUnit,
@@ -312,6 +318,7 @@ private data class LayoutMetrics(
 private fun metricsFor(mode: LayoutMode): LayoutMetrics = when (mode) {
     LayoutMode.PHONE -> LayoutMetrics(
         stripWidth = 56.dp,
+        previewSize = 192.dp,
         commandHeight = 60.dp,
         commandIcon = 20.dp,
         commandLabel = 9.sp,
@@ -323,6 +330,7 @@ private fun metricsFor(mode: LayoutMode): LayoutMetrics = when (mode) {
     )
     LayoutMode.TABLET_BALANCED -> LayoutMetrics(
         stripWidth = 92.dp,
+        previewSize = 288.dp,
         commandHeight = 86.dp,
         commandIcon = 30.dp,
         commandLabel = 13.sp,
@@ -332,22 +340,10 @@ private fun metricsFor(mode: LayoutMode): LayoutMetrics = when (mode) {
         paneHeaderSize = 16.sp,
         activePaneWeight = 1f,
     )
-    LayoutMode.TABLET_WIDE -> LayoutMetrics(
-        stripWidth = 112.dp,
-        commandHeight = 100.dp,
-        commandIcon = 36.dp,
-        commandLabel = 15.sp,
-        rowIcon = 26.dp,
-        rowFontSize = 19.sp,
-        rowPadding = 13.dp,
-        paneHeaderSize = 19.sp,
-        activePaneWeight = 1.8f,
-    )
 }
 
 /** Best guess for a first run; the user can still pick any mode in settings. */
 private fun defaultLayoutMode(smallestWidthDp: Int): LayoutMode = when {
-    smallestWidthDp >= 720 -> LayoutMode.TABLET_WIDE
     smallestWidthDp >= 600 -> LayoutMode.TABLET_BALANCED
     else -> LayoutMode.PHONE
 }
@@ -355,6 +351,41 @@ private fun defaultLayoutMode(smallestWidthDp: Int): LayoutMode = when {
 private data class FileDisplayOptions(
     val showHiddenFiles: Boolean = false,
     val showTrashFiles: Boolean = false,
+)
+
+/** Flattened to strings: label, then one entry per trashed triple and per created URI. */
+private val UndoRecordSaver = listSaver<UndoRecord?, String>(
+    save = { record ->
+        if (record == null) {
+            emptyList()
+        } else {
+            listOf(record.label, record.trashed.size.toString()) +
+                record.trashed.flatMap {
+                    listOf(it.originalParent.toString(), it.originalName, it.trashedUri.toString())
+                } +
+                record.created.map(Uri::toString)
+        }
+    },
+    restore = { stored ->
+        if (stored.isEmpty()) {
+            null
+        } else {
+            val trashedCount = stored[1].toInt()
+            val trashed = (0 until trashedCount).map { index ->
+                val base = 2 + index * 3
+                TrashedItem(
+                    originalParent = Uri.parse(stored[base]),
+                    originalName = stored[base + 1],
+                    trashedUri = Uri.parse(stored[base + 2]),
+                )
+            }
+            UndoRecord(
+                label = stored[0],
+                trashed = trashed,
+                created = stored.drop(2 + trashedCount * 3).map(Uri::parse),
+            )
+        }
+    },
 )
 
 private val FileDisplayOptionsSaver = listSaver<FileDisplayOptions, Boolean>(
@@ -542,7 +573,9 @@ private fun HyperBrowserApp() {
     var pendingBulkFolders by remember { mutableStateOf<BulkFolderPrompt?>(null) }
     var reversePrompt by remember { mutableStateOf<TransferMode?>(null) }
     var pendingDelete by remember { mutableStateOf<DeletePlan?>(null) }
-    var undoRecord by remember { mutableStateOf<UndoRecord?>(null) }
+    // Saveable: a rotation or resize would otherwise strand the last operation with no way back.
+    var undoRecord by rememberSaveable(stateSaver = UndoRecordSaver) { mutableStateOf<UndoRecord?>(null) }
+    var lastRowTouchAt by remember { mutableLongStateOf(0L) }
     var propertiesUri by remember { mutableStateOf<Uri?>(null) }
     // Saved, so rotating while an image is open comes back to the gallery instead of the file tree.
     var galleryUri by rememberSaveable { mutableStateOf<Uri?>(null) }
@@ -569,18 +602,24 @@ private fun HyperBrowserApp() {
     }
     val metrics = metricsFor(layoutMode)
 
-    val sourcePane = if (transferDirection == TransferDirection.LEFT_TO_RIGHT) Pane.LEFT else Pane.RIGHT
-    val destinationPane = if (sourcePane == Pane.LEFT) Pane.RIGHT else Pane.LEFT
-    val sourceState = if (sourcePane == Pane.LEFT) leftPane else rightPane
-    val destinationState = if (destinationPane == Pane.LEFT) leftPane else rightPane
     val scope = rememberCoroutineScope()
     // Single-item commands follow the selection itself; only transfers care about the arrow.
     // Read through the states rather than a captured value, so a command tapped before the
     // recomposition that follows a selection still acts on what is selected now. Only the pane
-    // the user is in counts: a click activates its pane immediately but commits the selection
-    // after the double-tap window, and falling back to the other pane in that gap would aim a
-    // delete at whatever was left selected over there.
+    // the user is in counts: falling back to the other pane would aim a delete at whatever was
+    // left selected over there.
     fun commandPane(): BrowserPaneState = if (activePane == Pane.LEFT) leftPane else rightPane
+
+    fun transferPanes(): Pair<BrowserPaneState, BrowserPaneState> =
+        if (transferDirection == TransferDirection.LEFT_TO_RIGHT) leftPane to rightPane else rightPane to leftPane
+
+    // A row tap only becomes a selection once the double-tap window has passed. A command tapped
+    // inside that window would otherwise run against the previous selection, so every command
+    // waits the rest of the window out before reading one.
+    suspend fun awaitSelectionSettled() {
+        val pending = SELECTION_SETTLE_MS - (SystemClock.uptimeMillis() - lastRowTouchAt)
+        if (pending > 0) delay(pending)
+    }
 
     val commandState = commandPane()
     val selected = commandState.selected
@@ -664,12 +703,13 @@ private fun HyperBrowserApp() {
             commitRename()
             return
         }
-        val target = commandPane().selected.singleOrNull()
-        if (target == null) {
-            Toast.makeText(activity, "Select a single item to rename", Toast.LENGTH_SHORT).show()
-            return
-        }
         scope.launch {
+            awaitSelectionSettled()
+            val target = commandPane().selected.singleOrNull()
+            if (target == null) {
+                Toast.makeText(activity, "Select a single item to rename", Toast.LENGTH_SHORT).show()
+                return@launch
+            }
             renameValue = withContext(Dispatchers.IO) { Storage.entry(activity, target)?.name }
                 ?: target.lastPathSegment
                 ?: return@launch
@@ -705,12 +745,13 @@ private fun HyperBrowserApp() {
     }
 
     fun startDelete() {
-        val items = commandPane().selected
-        if (items.isEmpty()) {
-            Toast.makeText(activity, "Select a file or folder to delete", Toast.LENGTH_SHORT).show()
-            return
-        }
         scope.launch {
+            awaitSelectionSettled()
+            val items = commandPane().selected
+            if (items.isEmpty()) {
+                Toast.makeText(activity, "Select a file or folder to delete", Toast.LENGTH_SHORT).show()
+                return@launch
+            }
             val plan = withContext(Dispatchers.IO) { buildDeletePlan(activity, items) }
             if (plan.entries.isEmpty()) {
                 Toast.makeText(activity, "Nothing left to delete", Toast.LENGTH_SHORT).show()
@@ -731,8 +772,12 @@ private fun HyperBrowserApp() {
         }
     }
 
-    fun startOperation(mode: TransferMode, source: BrowserPaneState, target: BrowserPaneState) {
+    fun startOperation(mode: TransferMode, reversed: Boolean = false) {
         scope.launch {
+            awaitSelectionSettled()
+            val (from, to) = transferPanes()
+            val source = if (reversed) to else from
+            val target = if (reversed) from else to
             when (val plan = withContext(Dispatchers.IO) { planTransfer(activity, source, target, mode) }) {
                 TransferPlan.Staged -> {
                     val sourceDir = source.current ?: source.root ?: return@launch
@@ -835,8 +880,8 @@ private fun HyperBrowserApp() {
                 Row(modifier = Modifier.fillMaxSize()) {
                     CommandStrip(
                         metrics = metrics,
-                        onCopy = { startOperation(TransferMode.COPY, sourceState, destinationState) },
-                        onMove = { startOperation(TransferMode.MOVE, sourceState, destinationState) },
+                        onCopy = { startOperation(TransferMode.COPY) },
+                        onMove = { startOperation(TransferMode.MOVE) },
                         onDelete = { startDelete() },
                         onNewFolder = { startNewFolder() },
                         onRename = { startRename() },
@@ -927,6 +972,7 @@ private fun HyperBrowserApp() {
                                             rightPane = rightPane.copy(selected = emptySet())
                                         }
                                     },
+                                    onRowTouched = { lastRowTouchAt = SystemClock.uptimeMillis() },
                                     multiSelect = multiSelect,
                                     selectionOutline = selectionOutlineColor(appTheme),
                                     showHiddenFiles = fileDisplayOptions.showHiddenFiles,
@@ -969,6 +1015,7 @@ private fun HyperBrowserApp() {
                                             leftPane = leftPane.copy(selected = emptySet())
                                         }
                                     },
+                                    onRowTouched = { lastRowTouchAt = SystemClock.uptimeMillis() },
                                     multiSelect = multiSelect,
                                     selectionOutline = selectionOutlineColor(appTheme),
                                     showHiddenFiles = fileDisplayOptions.showHiddenFiles,
@@ -986,6 +1033,7 @@ private fun HyperBrowserApp() {
                                 SelectionThumbnail(
                                     activity = activity,
                                     uri = selectedFile,
+                                    size = metrics.previewSize,
                                     offset = selectionPreviewOffset,
                                     onOffsetChange = { selectionPreviewOffset = it },
                                     onClose = { selectionPreviewVisible = false },
@@ -1028,7 +1076,7 @@ private fun HyperBrowserApp() {
                     val mode = reversePrompt!!
                     reversePrompt = null
                     transferDirection = if (transferDirection == TransferDirection.LEFT_TO_RIGHT) TransferDirection.RIGHT_TO_LEFT else TransferDirection.LEFT_TO_RIGHT
-                    startOperation(mode, destinationState, sourceState)
+                    startOperation(mode, reversed = true)
                 },
             )
         }
@@ -1691,20 +1739,23 @@ private fun CommandButton(
 private fun SelectionThumbnail(
     activity: ComponentActivity,
     uri: Uri,
+    size: Dp,
     offset: Offset,
     onOffsetChange: (Offset) -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val bitmap by produceState<ImageBitmap?>(initialValue = null, uri) {
-        value = withContext(Dispatchers.IO) { loadBitmap(activity, uri, 160, 160) }
+    // Decoded at the density-resolved pixel size so the larger preview is not an upscaled thumbnail.
+    val pixels = with(LocalDensity.current) { size.roundToPx() }
+    val bitmap by produceState<ImageBitmap?>(initialValue = null, uri, pixels) {
+        value = withContext(Dispatchers.IO) { loadBitmap(activity, uri, pixels, pixels) }
     }
     var currentOffset by remember(offset) { mutableStateOf(offset) }
 
     Box(
         modifier = modifier
             .offset { IntOffset(currentOffset.x.roundToInt(), currentOffset.y.roundToInt()) }
-            .size(96.dp)
+            .size(size)
             .clip(RoundedCornerShape(12.dp))
             .background(MaterialTheme.colorScheme.surfaceVariant)
             .pointerInput(Unit) {
@@ -3582,6 +3633,7 @@ private fun DirectoryPane(
     onShowProperties: (Uri) -> Unit,
     onMoveUp: () -> Unit,
     onSelectionChange: (Set<Uri>) -> Unit,
+    onRowTouched: () -> Unit,
     multiSelect: Boolean,
     selectionOutline: Color,
     showHiddenFiles: Boolean,
@@ -3674,6 +3726,14 @@ private fun DirectoryPane(
                                     Modifier
                                 }
                             )
+                            // Reported on the down event, ahead of the click the double-tap window
+                            // holds back, so commands know a selection is on its way.
+                            .pointerInput(Unit) {
+                                awaitEachGesture {
+                                    awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                                    onRowTouched()
+                                }
+                            }
                             .combinedClickable(
                                 onClick = {
                                     onActivate()

@@ -23,6 +23,16 @@ Lean Android dual-pane file browser built with Kotlin and Jetpack Compose.
   a hidden `.HyperBrowserTrash` folder beside where they came from and put back on undo; undoing a
   copy removes the copies. Backends that cannot move an item still delete it outright, and nothing
   is offered to undo in that case.
+- Undo survives a rotation or a window resize.
+
+### Layout
+
+- The command strip runs the full height of the window, so the root chips and the direction arrow
+  sit centred over their own panes and there is room for more commands. It still scrolls when the
+  window is too short for all of them.
+- The preview that follows a selected image is twice its old size in phone mode and three times it
+  in tablet mode, and is decoded at that size rather than upscaled. The "tablet wide" layout mode
+  is gone; the two remaining modes are phone and tablet.
 
 ## Version 3.0.2 (September 2026)
 
