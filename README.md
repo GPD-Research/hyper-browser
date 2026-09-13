@@ -2,6 +2,15 @@
 
 Lean Android dual-pane file browser built with Kotlin and Jetpack Compose.
 
+## Version 4.5.1 (September 2026)
+
+### RAW inspector: vibrance
+
+- A vibrance slider beside the exposure slider, at 0 by default so the developed view is unchanged
+  until it is moved. It stretches colour away from each pixel's own luminance, with the gain scaled
+  down by how saturated the pixel already is, so muted tones gain richness while skies and skin stay
+  where they are. The saved JPEG carries whatever the slider is set to.
+
 ## Version 4.5.0 (September 2026)
 
 ### RAW inspector: developed sensor data
