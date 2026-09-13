@@ -81,6 +81,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.DriveFileMove
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.automirrored.filled.Undo
+import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
@@ -4569,7 +4570,17 @@ private fun DirectoryPane(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             if (state.root != null && currentUri != null && currentUri != state.root) {
-                AssistChip(onClick = onMoveUp, label = { Text("cd ..", fontSize = metrics.rowFontSize) })
+                AssistChip(
+                    onClick = onMoveUp,
+                    label = { Text("cd ..", fontSize = metrics.rowFontSize) },
+                    leadingIcon = {
+                        Icon(
+                            imageVector = Icons.Filled.ArrowUpward,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
+                    },
+                )
             }
         }
 
