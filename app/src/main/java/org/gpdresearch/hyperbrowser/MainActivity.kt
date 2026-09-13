@@ -3011,6 +3011,10 @@ private fun ImageViewerScreen(
     // Within the inspector, the sensor data developed into a photograph rather than shown raw.
     var inspectDeveloped by rememberSaveable { mutableStateOf(false) }
     var developExposure by rememberSaveable { mutableFloatStateOf(0f) }
+    // AdobeRGB by default: an editor can render its wider gamut down to sRGB, not the reverse.
+    var developProfile by rememberSaveable {
+        mutableStateOf(RawImage.OutputProfile.ADOBE_RGB)
+    }
     var savingDeveloped by remember { mutableStateOf(false) }
     var showMinimap by rememberSaveable { mutableStateOf(true) }
     val scope = rememberCoroutineScope()
@@ -3087,7 +3091,16 @@ private fun ImageViewerScreen(
     // Sensor data of a 40-megapixel frame takes seconds to decode; without this the previous
     // image sits there looking as though nothing happened.
     var loading by remember { mutableStateOf(false) }
-    LaunchedEffect(currentUri, stage, viewport, inspect, inspectDeveloped, developExposure, imageRevision) {
+    LaunchedEffect(
+        currentUri,
+        stage,
+        viewport,
+        inspect,
+        inspectDeveloped,
+        developExposure,
+        developProfile,
+        imageRevision,
+    ) {
         detail = null
         single = if (stage == GalleryStage.SINGLE && viewport != IntSize.Zero) {
             loading = true
@@ -3099,7 +3112,7 @@ private fun ImageViewerScreen(
                         viewport,
                         inspect,
                         inspectDeveloped,
-                        RawImage.DevelopSettings(exposure = developExposure),
+                        RawImage.DevelopSettings(exposure = developExposure, profile = developProfile),
                     )
                 }
             } finally {
@@ -3740,6 +3753,8 @@ private fun ImageViewerScreen(
             if (developedFrame != null && stage == GalleryStage.SINGLE && !showMenu) {
                 DevelopControls(
                     exposure = developExposure,
+                    profile = developProfile,
+                    onProfile = { developProfile = it },
                     saving = savingDeveloped,
                     onExposure = { developExposure = it },
                     onSave = { saveDeveloped(developedFrame) },
@@ -3847,8 +3862,10 @@ private fun ImageViewerScreen(
 @Composable
 private fun DevelopControls(
     exposure: Float,
+    profile: RawImage.OutputProfile,
     saving: Boolean,
     onExposure: (Float) -> Unit,
+    onProfile: (RawImage.OutputProfile) -> Unit,
     onSave: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -3874,6 +3891,20 @@ private fun DevelopControls(
                 steps = 23,
                 modifier = Modifier.width(150.dp),
             )
+            TextButton(
+                onClick = {
+                    onProfile(
+                        if (profile == RawImage.OutputProfile.ADOBE_RGB) {
+                            RawImage.OutputProfile.SRGB
+                        } else {
+                            RawImage.OutputProfile.ADOBE_RGB
+                        }
+                    )
+                },
+                enabled = !saving,
+            ) {
+                Text(profile.label)
+            }
             TextButton(onClick = onSave, enabled = !saving) {
                 Text(if (saving) "Saving…" else "Save JPEG")
             }
@@ -4223,7 +4254,11 @@ private fun inspectorImage(
  */
 private fun developedInspectorImage(frame: RawImage.DevelopedImage, viewport: IntSize): SingleImage? {
     val overview = frame.render(viewport.width, viewport.height, null) ?: return null
-    val profile = if (frame.profiled) "camera profile" else "no camera profile"
+    val profile = if (frame.profiled) {
+        "camera profile, ${frame.colourSpace.label}"
+    } else {
+        "no camera profile"
+    }
     return SingleImage(
         overview = overview.asImageBitmap(),
         width = frame.width,

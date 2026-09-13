@@ -2,8 +2,10 @@ package org.gpdresearch.hyperbrowser
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.ColorSpace
 import android.graphics.Matrix
 import android.graphics.Rect
+import androidx.core.graphics.createBitmap
 import androidx.exifinterface.media.ExifInterface
 import java.io.ByteArrayInputStream
 import java.io.FileDescriptor
@@ -135,6 +137,13 @@ object RawImage {
         3.1338561f, -1.6168667f, -0.4906146f,
         -0.9787684f, 1.9161415f, 0.0334540f,
         0.0719453f, -0.2289914f, 1.4052427f,
+    )
+
+    /** Likewise D50 adapted. AdobeRGB holds the greens and cyans an sRGB file has to clip. */
+    private val XYZ_D50_TO_ADOBE_RGB = floatArrayOf(
+        1.9624274f, -0.6105343f, -0.3413404f,
+        -0.9787684f, 1.9161415f, 0.0334540f,
+        0.0286869f, -0.1406752f, 1.3487655f,
     )
 
     /**
@@ -1001,10 +1010,28 @@ object RawImage {
         fun developed(settings: DevelopSettings): DevelopedImage = DevelopedImage(info, settings)
     }
 
+    /**
+     * The space a developed frame is written in. AdobeRGB is the default because it holds
+     * saturated colour an sRGB file clips away, which an editor can still render down later;
+     * the reverse cannot be undone.
+     */
+    enum class OutputProfile(val label: String) {
+        ADOBE_RGB("AdobeRGB"),
+        SRGB("sRGB"),
+        ;
+
+        internal val xyzToRgb: FloatArray
+            get() = if (this == ADOBE_RGB) XYZ_D50_TO_ADOBE_RGB else XYZ_D50_TO_SRGB
+
+        internal val gamma: IntArray
+            get() = if (this == ADOBE_RGB) ADOBE_GAMMA_CURVE else SRGB_GAMMA_CURVE
+    }
+
     /** What the developer is free to vary; everything else is read out of the file. */
     data class DevelopSettings(
         /** Stops of exposure applied to the linear data, before the colour matrix. */
         val exposure: Float = 0f,
+        val profile: OutputProfile = OutputProfile.ADOBE_RGB,
     )
 
     /**
@@ -1027,6 +1054,9 @@ object RawImage {
 
         /** False when the file states no colour matrix, so camera RGB is shown uncorrected. */
         val profiled: Boolean get() = info.matrix != null
+
+        /** The colour space the rendered pixels are written in, and tagged as. */
+        val colourSpace: OutputProfile get() = settings.profile
 
         fun render(targetWidth: Int, targetHeight: Int, region: Rect?): Bitmap? =
             renderDeveloped(info, settings, targetWidth, targetHeight, region)
@@ -1189,30 +1219,25 @@ object RawImage {
             height = crop.height(),
             pattern = cfaPattern(directory),
             colour = colour,
-            matrix = cameraToSrgb(all),
+            matrix = cameraToXyz(all),
         )
     }
 
     /**
-     * Camera native RGB to sRGB. DNG states either a forward matrix (camera to XYZ, already
-     * white balanced) or a colour matrix (XYZ to camera), so the latter is inverted. Rows are
-     * normalised to sum to one, which is what keeps a neutral photosite triple neutral after
-     * the white balance gains have equalised the channels.
+     * Camera native RGB to XYZ under DNG's D50 white point. A file states either a forward
+     * matrix (camera to XYZ, already white balanced) or a colour matrix (XYZ to camera), so the
+     * latter is inverted. The output space is chosen later, so this stops at XYZ.
      */
-    private fun cameraToSrgb(all: List<Directory>): FloatArray? {
+    private fun cameraToXyz(all: List<Directory>): FloatArray? {
         val forward = all
             .firstNotNullOfOrNull { it.doubles(TAG_FORWARD_MATRIX_2) ?: it.doubles(TAG_FORWARD_MATRIX_1) }
             ?.takeIf { it.size >= 9 }
-        val cameraToXyz = if (forward != null) {
-            FloatArray(9) { forward[it].toFloat() }
-        } else {
-            val colour = all
-                .firstNotNullOfOrNull { it.doubles(TAG_COLOR_MATRIX_2) ?: it.doubles(TAG_COLOR_MATRIX_1) }
-                ?.takeIf { it.size >= 9 }
-                ?: return null
-            invert3x3(FloatArray(9) { colour[it].toFloat() }) ?: return null
-        }
-        return normaliseRows(multiply3x3(XYZ_D50_TO_SRGB, cameraToXyz))
+        if (forward != null) return FloatArray(9) { forward[it].toFloat() }
+        val colour = all
+            .firstNotNullOfOrNull { it.doubles(TAG_COLOR_MATRIX_2) ?: it.doubles(TAG_COLOR_MATRIX_1) }
+            ?.takeIf { it.size >= 9 }
+            ?: return null
+        return invert3x3(FloatArray(9) { colour[it].toFloat() })
     }
 
     private fun multiply3x3(left: FloatArray, right: FloatArray): FloatArray = FloatArray(9) { at ->
@@ -1776,25 +1801,37 @@ object RawImage {
     }
 
     /**
-     * sRGB's transfer function, the gamma curve every developed value ends on, sampled once:
-     * a pow() per channel per photosite is several seconds of a full frame all by itself.
+     * Transfer functions are sampled once rather than evaluated: a pow() per channel per
+     * photosite is several seconds of a full frame all by itself.
      */
-    private val GAMMA_CURVE = IntArray(GAMMA_STEPS) { step ->
-        val linear = step.toFloat() / (GAMMA_STEPS - 1)
-        val encoded = if (linear <= 0.0031308f) {
-            linear * 12.92f
-        } else {
-            1.055f * linear.pow(1f / 2.4f) - 0.055f
-        }
+    private fun gammaCurve(encode: (Float) -> Float) = IntArray(GAMMA_STEPS) { step ->
+        val encoded = encode(step.toFloat() / (GAMMA_STEPS - 1))
         (encoded * 255f + 0.5f).toInt().coerceIn(0, 255)
     }
 
-    private fun gammaEncode(linear: Float): Int =
-        GAMMA_CURVE[(linear.coerceIn(0f, 1f) * (GAMMA_STEPS - 1) + 0.5f).toInt()]
+    private val SRGB_GAMMA_CURVE = gammaCurve { linear ->
+        if (linear <= 0.0031308f) linear * 12.92f else 1.055f * linear.pow(1f / 2.4f) - 0.055f
+    }
+
+    /** AdobeRGB (1998) is a plain 563/256 power law, with no linear toe. */
+    private val ADOBE_GAMMA_CURVE = gammaCurve { linear -> linear.pow(256f / 563f) }
+
+    private fun gammaEncode(curve: IntArray, linear: Float): Int =
+        curve[(linear.coerceIn(0f, 1f) * (GAMMA_STEPS - 1) + 0.5f).toInt()]
+
+    private fun gammaEncode(linear: Float): Int = gammaEncode(SRGB_GAMMA_CURVE, linear)
 
     /** Exposure, the camera's colour matrix and the gamma curve: the last half of the pipeline. */
-    private class Develop(private val matrix: FloatArray?, exposureStops: Float) {
+    private class Develop(cameraToXyz: FloatArray?, exposureStops: Float, profile: OutputProfile) {
         private val exposure = 2f.pow(exposureStops.coerceIn(-6f, 6f))
+        private val gamma = profile.gamma
+
+        /**
+         * Camera RGB straight to the output space. Rows are normalised to sum to one, which is
+         * what keeps a neutral photosite triple neutral once the white balance gains have
+         * equalised the channels.
+         */
+        private val matrix = cameraToXyz?.let { normaliseRows(multiply3x3(profile.xyzToRgb, it)) }
 
         fun pixel(red: Float, green: Float, blue: Float): Int {
             val r = red * exposure
@@ -1806,17 +1843,41 @@ object RawImage {
             val green8: Int
             val blue8: Int
             if (matrix == null) {
-                red8 = gammaEncode(r)
-                green8 = gammaEncode(g)
-                blue8 = gammaEncode(b)
+                red8 = gammaEncode(gamma, r)
+                green8 = gammaEncode(gamma, g)
+                blue8 = gammaEncode(gamma, b)
             } else {
-                red8 = gammaEncode(matrix[0] * r + matrix[1] * g + matrix[2] * b)
-                green8 = gammaEncode(matrix[3] * r + matrix[4] * g + matrix[5] * b)
-                blue8 = gammaEncode(matrix[6] * r + matrix[7] * g + matrix[8] * b)
+                red8 = gammaEncode(gamma, matrix[0] * r + matrix[1] * g + matrix[2] * b)
+                green8 = gammaEncode(gamma, matrix[3] * r + matrix[4] * g + matrix[5] * b)
+                blue8 = gammaEncode(gamma, matrix[6] * r + matrix[7] * g + matrix[8] * b)
             }
             return 0xFF000000.toInt() or (red8 shl 16) or (green8 shl 8) or blue8
         }
     }
+
+    /**
+     * A bitmap holding pixels already encoded in [profile], tagged so the platform colour
+     * manages them to the display rather than showing AdobeRGB numbers as though they were sRGB.
+     */
+    private fun developedBitmap(
+        pixels: IntArray,
+        width: Int,
+        height: Int,
+        profile: OutputProfile,
+    ): Bitmap? = runCatching {
+        val named = when (profile) {
+            OutputProfile.ADOBE_RGB -> ColorSpace.Named.ADOBE_RGB
+            OutputProfile.SRGB -> ColorSpace.Named.SRGB
+        }
+        createBitmap(
+            width = width,
+            height = height,
+            hasAlpha = false,
+            colorSpace = ColorSpace.get(named),
+        ).apply {
+            setPixels(pixels, 0, width, 0, 0, width, height)
+        }
+    }.getOrNull()
 
     /**
      * Develops [region] of the sensor. At 1:1 every photosite becomes a pixel, its two missing
@@ -1844,11 +1905,11 @@ object RawImage {
         if (crop.width() < 2 || crop.height() < 2) return null
 
         val step = stepFor(crop.width(), crop.height(), targetWidth, targetHeight) ?: return null
-        val develop = Develop(info.matrix, settings.exposure)
+        val develop = Develop(info.matrix, settings.exposure, settings.profile)
         if (step == 1 && crop.width().toLong() * crop.height() <= MAX_DEMOSAIC_PHOTOSITES) {
-            interpolateCrop(info, develop, crop)?.let { return it }
+            interpolateCrop(info, develop, crop, settings.profile)?.let { return it }
         }
-        return averageCells(info, develop, crop, (step / 2).coerceAtLeast(1))
+        return averageCells(info, develop, crop, (step / 2).coerceAtLeast(1), settings.profile)
     }
 
     /**
@@ -1856,7 +1917,12 @@ object RawImage {
      * rows arrive in — Canon decodes the sensor in vertical slices — so a sliding window of rows
      * is not enough to have every neighbour to hand.
      */
-    private fun interpolateCrop(info: SensorInfo, develop: Develop, crop: Rect): Bitmap? {
+    private fun interpolateCrop(
+        info: SensorInfo,
+        develop: Develop,
+        crop: Rect,
+        profile: OutputProfile,
+    ): Bitmap? {
         // A neighbour of a pixel on the crop's edge lies outside it; reading it keeps a tile's
         // border the same colour as the rest of the frame.
         val padded = Rect(crop.left - 2, crop.top - 2, crop.right + 2, crop.bottom + 2)
@@ -1925,9 +1991,7 @@ object RawImage {
             }
         }
 
-        return runCatching {
-            Bitmap.createBitmap(pixels, outWidth, outHeight, Bitmap.Config.ARGB_8888)
-        }.getOrNull()
+        return developedBitmap(pixels, outWidth, outHeight, profile)
     }
 
     /**
@@ -1935,7 +1999,13 @@ object RawImage {
      * whole cell, so nothing has to be interpolated; the photosites are simply averaged, which
      * is also what suppresses the sensor noise a downscale would otherwise alias.
      */
-    private fun averageCells(info: SensorInfo, develop: Develop, crop: Rect, cellStep: Int): Bitmap? {
+    private fun averageCells(
+        info: SensorInfo,
+        develop: Develop,
+        crop: Rect,
+        cellStep: Int,
+        profile: OutputProfile,
+    ): Bitmap? {
         val cellsWide = crop.width() / 2
         val cellsHigh = crop.height() / 2
         val outWidth = (cellsWide + cellStep - 1) / cellStep
@@ -1998,9 +2068,7 @@ object RawImage {
             )
         }
 
-        return runCatching {
-            Bitmap.createBitmap(pixels, outWidth, outHeight, Bitmap.Config.ARGB_8888)
-        }.getOrNull()
+        return developedBitmap(pixels, outWidth, outHeight, profile)
     }
 }
 
