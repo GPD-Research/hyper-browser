@@ -2,6 +2,31 @@
 
 Lean Android dual-pane file browser built with Kotlin and Jetpack Compose.
 
+## Version 4.5.0 (September 2026)
+
+### RAW inspector: developed sensor data
+
+- The inspector's second mode develops the sensor data instead of showing the camera's own JPEG:
+  black level subtraction, a linear demosaic of the Bayer grid, white balance and exposure scaling,
+  the file's camera colour matrix, then a gamma curve. No sharpening and no contrast heuristics are
+  applied, so what is on screen is the sensor's own rendering of the scene.
+- Output is AdobeRGB by default, with sRGB selectable next to the exposure slider. Both the view and
+  the saved file carry the chosen profile, so an external editor reads the colours as written.
+- Save writes the developed frame as a JPEG beside the RAW, wherever the RAW lives.
+- The Tune button still returns to the undeveloped sensor data, and the label names which of the
+  three is on screen. Thumbnails, the grid and ordinary single-image view are untouched.
+
+### Themes
+
+- An Astro theme: red on very dark blue, with buttons a shade lighter than the background and a red
+  selection outline.
+- The inverted theme is very dark grey rather than absolute black. On pure black the buttons and
+  dialogs had no surface of their own to sit against. Hacker keeps its black.
+
+### Parent folder
+
+- The `cd ..` button carries an up arrow, inside the same button.
+
 ## Version 4.0.1 (September 2026)
 
 ### Background dimming
