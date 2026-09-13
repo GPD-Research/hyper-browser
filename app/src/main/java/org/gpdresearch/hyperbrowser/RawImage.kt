@@ -12,6 +12,7 @@ import java.io.InputStream
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.util.zip.InflaterInputStream
+import kotlin.math.abs
 import kotlin.math.pow
 
 /**
@@ -118,6 +119,23 @@ object RawImage {
 
     /** Beyond this the accumulator for box filtering costs more than the sharper result is worth. */
     private const val MAX_FILTERED_PIXELS = 4_000_000L
+
+    /**
+     * Photosites a demosaic will hold at once. Interpolating needs the neighbours of every
+     * photosite, and a codec decides itself which order rows arrive in, so the crop is buffered
+     * whole: two bytes each, which is what bounds this.
+     */
+    private const val MAX_DEMOSAIC_PHOTOSITES = 12_000_000L
+
+    /** Samples of the gamma curve: finer than the 256 levels it is quantised to anyway. */
+    private const val GAMMA_STEPS = 4096
+
+    /** Bradford adapted, since DNG states its colour matrices against a D50 white point. */
+    private val XYZ_D50_TO_SRGB = floatArrayOf(
+        3.1338561f, -1.6168667f, -0.4906146f,
+        -0.9787684f, 1.9161415f, 0.0334540f,
+        0.0719453f, -0.2289914f, 1.4052427f,
+    )
 
     /**
      * Taps per axis inside one output pixel's source block. The taps are adjacent and centred in
@@ -332,6 +350,10 @@ object RawImage {
     private const val TAG_BLACK_LEVEL = 0xC61A
     private const val TAG_WHITE_LEVEL = 0xC61D
     private const val TAG_AS_SHOT_NEUTRAL = 0xC628
+    private const val TAG_COLOR_MATRIX_1 = 0xC621
+    private const val TAG_COLOR_MATRIX_2 = 0xC622
+    private const val TAG_FORWARD_MATRIX_1 = 0xC714
+    private const val TAG_FORWARD_MATRIX_2 = 0xC715
     private const val TAG_MAKE = 0x010F
     private const val TAG_EXIF_IFD = 0x8769
     private const val TAG_MAKER_NOTE = 0x927C
@@ -974,6 +996,42 @@ object RawImage {
 
         fun render(targetWidth: Int, targetHeight: Int, region: Rect?): Bitmap? =
             renderSensor(info, targetWidth, targetHeight, region)
+
+        /** The same photosites developed into a photograph rather than shown as they were read. */
+        fun developed(settings: DevelopSettings): DevelopedImage = DevelopedImage(info, settings)
+    }
+
+    /** What the developer is free to vary; everything else is read out of the file. */
+    data class DevelopSettings(
+        /** Stops of exposure applied to the linear data, before the colour matrix. */
+        val exposure: Float = 0f,
+    )
+
+    /**
+     * A RAW frame developed the minimal way: black level subtracted, the filter array
+     * interpolated, white balance and exposure applied linearly, the camera's own colour matrix
+     * used to reach sRGB, and a gamma curve to finish. No sharpening, no contrast curve, no
+     * noise reduction — what the sensor recorded, made viewable.
+     *
+     * Coordinates are photosites, unlike [SensorImage], whose are filter cells.
+     */
+    class DevelopedImage internal constructor(
+        internal val info: SensorInfo,
+        val settings: DevelopSettings,
+    ) {
+        val width: Int get() = info.width
+        val height: Int get() = info.height
+
+        /** How the sensor data behind the render is stored. */
+        val source: String get() = info.label
+
+        /** False when the file states no colour matrix, so camera RGB is shown uncorrected. */
+        val profiled: Boolean get() = info.matrix != null
+
+        fun render(targetWidth: Int, targetHeight: Int, region: Rect?): Bitmap? =
+            renderDeveloped(info, settings, targetWidth, targetHeight, region)
+
+        fun with(settings: DevelopSettings): DevelopedImage = DevelopedImage(info, settings)
     }
 
     /** Everything needed to decode and develop one RAW file's photosites. */
@@ -989,6 +1047,8 @@ object RawImage {
         val height: Int,
         val pattern: IntArray,
         val colour: SensorColour,
+        /** Camera native RGB to sRGB, or null when the file states no colour matrix. */
+        val matrix: FloatArray?,
     )
 
     /**
@@ -1129,7 +1189,68 @@ object RawImage {
             height = crop.height(),
             pattern = cfaPattern(directory),
             colour = colour,
+            matrix = cameraToSrgb(all),
         )
+    }
+
+    /**
+     * Camera native RGB to sRGB. DNG states either a forward matrix (camera to XYZ, already
+     * white balanced) or a colour matrix (XYZ to camera), so the latter is inverted. Rows are
+     * normalised to sum to one, which is what keeps a neutral photosite triple neutral after
+     * the white balance gains have equalised the channels.
+     */
+    private fun cameraToSrgb(all: List<Directory>): FloatArray? {
+        val forward = all
+            .firstNotNullOfOrNull { it.doubles(TAG_FORWARD_MATRIX_2) ?: it.doubles(TAG_FORWARD_MATRIX_1) }
+            ?.takeIf { it.size >= 9 }
+        val cameraToXyz = if (forward != null) {
+            FloatArray(9) { forward[it].toFloat() }
+        } else {
+            val colour = all
+                .firstNotNullOfOrNull { it.doubles(TAG_COLOR_MATRIX_2) ?: it.doubles(TAG_COLOR_MATRIX_1) }
+                ?.takeIf { it.size >= 9 }
+                ?: return null
+            invert3x3(FloatArray(9) { colour[it].toFloat() }) ?: return null
+        }
+        return normaliseRows(multiply3x3(XYZ_D50_TO_SRGB, cameraToXyz))
+    }
+
+    private fun multiply3x3(left: FloatArray, right: FloatArray): FloatArray = FloatArray(9) { at ->
+        val row = at / 3
+        val column = at % 3
+        left[row * 3] * right[column] +
+            left[row * 3 + 1] * right[3 + column] +
+            left[row * 3 + 2] * right[6 + column]
+    }
+
+    private fun invert3x3(m: FloatArray): FloatArray? {
+        val a = m[4] * m[8] - m[5] * m[7]
+        val b = m[5] * m[6] - m[3] * m[8]
+        val c = m[3] * m[7] - m[4] * m[6]
+        val determinant = m[0] * a + m[1] * b + m[2] * c
+        if (!determinant.isFinite() || abs(determinant) < 1e-9f) return null
+        val scale = 1f / determinant
+        return floatArrayOf(
+            a * scale,
+            (m[2] * m[7] - m[1] * m[8]) * scale,
+            (m[1] * m[5] - m[2] * m[4]) * scale,
+            b * scale,
+            (m[0] * m[8] - m[2] * m[6]) * scale,
+            (m[2] * m[3] - m[0] * m[5]) * scale,
+            c * scale,
+            (m[1] * m[6] - m[0] * m[7]) * scale,
+            (m[0] * m[4] - m[1] * m[3]) * scale,
+        )
+    }
+
+    private fun normaliseRows(m: FloatArray): FloatArray? {
+        val out = FloatArray(9)
+        for (row in 0 until 3) {
+            val sum = m[row * 3] + m[row * 3 + 1] + m[row * 3 + 2]
+            if (!sum.isFinite() || abs(sum) < 1e-6f) return null
+            for (column in 0 until 3) out[row * 3 + column] = m[row * 3 + column] / sum
+        }
+        return out
     }
 
     /**
@@ -1198,19 +1319,15 @@ object RawImage {
         val white: Float,
         val gains: FloatArray,
     ) {
+        /** Black level removed, normalised and white balanced: the scene as a linear value. */
+        fun linear(raw: Int, colour: Int): Float {
+            val range = (white - black).coerceAtLeast(1f)
+            return ((raw - black) / range).coerceIn(0f, 1f) * gains[colour]
+        }
+
         /** Normalised, white balanced and gamma encoded, which is the minimum a sensor value
          * needs before it looks like a photograph rather than a dark green cast. */
-        fun encode(raw: Int, colour: Int): Int {
-            val range = (white - black).coerceAtLeast(1f)
-            val linear = ((raw - black) / range).coerceIn(0f, 1f) * gains[colour]
-            val clamped = linear.coerceIn(0f, 1f)
-            val encoded = if (clamped <= 0.0031308f) {
-                clamped * 12.92f
-            } else {
-                1.055f * clamped.pow(1f / 2.4f) - 0.055f
-            }
-            return (encoded * 255f + 0.5f).toInt().coerceIn(0, 255)
-        }
+        fun encode(raw: Int, colour: Int): Int = gammaEncode(linear(raw, colour))
     }
 
     /**
@@ -1651,6 +1768,234 @@ object RawImage {
             val green = if (hits[at * 3 + 1] > 0) sums[at * 3 + 1] / hits[at * 3 + 1] else 0
             val blue = if (hits[at * 3 + 2] > 0) sums[at * 3 + 2] / hits[at * 3 + 2] else 0
             pixels[at] = 0xFF000000.toInt() or (red shl 16) or (green shl 8) or blue
+        }
+
+        return runCatching {
+            Bitmap.createBitmap(pixels, outWidth, outHeight, Bitmap.Config.ARGB_8888)
+        }.getOrNull()
+    }
+
+    /**
+     * sRGB's transfer function, the gamma curve every developed value ends on, sampled once:
+     * a pow() per channel per photosite is several seconds of a full frame all by itself.
+     */
+    private val GAMMA_CURVE = IntArray(GAMMA_STEPS) { step ->
+        val linear = step.toFloat() / (GAMMA_STEPS - 1)
+        val encoded = if (linear <= 0.0031308f) {
+            linear * 12.92f
+        } else {
+            1.055f * linear.pow(1f / 2.4f) - 0.055f
+        }
+        (encoded * 255f + 0.5f).toInt().coerceIn(0, 255)
+    }
+
+    private fun gammaEncode(linear: Float): Int =
+        GAMMA_CURVE[(linear.coerceIn(0f, 1f) * (GAMMA_STEPS - 1) + 0.5f).toInt()]
+
+    /** Exposure, the camera's colour matrix and the gamma curve: the last half of the pipeline. */
+    private class Develop(private val matrix: FloatArray?, exposureStops: Float) {
+        private val exposure = 2f.pow(exposureStops.coerceIn(-6f, 6f))
+
+        fun pixel(red: Float, green: Float, blue: Float): Int {
+            val r = red * exposure
+            val g = green * exposure
+            val b = blue * exposure
+            // Camera RGB is shown as it stands when the file states no matrix, which is the
+            // best an unprofiled sensor allows.
+            val red8: Int
+            val green8: Int
+            val blue8: Int
+            if (matrix == null) {
+                red8 = gammaEncode(r)
+                green8 = gammaEncode(g)
+                blue8 = gammaEncode(b)
+            } else {
+                red8 = gammaEncode(matrix[0] * r + matrix[1] * g + matrix[2] * b)
+                green8 = gammaEncode(matrix[3] * r + matrix[4] * g + matrix[5] * b)
+                blue8 = gammaEncode(matrix[6] * r + matrix[7] * g + matrix[8] * b)
+            }
+            return 0xFF000000.toInt() or (red8 shl 16) or (green8 shl 8) or blue8
+        }
+    }
+
+    /**
+     * Develops [region] of the sensor. At 1:1 every photosite becomes a pixel, its two missing
+     * colours interpolated from its neighbours; downscaled, whole filter cells are averaged
+     * instead, which is both cheaper and better than interpolating pixels that are about to be
+     * thrown away. Either way the colour work is identical, so zooming only sharpens the frame
+     * rather than changing it.
+     */
+    private fun renderDeveloped(
+        info: SensorInfo,
+        settings: DevelopSettings,
+        targetWidth: Int,
+        targetHeight: Int,
+        region: Rect?,
+    ): Bitmap? {
+        val crop = Rect(0, 0, info.width, info.height)
+        if (region != null && !crop.setIntersect(region, Rect(0, 0, info.width, info.height))) return null
+        crop.offset(info.originX, info.originY)
+        // Filter cells are 2x2, so a crop that starts mid-cell would swap the colours.
+        crop.left = crop.left and 1.inv()
+        crop.top = crop.top and 1.inv()
+        crop.right = (crop.right + 1) and 1.inv()
+        crop.bottom = (crop.bottom + 1) and 1.inv()
+        if (!crop.intersect(0, 0, info.sensorWidth and 1.inv(), info.sensorHeight and 1.inv())) return null
+        if (crop.width() < 2 || crop.height() < 2) return null
+
+        val step = stepFor(crop.width(), crop.height(), targetWidth, targetHeight) ?: return null
+        val develop = Develop(info.matrix, settings.exposure)
+        if (step == 1 && crop.width().toLong() * crop.height() <= MAX_DEMOSAIC_PHOTOSITES) {
+            interpolateCrop(info, develop, crop)?.let { return it }
+        }
+        return averageCells(info, develop, crop, (step / 2).coerceAtLeast(1))
+    }
+
+    /**
+     * One pixel per photosite. The crop is buffered whole because a codec chooses the order its
+     * rows arrive in — Canon decodes the sensor in vertical slices — so a sliding window of rows
+     * is not enough to have every neighbour to hand.
+     */
+    private fun interpolateCrop(info: SensorInfo, develop: Develop, crop: Rect): Bitmap? {
+        // A neighbour of a pixel on the crop's edge lies outside it; reading it keeps a tile's
+        // border the same colour as the rest of the frame.
+        val padded = Rect(crop.left - 2, crop.top - 2, crop.right + 2, crop.bottom + 2)
+        if (!padded.intersect(0, 0, info.sensorWidth, info.sensorHeight)) return null
+        val bufferWidth = padded.width()
+        val bufferHeight = padded.height()
+        if (bufferWidth.toLong() * bufferHeight > MAX_DEMOSAIC_PHOTOSITES) return null
+        // Two bytes of samples and eight of pixels per photosite, counting the bitmap the
+        // pixels are copied into; a crop that would not fit is left to the cell averager.
+        val needed = bufferWidth.toLong() * bufferHeight * 2 + crop.width().toLong() * crop.height() * 8
+        val runtime = Runtime.getRuntime()
+        val free = runtime.maxMemory() - (runtime.totalMemory() - runtime.freeMemory())
+        if (needed > free / 2) return null
+
+        val raw = ShortArray(bufferWidth * bufferHeight)
+        val codec = info.open() ?: return null
+        codec.scan({ y -> y >= padded.top && y < padded.bottom }) { y, xStart, samples, count ->
+            val rowStart = (y - padded.top) * bufferWidth
+            val from = maxOf(padded.left, xStart)
+            val to = minOf(padded.right, xStart + count)
+            var x = from
+            while (x < to) {
+                raw[rowStart + (x - padded.left)] = samples[x - xStart].toShort()
+                x += 1
+            }
+        }
+
+        val outWidth = crop.width()
+        val outHeight = crop.height()
+        val pixels = IntArray(outWidth * outHeight)
+        val colour = info.colour
+        val pattern = info.pattern
+        val sums = IntArray(3)
+        val hits = IntArray(3)
+
+        for (outY in 0 until outHeight) {
+            val y = crop.top + outY
+            for (outX in 0 until outWidth) {
+                val x = crop.left + outX
+                sums.fill(0)
+                hits.fill(0)
+                val own = pattern[(y and 1) * 2 + (x and 1)]
+                var dy = -1
+                while (dy <= 1) {
+                    val ny = (y + dy).coerceIn(padded.top, padded.bottom - 1)
+                    val rowStart = (ny - padded.top) * bufferWidth
+                    var dx = -1
+                    while (dx <= 1) {
+                        val nx = (x + dx).coerceIn(padded.left, padded.right - 1)
+                        val channel = pattern[(ny and 1) * 2 + (nx and 1)]
+                        sums[channel] += raw[rowStart + (nx - padded.left)].toInt() and 0xFFFF
+                        hits[channel] += 1
+                        dx += 1
+                    }
+                    dy += 1
+                }
+                // The photosite's own colour is measured, not interpolated.
+                val centre = raw[(y - padded.top) * bufferWidth + (x - padded.left)].toInt() and 0xFFFF
+                sums[own] = centre
+                hits[own] = 1
+                pixels[outY * outWidth + outX] = develop.pixel(
+                    colour.linear(sums[0] / hits[0].coerceAtLeast(1), 0),
+                    colour.linear(sums[1] / hits[1].coerceAtLeast(1), 1),
+                    colour.linear(sums[2] / hits[2].coerceAtLeast(1), 2),
+                )
+            }
+        }
+
+        return runCatching {
+            Bitmap.createBitmap(pixels, outWidth, outHeight, Bitmap.Config.ARGB_8888)
+        }.getOrNull()
+    }
+
+    /**
+     * One pixel per [cellStep] x [cellStep] block of filter cells. Every colour is present in a
+     * whole cell, so nothing has to be interpolated; the photosites are simply averaged, which
+     * is also what suppresses the sensor noise a downscale would otherwise alias.
+     */
+    private fun averageCells(info: SensorInfo, develop: Develop, crop: Rect, cellStep: Int): Bitmap? {
+        val cellsWide = crop.width() / 2
+        val cellsHigh = crop.height() / 2
+        val outWidth = (cellsWide + cellStep - 1) / cellStep
+        val outHeight = (cellsHigh + cellStep - 1) / cellStep
+        if (outWidth <= 0 || outHeight <= 0) return null
+
+        val taps = if (cellStep > 1) minOf(cellStep, MAX_TAPS) else 1
+        val filtered = taps > 1 && outWidth.toLong() * outHeight <= MAX_FILTERED_PIXELS
+        val effectiveTaps = if (filtered) taps else 1
+        val tapOffset = (cellStep - effectiveTaps) / 2
+
+        val pixels = IntArray(outWidth * outHeight)
+        val sums = IntArray(outWidth * outHeight * 3)
+        val hits = IntArray(outWidth * outHeight * 3)
+        val colour = info.colour
+        val pattern = info.pattern
+
+        val wanted = { y: Int ->
+            if (y < crop.top || y >= crop.bottom) {
+                false
+            } else {
+                val inCell = ((y - crop.top) / 2) % cellStep
+                inCell >= tapOffset && inCell < tapOffset + effectiveTaps
+            }
+        }
+        val sink = SensorRowSink { y, xStart, samples, count ->
+            val outY = ((y - crop.top) / 2) / cellStep
+            if (outY in 0 until outHeight) {
+                val patternRow = (y - crop.top) and 1
+                val from = maxOf(crop.left, xStart)
+                val to = minOf(crop.right, xStart + count)
+                var x = from
+                while (x < to) {
+                    val cell = (x - crop.left) / 2
+                    val inCell = cell % cellStep
+                    if (inCell >= tapOffset && inCell < tapOffset + effectiveTaps) {
+                        val outX = cell / cellStep
+                        if (outX < outWidth) {
+                            val channel = pattern[patternRow * 2 + ((x - crop.left) and 1)]
+                            val at = (outY * outWidth + outX) * 3 + channel
+                            sums[at] += samples[x - xStart]
+                            hits[at] += 1
+                        }
+                    }
+                    x += 1
+                }
+            }
+        }
+
+        val codec = info.open() ?: return null
+        codec.scan(wanted, sink)
+
+        // Black subtraction and white balance are linear in the sample, so averaging the raw
+        // values and developing once is the same result as developing each one.
+        for (at in pixels.indices) {
+            pixels[at] = develop.pixel(
+                if (hits[at * 3] > 0) colour.linear(sums[at * 3] / hits[at * 3], 0) else 0f,
+                if (hits[at * 3 + 1] > 0) colour.linear(sums[at * 3 + 1] / hits[at * 3 + 1], 1) else 0f,
+                if (hits[at * 3 + 2] > 0) colour.linear(sums[at * 3 + 2] / hits[at * 3 + 2], 2) else 0f,
+            )
         }
 
         return runCatching {

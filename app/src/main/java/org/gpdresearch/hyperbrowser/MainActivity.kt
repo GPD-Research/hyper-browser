@@ -83,7 +83,6 @@ import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Compress
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.CreateNewFolder
@@ -96,6 +95,7 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Wallpaper
 import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.material.icons.filled.ZoomOut
@@ -190,6 +190,7 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.InputStream
+import java.util.Locale
 
 private enum class Pane { LEFT, RIGHT }
 private enum class TransferDirection { LEFT_TO_RIGHT, RIGHT_TO_LEFT }
@@ -311,6 +312,10 @@ private const val MAX_TEXTURE_EDGE = 8192
  * decoded, and a downscaled render loses detail to sampling that this headroom buys back.
  */
 private const val OVERVIEW_DETAIL = 2
+
+/** A saved development is rendered to the bitmap ceiling rather than to the size on screen. */
+private const val DEVELOPED_SAVE_EDGE = 8192
+private const val DEVELOPED_SAVE_QUALITY = 95
 
 /** High enough to reach 1:1 pixels on a gigapixel source; tiles keep the memory cost flat. */
 private const val MAX_SINGLE_ZOOM = 64f
@@ -3003,8 +3008,10 @@ private fun ImageViewerScreen(
     // The inspector shows the file's own pixels — TIFF at full resolution, RAW as sensor data —
     // instead of the embedded preview browsing uses.
     var inspect by rememberSaveable { mutableStateOf(false) }
-    // Within the inspector, the camera's own JPEG rather than the sensor data behind it.
-    var inspectCompressed by rememberSaveable { mutableStateOf(false) }
+    // Within the inspector, the sensor data developed into a photograph rather than shown raw.
+    var inspectDeveloped by rememberSaveable { mutableStateOf(false) }
+    var developExposure by rememberSaveable { mutableFloatStateOf(0f) }
+    var savingDeveloped by remember { mutableStateOf(false) }
     var showMinimap by rememberSaveable { mutableStateOf(true) }
     val scope = rememberCoroutineScope()
 
@@ -3015,7 +3022,8 @@ private fun ImageViewerScreen(
      */
     fun showImage(uri: Uri) {
         inspect = false
-        inspectCompressed = false
+        inspectDeveloped = false
+        developExposure = 0f
         currentUri = uri
     }
 
@@ -3079,13 +3087,20 @@ private fun ImageViewerScreen(
     // Sensor data of a 40-megapixel frame takes seconds to decode; without this the previous
     // image sits there looking as though nothing happened.
     var loading by remember { mutableStateOf(false) }
-    LaunchedEffect(currentUri, stage, viewport, inspect, inspectCompressed, imageRevision) {
+    LaunchedEffect(currentUri, stage, viewport, inspect, inspectDeveloped, developExposure, imageRevision) {
         detail = null
         single = if (stage == GalleryStage.SINGLE && viewport != IntSize.Zero) {
             loading = true
             try {
                 withContext(Dispatchers.IO) {
-                    loadSingleImage(activity, currentUri, viewport, inspect, inspectCompressed)
+                    loadSingleImage(
+                        activity,
+                        currentUri,
+                        viewport,
+                        inspect,
+                        inspectDeveloped,
+                        RawImage.DevelopSettings(exposure = developExposure),
+                    )
                 }
             } finally {
                 loading = false
@@ -3232,6 +3247,23 @@ private fun ImageViewerScreen(
         }
     }
 
+    fun saveDeveloped(frame: RawImage.DevelopedImage) {
+        if (savingDeveloped) return
+        savingDeveloped = true
+        scope.launch {
+            val saved = withContext(Dispatchers.IO) {
+                saveDevelopedImage(activity, currentUri, frame)
+            }
+            savingDeveloped = false
+            if (saved == null) {
+                Toast.makeText(activity, "Could not save the developed image", Toast.LENGTH_LONG).show()
+            } else {
+                Toast.makeText(activity, "Saved as $saved", Toast.LENGTH_LONG).show()
+                listingRefresh += 1
+            }
+        }
+    }
+
     fun requestRotate() {
         val cost = ImageRotation.cost(activity, currentDoc?.size ?: 0L, isRawFile)
         if (inspectable && cost.risky) pendingRotate = cost else rotateCurrent()
@@ -3313,19 +3345,19 @@ private fun ImageViewerScreen(
                         }
                         if (inspect && isRawFile) {
                             GalleryAction(
-                                icon = Icons.Filled.Compress,
-                                description = if (inspectCompressed) {
+                                icon = Icons.Filled.Tune,
+                                description = if (inspectDeveloped) {
                                     "Show sensor data"
                                 } else {
-                                    "Show the camera's JPEG"
+                                    "Develop the sensor data"
                                 },
-                                tint = if (inspectCompressed) {
+                                tint = if (inspectDeveloped) {
                                     MaterialTheme.colorScheme.primary
                                 } else {
                                     LocalContentColor.current
                                 },
                             ) {
-                                inspectCompressed = !inspectCompressed
+                                inspectDeveloped = !inspectDeveloped
                                 resetTransform()
                             }
                         }
@@ -3629,15 +3661,15 @@ private fun ImageViewerScreen(
                     }
                     if (inspect && isRawFile) {
                         Button(onClick = {
-                            inspectCompressed = !inspectCompressed
+                            inspectDeveloped = !inspectDeveloped
                             resetTransform()
                             showMenu = false
                         }) {
                             Text(
-                                if (inspectCompressed) {
+                                if (inspectDeveloped) {
                                     "Show uncompressed sensor data"
                                 } else {
-                                    "Show compressed (camera JPEG)"
+                                    "Develop the sensor data"
                                 },
                             )
                         }
@@ -3704,6 +3736,19 @@ private fun ImageViewerScreen(
                 else -> single?.let { listOfNotNull(it.source, it.notice).joinToString(" — ") }
                     ?.takeIf { it.isNotEmpty() }
             }
+            val developedFrame = single?.developed
+            if (developedFrame != null && stage == GalleryStage.SINGLE && !showMenu) {
+                DevelopControls(
+                    exposure = developExposure,
+                    saving = savingDeveloped,
+                    onExposure = { developExposure = it },
+                    onSave = { saveDeveloped(developedFrame) },
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(start = 12.dp, end = 12.dp, bottom = 44.dp),
+                )
+            }
+
             // The tapped-up menu occupies the same corner of the screen as the label.
             if (inspect && provenance != null && stage == GalleryStage.SINGLE && !showMenu) {
                 Text(
@@ -3793,6 +3838,71 @@ private fun ImageViewerScreen(
             }
         }
     }
+}
+
+/**
+ * Exposure and saving for a developed frame. The slider only commits when it is let go: every
+ * change re-develops the sensor data, which is seconds of work on a large frame.
+ */
+@Composable
+private fun DevelopControls(
+    exposure: Float,
+    saving: Boolean,
+    onExposure: (Float) -> Unit,
+    onSave: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var draft by remember(exposure) { mutableFloatStateOf(exposure) }
+    Surface(
+        modifier = modifier,
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                text = String.format(Locale.US, "%+.1f EV", draft),
+                style = MaterialTheme.typography.labelSmall,
+            )
+            Slider(
+                value = draft,
+                onValueChange = { draft = it },
+                onValueChangeFinished = { onExposure(draft) },
+                valueRange = -3f..3f,
+                steps = 23,
+                modifier = Modifier.width(150.dp),
+            )
+            TextButton(onClick = onSave, enabled = !saving) {
+                Text(if (saving) "Saving…" else "Save JPEG")
+            }
+        }
+    }
+}
+
+/**
+ * Writes the developed frame beside the RAW as a JPEG, through the same provider the RAW came
+ * from. It is rendered as large as a bitmap may be rather than at the size on screen, so the
+ * saved file is the frame rather than the view of it. Returns the name written.
+ */
+private fun saveDevelopedImage(
+    activity: ComponentActivity,
+    uri: Uri,
+    frame: RawImage.DevelopedImage,
+): String? {
+    val parent = Storage.parent(activity, uri) ?: return null
+    val rawName = Storage.entry(activity, uri)?.name ?: uri.lastPathSegment ?: return null
+    val name = rawName.substringBeforeLast('.', rawName) + "-developed.jpg"
+    val bitmap = frame.render(DEVELOPED_SAVE_EDGE, DEVELOPED_SAVE_EDGE, null) ?: return null
+    val bytes = ByteArrayOutputStream().also { out ->
+        if (!bitmap.compress(Bitmap.CompressFormat.JPEG, DEVELOPED_SAVE_QUALITY, out)) return null
+    }.toByteArray()
+    bitmap.recycle()
+    val written = ByteArrayInputStream(bytes).use {
+        Storage.writeChild(activity, parent, name, "image/jpeg", it)
+    }
+    return if (written == null) null else name
 }
 
 @Composable
@@ -3927,8 +4037,8 @@ private data class SingleImage(
     val tiff: RawImage.TiffImage? = null,
     /** Set when the inspector is showing undemosaiced sensor data. */
     val sensor: RawImage.SensorImage? = null,
-    /** Set when the inspector is showing the embedded JPEG; kept so crops can be region-decoded. */
-    val jpeg: ByteArray? = null,
+    /** Set when the inspector is showing the sensor data developed into a photograph. */
+    val developed: RawImage.DevelopedImage? = null,
     /** What the inspector is showing: sensor data, full-resolution TIFF or embedded preview. */
     val source: String? = null,
     /** Why the inspector could not show the file's own pixels, when it could not. */
@@ -3955,7 +4065,8 @@ private fun loadSingleImage(
     uri: Uri,
     viewport: IntSize = IntSize.Zero,
     inspect: Boolean = false,
-    compressed: Boolean = false,
+    developed: Boolean = false,
+    develop: RawImage.DevelopSettings = RawImage.DevelopSettings(),
 ): SingleImage? {
     val source = imageSource(activity, uri) ?: return null
 
@@ -3971,7 +4082,7 @@ private fun loadSingleImage(
     // an embedded preview, and would hand back the very image the gallery already shows.
     if (inspect) {
         sourceBytes()?.let { (byteSource, _) ->
-            inspectorImage(byteSource, viewport, compressed)?.let { return it }
+            inspectorImage(byteSource, viewport, developed, develop)?.let { return it }
         }
     }
 
@@ -4070,11 +4181,19 @@ private fun tiffSingleImage(
  * The unfiltered view of a file: sensor data for RAW, the full-resolution directory for TIFF.
  * The overview is only ever decoded to viewport size; everything sharper arrives as tiles.
  */
-private fun inspectorImage(byteSource: ByteSource, viewport: IntSize, compressed: Boolean): SingleImage? {
-    if (compressed) {
-        compressedInspectorImage(byteSource, viewport)?.let { return it }
+private fun inspectorImage(
+    byteSource: ByteSource,
+    viewport: IntSize,
+    developed: Boolean,
+    develop: RawImage.DevelopSettings,
+): SingleImage? {
+    val sensorImage = RawImage.openSensor(byteSource)
+    if (developed) {
+        sensorImage?.developed(develop)?.let { frame ->
+            developedInspectorImage(frame, viewport)?.let { return it }
+        }
     }
-    RawImage.openSensor(byteSource)?.let { sensor ->
+    sensorImage?.let { sensor ->
         val overview = sensor.render(viewport.width, viewport.height, null) ?: return@let
         return SingleImage(
             overview = overview.asImageBitmap(),
@@ -4098,39 +4217,21 @@ private fun inspectorImage(byteSource: ByteSource, viewport: IntSize, compressed
 }
 
 /**
- * The camera's own rendition of the frame: the largest JPEG in the file, decoded at its native
- * resolution in full colour and kept whole so zooming pulls crops out of it rather than upscaling
- * the overview. This is as good as the compressed data in the file gets.
+ * The sensor data developed: the frame the camera would have produced, minus every heuristic it
+ * would have applied. One pixel per photosite, so unlike the undeveloped view the inspector's
+ * coordinates are the sensor's own.
  */
-private fun compressedInspectorImage(byteSource: ByteSource, viewport: IntSize): SingleImage? {
-    val jpeg = RawImage.embeddedJpeg(byteSource) ?: return null
-    val fit = computeInSampleSize(
-        jpeg.width,
-        jpeg.height,
-        viewport.width.coerceAtLeast(1),
-        viewport.height.coerceAtLeast(1),
-    )
-    val sample = drawableSampleSize(jpeg.width, jpeg.height, fit)
-    val options = BitmapFactory.Options().apply {
-        inSampleSize = sample
-        inPreferredConfig = Bitmap.Config.ARGB_8888
-    }
-    val overview = runCatching {
-        BitmapFactory.decodeByteArray(jpeg.bytes, 0, jpeg.bytes.size, options)
-    }.getOrNull() ?: return null
-    val degrees = RawImage.orientationDegrees(byteSource)
-    val rotated = RawImage.rotate(overview, degrees)
-    val upright = degrees == 90 || degrees == 270
+private fun developedInspectorImage(frame: RawImage.DevelopedImage, viewport: IntSize): SingleImage? {
+    val overview = frame.render(viewport.width, viewport.height, null) ?: return null
+    val profile = if (frame.profiled) "camera profile" else "no camera profile"
     return SingleImage(
-        overview = rotated.asImageBitmap(),
-        width = if (upright) jpeg.height else jpeg.width,
-        height = if (upright) jpeg.width else jpeg.height,
-        sample = sample,
-        // Region decoding works in the JPEG's own orientation, so a rotated frame cannot be
-        // refined tile by tile without mapping every crop back through the rotation.
-        canTile = sample > 1 && degrees == 0,
-        jpeg = jpeg.bytes,
-        source = "Embedded JPEG ${jpeg.width}\u00d7${jpeg.height}",
+        overview = overview.asImageBitmap(),
+        width = frame.width,
+        height = frame.height,
+        sample = (frame.width / overview.width).coerceAtLeast(1),
+        canTile = overview.width < frame.width,
+        developed = frame,
+        source = "Developed ${frame.width}\u00d7${frame.height} ($profile)",
     )
 }
 
@@ -4191,6 +4292,12 @@ private fun decodeRegion(
     sample: Int,
     viewport: IntSize,
 ): ImageBitmap? {
+    image.developed?.let { frame ->
+        // A developed frame is one pixel per photosite, so the region needs no conversion.
+        return runCatching {
+            frame.render(viewport.width, viewport.height, region)
+        }.getOrNull()?.asImageBitmap()
+    }
     image.sensor?.let { sensor ->
         // The inspector's coordinates are filter cells; the sensor renders photosites.
         val sensorRegion = android.graphics.Rect(
@@ -4206,21 +4313,6 @@ private fun decodeRegion(
     image.tiff?.let { tiff ->
         return runCatching { tiff.render(viewport.width, viewport.height, region) }
             .getOrNull()?.asImageBitmap()
-    }
-    image.jpeg?.let { bytes ->
-        return runCatching {
-            val decoder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                BitmapRegionDecoder.newInstance(bytes, 0, bytes.size)
-            } else {
-                BitmapRegionDecoder.newInstance(bytes, 0, bytes.size, false)
-            } ?: return@runCatching null
-            try {
-                decoder.decodeRegion(region, BitmapFactory.Options().apply { inSampleSize = sample })
-                    ?.asImageBitmap()
-            } finally {
-                decoder.recycle()
-            }
-        }.getOrNull()
     }
     return runCatching {
         activity.contentResolver.openFileDescriptor(uri, "r")?.use { descriptor ->
