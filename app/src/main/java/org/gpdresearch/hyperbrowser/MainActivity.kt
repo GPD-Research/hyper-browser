@@ -201,10 +201,17 @@ private enum class AppTheme(val label: String) {
     LIGHT("Light"),
     INVERTED("Inverted"),
     HACKER("Hacker"),
+    ASTRO("Astro"),
 }
 
 private val MATRIX_GREEN = Color(0xFF00FF41)
 private val MATRIX_DIM = Color(0xFF00B32D)
+
+private val ASTRO_RED = Color(0xFFFF2E2E)
+private val ASTRO_DIM = Color(0xFFC02020)
+private val ASTRO_NAVY = Color(0xFF030A1F)
+/** Buttons and cards sit a step above the background rather than against it. */
+private val ASTRO_PANEL = Color(0xFF122A52)
 
 /**
  * Every slot is filled in: Material's defaults for the untouched ones are purple-tinted, which is
@@ -212,36 +219,38 @@ private val MATRIX_DIM = Color(0xFF00B32D)
  */
 private fun colorSchemeFor(theme: AppTheme) = when (theme) {
     AppTheme.LIGHT -> lightColorScheme()
+    // Very dark grey rather than absolute black: pure black hides every elevation step the
+    // buttons and dialogs rely on to separate themselves from the background.
     AppTheme.INVERTED -> darkColorScheme(
-        background = Color.Black,
+        background = Color(0xFF141414),
         onBackground = Color.White,
-        surface = Color.Black,
+        surface = Color(0xFF141414),
         onSurface = Color.White,
-        surfaceVariant = Color(0xFF1C1C1C),
+        surfaceVariant = Color(0xFF2E2E2E),
         onSurfaceVariant = Color(0xFFDDDDDD),
-        surfaceContainerLowest = Color.Black,
-        surfaceContainerLow = Color(0xFF0D0D0D),
-        surfaceContainer = Color(0xFF141414),
-        surfaceContainerHigh = Color(0xFF1A1A1A),
-        surfaceContainerHighest = Color(0xFF212121),
+        surfaceContainerLowest = Color(0xFF0F0F0F),
+        surfaceContainerLow = Color(0xFF191919),
+        surfaceContainer = Color(0xFF1F1F1F),
+        surfaceContainerHigh = Color(0xFF272727),
+        surfaceContainerHighest = Color(0xFF303030),
         inverseSurface = Color.White,
-        inverseOnSurface = Color.Black,
+        inverseOnSurface = Color(0xFF141414),
         primary = Color.White,
-        onPrimary = Color.Black,
-        primaryContainer = Color(0xFF2B2B2B),
+        onPrimary = Color(0xFF141414),
+        primaryContainer = Color(0xFF3A3A3A),
         onPrimaryContainer = Color.White,
         secondary = Color.White,
-        onSecondary = Color.Black,
-        secondaryContainer = Color(0xFF2B2B2B),
+        onSecondary = Color(0xFF141414),
+        secondaryContainer = Color(0xFF3A3A3A),
         onSecondaryContainer = Color.White,
         tertiary = Color.White,
-        onTertiary = Color.Black,
-        tertiaryContainer = Color(0xFF2B2B2B),
+        onTertiary = Color(0xFF141414),
+        tertiaryContainer = Color(0xFF3A3A3A),
         onTertiaryContainer = Color.White,
         outline = Color(0xFF8C8C8C),
-        outlineVariant = Color(0xFF3A3A3A),
+        outlineVariant = Color(0xFF4A4A4A),
         error = Color(0xFFFF6B6B),
-        onError = Color.Black,
+        onError = Color(0xFF141414),
         errorContainer = Color(0xFF3A1212),
         onErrorContainer = Color(0xFFFFB4AB),
         scrim = Color.Black,
@@ -280,6 +289,40 @@ private fun colorSchemeFor(theme: AppTheme) = when (theme) {
         onErrorContainer = Color(0xFFFF8A80),
         scrim = Color.Black,
     )
+    AppTheme.ASTRO -> darkColorScheme(
+        background = ASTRO_NAVY,
+        onBackground = ASTRO_RED,
+        surface = ASTRO_NAVY,
+        onSurface = ASTRO_RED,
+        surfaceVariant = ASTRO_PANEL,
+        onSurfaceVariant = ASTRO_DIM,
+        surfaceContainerLowest = Color(0xFF020615),
+        surfaceContainerLow = Color(0xFF071231),
+        surfaceContainer = Color(0xFF0B193E),
+        surfaceContainerHigh = Color(0xFF0F2148),
+        surfaceContainerHighest = ASTRO_PANEL,
+        inverseSurface = ASTRO_RED,
+        inverseOnSurface = ASTRO_NAVY,
+        primary = ASTRO_RED,
+        onPrimary = ASTRO_NAVY,
+        primaryContainer = ASTRO_PANEL,
+        onPrimaryContainer = ASTRO_RED,
+        secondary = ASTRO_RED,
+        onSecondary = ASTRO_NAVY,
+        secondaryContainer = ASTRO_PANEL,
+        onSecondaryContainer = ASTRO_RED,
+        tertiary = ASTRO_RED,
+        onTertiary = ASTRO_NAVY,
+        tertiaryContainer = ASTRO_PANEL,
+        onTertiaryContainer = ASTRO_RED,
+        outline = Color(0xFF3D5A96),
+        outlineVariant = Color(0xFF1B2E5C),
+        error = ASTRO_RED,
+        onError = ASTRO_NAVY,
+        errorContainer = Color(0xFF3A0F14),
+        onErrorContainer = Color(0xFFFF9A9A),
+        scrim = Color.Black,
+    )
 }
 
 /** Selection is marked with an outline rather than a fill so it never relies on hue alone. */
@@ -287,6 +330,7 @@ private fun selectionOutlineColor(theme: AppTheme) = when (theme) {
     AppTheme.LIGHT -> Color(0xFFD32F2F)
     AppTheme.INVERTED -> Color.White
     AppTheme.HACKER -> MATRIX_GREEN
+    AppTheme.ASTRO -> ASTRO_RED
 }
 
 /**
