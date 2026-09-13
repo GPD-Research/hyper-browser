@@ -3056,6 +3056,7 @@ private fun ImageViewerScreen(
     // Within the inspector, the sensor data developed into a photograph rather than shown raw.
     var inspectDeveloped by rememberSaveable { mutableStateOf(false) }
     var developExposure by rememberSaveable { mutableFloatStateOf(0f) }
+    var developVibrance by rememberSaveable { mutableFloatStateOf(0f) }
     // AdobeRGB by default: an editor can render its wider gamut down to sRGB, not the reverse.
     var developProfile by rememberSaveable {
         mutableStateOf(RawImage.OutputProfile.ADOBE_RGB)
@@ -3073,6 +3074,7 @@ private fun ImageViewerScreen(
         inspect = false
         inspectDeveloped = false
         developExposure = 0f
+        developVibrance = 0f
         currentUri = uri
     }
 
@@ -3143,6 +3145,7 @@ private fun ImageViewerScreen(
         inspect,
         inspectDeveloped,
         developExposure,
+        developVibrance,
         developProfile,
         imageRevision,
     ) {
@@ -3157,7 +3160,11 @@ private fun ImageViewerScreen(
                         viewport,
                         inspect,
                         inspectDeveloped,
-                        RawImage.DevelopSettings(exposure = developExposure, profile = developProfile),
+                        RawImage.DevelopSettings(
+                            exposure = developExposure,
+                            vibrance = developVibrance,
+                            profile = developProfile,
+                        ),
                     )
                 }
             } finally {
@@ -3798,10 +3805,12 @@ private fun ImageViewerScreen(
             if (developedFrame != null && stage == GalleryStage.SINGLE && !showMenu) {
                 DevelopControls(
                     exposure = developExposure,
+                    vibrance = developVibrance,
                     profile = developProfile,
                     onProfile = { developProfile = it },
                     saving = savingDeveloped,
                     onExposure = { developExposure = it },
+                    onVibrance = { developVibrance = it },
                     onSave = { saveDeveloped(developedFrame) },
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
@@ -3901,20 +3910,23 @@ private fun ImageViewerScreen(
 }
 
 /**
- * Exposure and saving for a developed frame. The slider only commits when it is let go: every
- * change re-develops the sensor data, which is seconds of work on a large frame.
+ * Exposure, vibrance and saving for a developed frame. The sliders only commit when they are let
+ * go: every change re-develops the sensor data, which is seconds of work on a large frame.
  */
 @Composable
 private fun DevelopControls(
     exposure: Float,
+    vibrance: Float,
     profile: RawImage.OutputProfile,
     saving: Boolean,
     onExposure: (Float) -> Unit,
+    onVibrance: (Float) -> Unit,
     onProfile: (RawImage.OutputProfile) -> Unit,
     onSave: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var draft by remember(exposure) { mutableFloatStateOf(exposure) }
+    var vibranceDraft by remember(vibrance) { mutableFloatStateOf(vibrance) }
     Surface(
         modifier = modifier,
         color = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f),
@@ -3934,7 +3946,19 @@ private fun DevelopControls(
                 onValueChangeFinished = { onExposure(draft) },
                 valueRange = -3f..3f,
                 steps = 23,
-                modifier = Modifier.width(150.dp),
+                modifier = Modifier.width(120.dp),
+            )
+            Text(
+                text = String.format(Locale.US, "Vib %d", (vibranceDraft * 100f).roundToInt()),
+                style = MaterialTheme.typography.labelSmall,
+            )
+            Slider(
+                value = vibranceDraft,
+                onValueChange = { vibranceDraft = it },
+                onValueChangeFinished = { onVibrance(vibranceDraft) },
+                valueRange = 0f..1f,
+                steps = 19,
+                modifier = Modifier.width(110.dp),
             )
             TextButton(
                 onClick = {

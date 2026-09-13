@@ -132,6 +132,14 @@ object RawImage {
     /** Samples of the gamma curve: finer than the 256 levels it is quantised to anyway. */
     private const val GAMMA_STEPS = 4096
 
+    /** Rec. 709 luminance weights, used to hold brightness still while colour is stretched. */
+    private const val LUMA_RED = 0.2126f
+    private const val LUMA_GREEN = 0.7152f
+    private const val LUMA_BLUE = 0.0722f
+
+    /** Saturation gain at full vibrance on a fully neutral pixel: +150%. */
+    private const val VIBRANCE_RANGE = 1.5f
+
     /** Bradford adapted, since DNG states its colour matrices against a D50 white point. */
     private val XYZ_D50_TO_SRGB = floatArrayOf(
         3.1338561f, -1.6168667f, -0.4906146f,
@@ -1031,6 +1039,12 @@ object RawImage {
     data class DevelopSettings(
         /** Stops of exposure applied to the linear data, before the colour matrix. */
         val exposure: Float = 0f,
+        /**
+         * Extra colour richness, 0 for none. Muted pixels are lifted the most and already
+         * saturated ones barely at all, so skies and skin do not clip as they would under a
+         * flat saturation gain.
+         */
+        val vibrance: Float = 0f,
         val profile: OutputProfile = OutputProfile.ADOBE_RGB,
     )
 
@@ -1822,8 +1836,14 @@ object RawImage {
     private fun gammaEncode(linear: Float): Int = gammaEncode(SRGB_GAMMA_CURVE, linear)
 
     /** Exposure, the camera's colour matrix and the gamma curve: the last half of the pipeline. */
-    private class Develop(cameraToXyz: FloatArray?, exposureStops: Float, profile: OutputProfile) {
+    private class Develop(
+        cameraToXyz: FloatArray?,
+        exposureStops: Float,
+        vibrance: Float,
+        profile: OutputProfile,
+    ) {
         private val exposure = 2f.pow(exposureStops.coerceIn(-6f, 6f))
+        private val vibrance = vibrance.coerceIn(0f, 1f)
         private val gamma = profile.gamma
 
         /**
@@ -1839,19 +1859,32 @@ object RawImage {
             val b = blue * exposure
             // Camera RGB is shown as it stands when the file states no matrix, which is the
             // best an unprofiled sensor allows.
-            val red8: Int
-            val green8: Int
-            val blue8: Int
-            if (matrix == null) {
-                red8 = gammaEncode(gamma, r)
-                green8 = gammaEncode(gamma, g)
-                blue8 = gammaEncode(gamma, b)
-            } else {
-                red8 = gammaEncode(gamma, matrix[0] * r + matrix[1] * g + matrix[2] * b)
-                green8 = gammaEncode(gamma, matrix[3] * r + matrix[4] * g + matrix[5] * b)
-                blue8 = gammaEncode(gamma, matrix[6] * r + matrix[7] * g + matrix[8] * b)
+            var outR = r
+            var outG = g
+            var outB = b
+            if (matrix != null) {
+                outR = matrix[0] * r + matrix[1] * g + matrix[2] * b
+                outG = matrix[3] * r + matrix[4] * g + matrix[5] * b
+                outB = matrix[6] * r + matrix[7] * g + matrix[8] * b
             }
+            if (vibrance > 0f) {
+                val grey = LUMA_RED * outR + LUMA_GREEN * outG + LUMA_BLUE * outB
+                val gain = 1f + vibrance * VIBRANCE_RANGE * (1f - saturation(outR, outG, outB, grey))
+                outR = grey + (outR - grey) * gain
+                outG = grey + (outG - grey) * gain
+                outB = grey + (outB - grey) * gain
+            }
+            val red8 = gammaEncode(gamma, outR)
+            val green8 = gammaEncode(gamma, outG)
+            val blue8 = gammaEncode(gamma, outB)
             return 0xFF000000.toInt() or (red8 shl 16) or (green8 shl 8) or blue8
+        }
+
+        /** How far the triple already departs from its own grey, 0 for neutral and 1 for pure. */
+        private fun saturation(red: Float, green: Float, blue: Float, grey: Float): Float {
+            if (grey <= 0f) return 0f
+            val spread = maxOf(red, green, blue) - minOf(red, green, blue)
+            return (spread / grey).coerceIn(0f, 1f)
         }
     }
 
@@ -1905,7 +1938,7 @@ object RawImage {
         if (crop.width() < 2 || crop.height() < 2) return null
 
         val step = stepFor(crop.width(), crop.height(), targetWidth, targetHeight) ?: return null
-        val develop = Develop(info.matrix, settings.exposure, settings.profile)
+        val develop = Develop(info.matrix, settings.exposure, settings.vibrance, settings.profile)
         if (step == 1 && crop.width().toLong() * crop.height() <= MAX_DEMOSAIC_PHOTOSITES) {
             interpolateCrop(info, develop, crop, settings.profile)?.let { return it }
         }
