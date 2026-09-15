@@ -46,6 +46,24 @@ data class DeletePlan(val entries: List<DeleteEntry>) {
 
 data class DeleteOutcome(val failures: Int, val trashed: List<TrashedItem>)
 
+/**
+ * How far an operation has got, in both units a meter can be drawn from: bytes keep a single large
+ * file moving, and the item count carries the operations that copy no bytes at all.
+ */
+data class OperationProgress(
+    val itemsDone: Int = 0,
+    val totalItems: Int = 0,
+    val bytesDone: Long = 0L,
+    val totalBytes: Long = 0L,
+) {
+    /** Null when nothing countable is known yet, which is what the bouncing bar is for. */
+    val fraction: Float? get() = when {
+        totalBytes > 0L -> (bytesDone.toFloat() / totalBytes).coerceIn(0f, 1f)
+        totalItems > 0 -> (itemsDone.toFloat() / totalItems).coerceIn(0f, 1f)
+        else -> null
+    }
+}
+
 fun buildDeletePlan(context: Context, uris: Collection<Uri>): DeletePlan = DeletePlan(
     uris.mapNotNull { uri ->
         val entry = Storage.entry(context, uri) ?: return@mapNotNull null
@@ -82,27 +100,48 @@ fun restoreFromTrash(context: Context, item: TrashedItem): Boolean {
 }
 
 /** Deletes by parking in the trash, falling back to a permanent delete where that is impossible. */
-fun deleteItems(context: Context, uris: Collection<Uri>): DeleteOutcome {
+fun deleteItems(
+    context: Context,
+    uris: Collection<Uri>,
+    onProgress: (OperationProgress) -> Unit = {},
+): DeleteOutcome {
     val trashed = mutableListOf<TrashedItem>()
     var failures = 0
+    var done = 0
+    onProgress(OperationProgress(totalItems = uris.size))
     uris.forEach { uri ->
         val parked = moveToTrash(context, uri)
         when {
             parked != null -> trashed += parked
             !Storage.delete(context, uri) -> failures += 1
         }
+        done += 1
+        onProgress(OperationProgress(itemsDone = done, totalItems = uris.size))
     }
     return DeleteOutcome(failures, trashed)
 }
 
 /** Removes what the operation created, then puts back what it took away. Returns the failure count. */
-fun undoOperation(context: Context, record: UndoRecord): Int {
+fun undoOperation(
+    context: Context,
+    record: UndoRecord,
+    onProgress: (OperationProgress) -> Unit = {},
+): Int {
     var failures = 0
+    var done = 0
+    val total = record.created.size + record.trashed.size
+    fun step() {
+        done += 1
+        onProgress(OperationProgress(itemsDone = done, totalItems = total))
+    }
+    onProgress(OperationProgress(totalItems = total))
     record.created.forEach { uri ->
         if (Storage.entry(context, uri) != null && !Storage.delete(context, uri)) failures += 1
+        step()
     }
     record.trashed.forEach { item ->
         if (!restoreFromTrash(context, item)) failures += 1
+        step()
     }
     return failures
 }

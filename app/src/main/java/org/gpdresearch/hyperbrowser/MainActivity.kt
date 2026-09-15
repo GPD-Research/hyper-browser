@@ -109,7 +109,6 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
@@ -381,6 +380,9 @@ private const val LARGE_DRIVE_IMAGE_BYTES = 200L * 1024 * 1024
 private const val SELECTION_SETTLE_MS = 450L
 
 private const val INTERNAL_STORAGE_LABEL = "Internal Storage"
+
+/** A tenth of a second between progress reports: faster than the eye reads, cheaper than a redraw. */
+private const val PROGRESS_REPORT_MS = 100L
 
 private enum class LayoutMode(val label: String) {
     PHONE("Phone"),
@@ -709,6 +711,30 @@ private fun HyperBrowserApp() {
     val metrics = metricsFor(layoutMode)
 
     val scope = rememberCoroutineScope()
+    // Progress arrives from the IO thread, so it is published through a flow rather than written
+    // straight into composition state.
+    val busyFlow = remember { MutableStateFlow<BusyState?>(null) }
+    val busy by busyFlow.collectAsState()
+
+    /**
+     * Runs [work] with the busy indicator on it. Nothing is drawn unless the work outlives
+     * [BUSY_APPEARANCE_DELAY_MS], so short operations still look instant.
+     */
+    suspend fun <T> withBusy(label: String, work: suspend ((OperationProgress) -> Unit) -> T): T {
+        busyFlow.value = BusyState(label)
+        return try {
+            work { progress ->
+                busyFlow.value = BusyState(
+                    label = label,
+                    fraction = progress.fraction,
+                    detail = progressDetail(progress),
+                )
+            }
+        } finally {
+            busyFlow.value = null
+        }
+    }
+
     // Single-item commands follow the selection itself; only transfers care about the arrow.
     // Read through the states rather than a captured value, so a command tapped before the
     // recomposition that follows a selection still acts on what is selected now. Only the pane
@@ -829,7 +855,10 @@ private fun HyperBrowserApp() {
 
     fun runTransfer(request: TransferRequest) {
         scope.launch {
-            val result = withContext(Dispatchers.IO) { executeTransfer(activity, request) }
+            val label = if (request.mode == TransferMode.MOVE) "Moving…" else "Copying…"
+            val result = withBusy(label) { report ->
+                withContext(Dispatchers.IO) { executeTransfer(activity, request, report) }
+            }
             val verb = if (request.mode == TransferMode.MOVE) "move" else "copy"
             undoRecord = UndoRecord(verb, result.trashed, result.created).takeIf { !it.isEmpty }
             refreshPanesAfterWrite()
@@ -843,7 +872,9 @@ private fun HyperBrowserApp() {
         val record = undoRecord ?: return
         undoRecord = null
         scope.launch {
-            val failures = withContext(Dispatchers.IO) { undoOperation(activity, record) }
+            val failures = withBusy("Undoing…") { report ->
+                withContext(Dispatchers.IO) { undoOperation(activity, record, report) }
+            }
             refreshPanesAfterWrite()
             val message = if (failures > 0) {
                 failureMessage(failures, "restored")
@@ -862,7 +893,11 @@ private fun HyperBrowserApp() {
                 Toast.makeText(activity, "Select a file or folder to delete", Toast.LENGTH_SHORT).show()
                 return@launch
             }
-            val plan = withContext(Dispatchers.IO) { buildDeletePlan(activity, items) }
+            // Counting what is inside the folders walks them, which on a large tree is itself the
+            // wait the user is looking at.
+            val plan = withBusy("Checking what will be deleted…") {
+                withContext(Dispatchers.IO) { buildDeletePlan(activity, items) }
+            }
             if (plan.entries.isEmpty()) {
                 Toast.makeText(activity, "Nothing left to delete", Toast.LENGTH_SHORT).show()
                 return@launch
@@ -873,7 +908,9 @@ private fun HyperBrowserApp() {
 
     fun runDelete(plan: DeletePlan) {
         scope.launch {
-            val outcome = withContext(Dispatchers.IO) { deleteItems(activity, plan.uris) }
+            val outcome = withBusy("Deleting…") { report ->
+                withContext(Dispatchers.IO) { deleteItems(activity, plan.uris, report) }
+            }
             undoRecord = UndoRecord("delete", trashed = outcome.trashed).takeIf { !it.isEmpty }
             refreshPanesAfterWrite()
             if (outcome.failures > 0) {
@@ -888,7 +925,10 @@ private fun HyperBrowserApp() {
             val (from, to) = transferPanes()
             val source = if (reversed) to else from
             val target = if (reversed) from else to
-            when (val plan = withContext(Dispatchers.IO) { planTransfer(activity, source, target, mode) }) {
+            val planned = withBusy(if (mode == TransferMode.MOVE) "Preparing move…" else "Preparing copy…") {
+                withContext(Dispatchers.IO) { planTransfer(activity, source, target, mode) }
+            }
+            when (planned) {
                 TransferPlan.Staged -> {
                     val sourceDir = source.current ?: source.root ?: return@launch
                     val targetDir = target.current ?: target.root ?: return@launch
@@ -902,9 +942,9 @@ private fun HyperBrowserApp() {
                     if (request.wholeDirectory) pendingRequest = request else runTransfer(request)
                 }
                 TransferPlan.ReverseSuggested -> reversePrompt = mode
-                is TransferPlan.FolderIntoFolder -> pendingFolderTransfer = plan.prompt
-                is TransferPlan.FilesIntoFolder -> pendingFilesTransfer = plan.prompt
-                is TransferPlan.BulkFolders -> pendingBulkFolders = plan.prompt
+                is TransferPlan.FolderIntoFolder -> pendingFolderTransfer = planned.prompt
+                is TransferPlan.FilesIntoFolder -> pendingFilesTransfer = planned.prompt
+                is TransferPlan.BulkFolders -> pendingBulkFolders = planned.prompt
             }
         }
     }
@@ -1200,6 +1240,10 @@ private fun HyperBrowserApp() {
             }
             }
         }
+
+        // Over the panes and under the dialogs: a confirmation the user is still answering must
+        // stay reachable while a previous operation finishes behind it.
+        BusyOverlay(busy)
 
         // Dialogs live inside the theme; outside it they fell back to Material's default palette.
         if (pendingRequest != null) {
@@ -1610,15 +1654,22 @@ private data class TransferResult(
     val trashed: List<TrashedItem> = emptyList(),
 )
 
-private fun executeTransfer(activity: ComponentActivity, request: TransferRequest): TransferResult {
+private fun executeTransfer(
+    activity: ComponentActivity,
+    request: TransferRequest,
+    onProgress: (OperationProgress) -> Unit = {},
+): TransferResult {
     val takenNames = Storage.childNames(activity, request.targetDir)
     val wanted = if (request.wholeDirectory) listOf(request.sourceDir) else request.selected.toList()
     val sources = wanted.mapNotNull { Storage.entry(activity, it) }
     var failures = wanted.size - sources.size
     val created = mutableListOf<Uri>()
     val trashed = mutableListOf<TrashedItem>()
+    // Walking the tree first is what turns the bar into a meter; until it returns there is no
+    // total to measure against and the caller is left showing the bouncing block.
+    val meter = TransferMeter(measureTransfer(activity, sources), onProgress)
     sources.forEach { source ->
-        val outcome = transferEntry(activity, source, request.targetDir, takenNames)
+        val outcome = transferEntry(activity, source, request.targetDir, takenNames, meter)
         failures += outcome.failures
         val copy = outcome.created ?: return@forEach
         created += copy
@@ -1634,6 +1685,13 @@ private fun executeTransfer(activity: ComponentActivity, request: TransferReques
     return TransferResult(failures, created, trashed)
 }
 
+/** "12 of 340 files · 1.2 GB of 4.6 GB", with either half dropped when it has nothing to say. */
+private fun progressDetail(progress: OperationProgress): String = listOfNotNull(
+    "${progress.itemsDone} of ${progress.totalItems} items".takeIf { progress.totalItems > 0 },
+    "${formatBytes(progress.bytesDone)} of ${formatBytes(progress.totalBytes)}"
+        .takeIf { progress.totalBytes > 0L },
+).joinToString("  ·  ")
+
 private fun failureMessage(count: Int, verb: String): String =
     if (count == 1) "1 item could not be $verb" else "$count items could not be $verb"
 
@@ -1645,6 +1703,7 @@ private fun transferEntry(
     source: FileEntry,
     targetDir: Uri,
     takenNames: MutableSet<String>,
+    meter: TransferMeter,
 ): EntryOutcome {
     if (source.isDirectory) {
         val folderName = nextAvailableName(takenNames, source.name)
@@ -1654,12 +1713,13 @@ private fun transferEntry(
         var failures = 0
         Storage.children(context, source.uri).forEach { child ->
             if (child.uri == destination.uri) return@forEach
-            failures += transferEntry(context, child, destination.uri, childNames).failures
+            failures += transferEntry(context, child, destination.uri, childNames, meter).failures
         }
         return EntryOutcome(destination.uri, failures)
     }
 
-    val copy = copyFileContents(context, source, targetDir, takenNames)
+    val copy = copyFileContents(context, source, targetDir, takenNames, meter)
+    meter.itemFinished(source.size)
     return EntryOutcome(copy, if (copy == null) 1 else 0)
 }
 
@@ -1668,12 +1728,92 @@ private fun copyFileContents(
     source: FileEntry,
     targetDir: Uri,
     takenNames: MutableSet<String>,
+    meter: TransferMeter,
 ): Uri? {
     val content = Storage.read(context, source) ?: return null
     val name = nextAvailableName(takenNames, content.fileName)
     return runCatching {
-        content.stream.use { input -> Storage.writeChild(context, targetDir, name, content.mimeType, input) }
+        CountingInputStream(content.stream, meter::bytesRead).use { input ->
+            Storage.writeChild(context, targetDir, name, content.mimeType, input)
+        }
     }.getOrNull()
+}
+
+/** Files and bytes the transfer is about to move; a directory has to be walked to be counted. */
+private fun measureTransfer(context: Context, sources: List<FileEntry>): OperationProgress {
+    var files = 0
+    var bytes = 0L
+    sources.forEach { source ->
+        if (source.isDirectory) {
+            val stats = scanFolder(context, source.uri)
+            files += stats.totalFiles
+            bytes += stats.bytes
+        } else {
+            files += 1
+            bytes += source.size
+        }
+    }
+    return OperationProgress(totalItems = files, totalBytes = bytes)
+}
+
+/**
+ * Counts a transfer as it runs. Byte reports are throttled: a copy hands one back every few
+ * kilobytes, and redrawing the bar that often would cost more than the copy does.
+ */
+private class TransferMeter(
+    private val totals: OperationProgress,
+    private val onProgress: (OperationProgress) -> Unit,
+) {
+    private var itemsDone = 0
+    private var finishedBytes = 0L
+    private var currentFileBytes = 0L
+    private var lastReportAt = 0L
+
+    init {
+        onProgress(totals)
+    }
+
+    fun bytesRead(count: Int) {
+        currentFileBytes += count
+        val now = SystemClock.uptimeMillis()
+        if (now - lastReportAt < PROGRESS_REPORT_MS) return
+        lastReportAt = now
+        report()
+    }
+
+    /**
+     * A backend that never hands its bytes through this meter — a Drive export, a provider that
+     * streams elsewhere — would leave the bar still, so the item's own size stands in for what it
+     * failed to report.
+     */
+    fun itemFinished(size: Long) {
+        itemsDone += 1
+        finishedBytes += maxOf(size, currentFileBytes)
+        currentFileBytes = 0L
+        report()
+    }
+
+    private fun report() = onProgress(
+        totals.copy(
+            itemsDone = itemsDone,
+            bytesDone = minOf(finishedBytes + currentFileBytes, totals.totalBytes),
+        ),
+    )
+}
+
+/** Reports every read through to [onRead] so the bar can follow one large file, not just counts. */
+private class CountingInputStream(
+    private val source: InputStream,
+    private val onRead: (Int) -> Unit,
+) : InputStream() {
+    override fun read(): Int = source.read().also { if (it >= 0) onRead(1) }
+
+    override fun read(buffer: ByteArray, offset: Int, length: Int): Int =
+        source.read(buffer, offset, length).also { if (it > 0) onRead(it) }
+
+    override fun available(): Int = source.available()
+
+    override fun close() = source.close()
 }
 
 internal fun nextAvailableName(takenNames: MutableSet<String>, preferredName: String): String {
@@ -3539,6 +3679,17 @@ private fun ImageViewerScreen(
                             modifier = Modifier.fillMaxSize(),
                         )
                     }
+                    // A decode reports nothing until it is done, so the wait is only ever bounced.
+                    if (loading && largeDriveImage == null) {
+                        DelayedBusyLine(
+                            label = "Decoding…",
+                            modifier = Modifier
+                                .align(Alignment.Center)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.9f))
+                                .padding(horizontal = 20.dp, vertical = 12.dp),
+                        )
+                    }
                 }
             }
 
@@ -3566,14 +3717,11 @@ private fun ImageViewerScreen(
                             style = MaterialTheme.typography.bodyMedium,
                             textAlign = TextAlign.Center,
                         )
-                        if (read == null || entry.size <= 0L) {
-                            LinearProgressIndicator(modifier = Modifier.padding(top = 12.dp))
-                        } else {
-                            LinearProgressIndicator(
-                                progress = { (read.toFloat() / entry.size).coerceIn(0f, 1f) },
-                                modifier = Modifier.padding(top = 12.dp),
-                            )
-                        }
+                        AsciiBusyBar(
+                            fraction = read?.takeIf { entry.size > 0L }
+                                ?.let { (it.toFloat() / entry.size).coerceIn(0f, 1f) },
+                            modifier = Modifier.padding(top = 12.dp),
+                        )
                         Text(
                             text = "Drive cannot send part of a file, so all of it is downloaded " +
                                 "before anything is drawn. Copying it to local storage and " +
@@ -4669,11 +4817,7 @@ private fun DirectoryPane(
                     .padding(16.dp),
                 contentAlignment = Alignment.Center,
             ) {
-                Text(
-                    text = "Loading…",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                DelayedBusyLine("Loading…")
             }
         } else {
             LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
