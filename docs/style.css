@@ -181,3 +181,68 @@ footer a {
     color: var(--muted);
     font-size: 0.9rem;
 }
+
+.crumbs {
+    max-width: 40rem;
+    margin: 1.5rem auto -2.5rem;
+    color: var(--muted);
+    font-size: 0.9rem;
+}
+
+.projects {
+    list-style: none;
+    padding: 0;
+    margin: 1.5rem 0 0;
+    display: grid;
+    gap: 1rem;
+}
+
+.project {
+    display: grid;
+    grid-template-columns: 56px 1fr;
+    gap: 1rem;
+    align-items: start;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.25rem 1.5rem;
+}
+
+.project img {
+    width: 56px;
+    height: 56px;
+    border-radius: 12px;
+}
+
+.project h2 {
+    margin: 0 0 0.25rem;
+    font-size: 1.15rem;
+}
+
+.project p {
+    margin: 0 0 0.6rem;
+}
+
+.project .links a {
+    margin-right: 1.25rem;
+    font-size: 0.95rem;
+}
+
+.status {
+    display: inline-block;
+    margin-left: 0.5rem;
+    padding: 0.1em 0.6em;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    vertical-align: middle;
+}
+
+.status.available {
+    border-color: var(--accent);
+    color: var(--accent);
+}

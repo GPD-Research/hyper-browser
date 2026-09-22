@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Magnus">
+	<rect width="64" height="64" fill="#ff5a1f"/>
+	<path d="M14 45V13L32 34L50 13V45" fill="none" stroke="#141917" stroke-width="8" stroke-linecap="square" stroke-linejoin="miter"/>
+	<path d="M5 43H23L14 57ZM41 43H59L50 57Z" fill="#141917"/>
+</svg>

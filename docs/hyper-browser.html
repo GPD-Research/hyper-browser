@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hyper Browser — dual-pane file manager for Android</title>
+<meta name="description" content="Hyper Browser is a dual-pane Android file manager with a built-in photo gallery and full Google Drive access, for reconciling what lives on your phone against what lives in the cloud.">
+<link rel="icon" href="store/play-icon-512.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav class="crumbs"><a href="index.html">GPD Research</a> / Hyper Browser</nav>
+<header>
+    <img src="store/play-icon-512.png" alt="Hyper Browser icon">
+    <div>
+        <h1>Hyper Browser</h1>
+        <p class="tagline">A dual-pane file manager for Android, with a photo gallery and full Google Drive access.</p>
+    </div>
+</header>
+
+<main>
+    <p>
+        Hyper Browser exists for one job that no backup app does well: <strong>reconciling what is on your
+        phone against what is in your cloud</strong>. Two file trees side by side, a gallery for looking at
+        photos properly before you decide, and Google Drive mounted as a pane like any other folder. Move a
+        keeper up to Drive, delete the local copy of something you never want backed up, and see both sides
+        while you do it.
+    </p>
+
+    <h2>What it does</h2>
+    <ul>
+        <li>Two independent file panes — local storage, SD card, USB, or Google Drive in either pane.</li>
+        <li>Copy, move and delete across panes, including local &harr; Drive in both directions.</li>
+        <li>Built-in gallery with three zoom stages, so you can actually judge a photo before deleting it.</li>
+        <li>Create folders anywhere, including on Drive.</li>
+        <li>Light, inverted, hacker and astro themes.</li>
+        <li>No account required for local browsing. No ads, no analytics, no telemetry.</li>
+    </ul>
+
+    <h2>Screenshots</h2>
+    <p>
+        The wiki has an
+        <a href="https://github.com/GPD-Research/hyper-browser/wiki/Hyper-Browser-screen-grabs-with-explanations">annotated
+        tour of the app in screenshots</a> — the dual panes and themes, the preview, the gallery grid
+        and the RAW inspector, each with an explanation of what you are looking at.
+    </p>
+
+    <h2>Download</h2>
+    <div class="panel">
+        <p>
+            Hyper Browser is distributed as a direct APK while Google Drive verification is in progress.
+        </p>
+        <a class="cta" href="https://github.com/GPD-Research/hyper-browser/releases">Download the APK</a>
+        <p class="note">
+            Android will ask you to allow installs from your browser or file manager the first time.
+            Play Protect also warns about apps installed outside the Play Store; that is normal for a
+            sideloaded app.
+        </p>
+    </div>
+
+    <h2 id="what-to-expect-when-you-install">What to expect when you install</h2>
+    <p>
+        Hyper Browser is not on the Play Store and has not been through Google's Drive verification,
+        so you will meet two scary-looking warning screens on the way in. Both are expected. Here is
+        what they are and why they appear, so you are not deciding whether to trust something in the
+        middle of a security prompt.
+    </p>
+    <h3>1. "For your security, your phone is not allowed to install unknown apps"</h3>
+    <p>
+        This one comes from Android, and it appears for <em>every</em> app installed outside the Play
+        Store — the same way Windows warns about an <code>.exe</code> it has not seen before. Tap
+        <strong>Settings</strong> and allow your browser or file manager to install apps, then go back
+        and continue. Play Protect may add a second "unsafe app" notice; choose
+        <strong>Install anyway</strong>. Neither screen means anything has been found wrong with the
+        app — only that Google has not scanned it, because it was never submitted to them.
+    </p>
+    <h3>2. "Google hasn't verified this app"</h3>
+    <p>
+        This one comes from Google's sign-in flow, and only when you connect Google Drive. Tap
+        <strong>Advanced</strong>, then <strong>Go to Hyper Browser (unsafe)</strong>. Verification for
+        the Drive scope requires a third-party security assessment costing roughly $600 a year, which
+        this project does not currently fund. Until then, every app in this position gets the same
+        banner.
+    </p>
+    <h3>3. The Drive permission checkbox</h3>
+    <p>
+        The consent screen then asks you to tick a box granting access to
+        <em>"See, edit, create, and delete all of your Google Drive files."</em> You must tick it, or the
+        Drive pane will have nothing to show. That wording is Google's, and it is broad because a file
+        manager genuinely needs it — see <a href="#drive-access">Google Drive access</a> below for why, and the
+        <a href="privacy.html">privacy policy</a> for what the app does and does not do with it.
+    </p>
+    <p class="note">
+        Skipping all of this requires Play Store distribution and paid Drive verification. If enough
+        people ask, that is the path.
+    </p>
+
+    <h2 id="drive-access">Google Drive access</h2>
+    <p>
+        Hyper Browser requests the <code>https://www.googleapis.com/auth/drive</code> scope. That is the
+        broadest Drive scope Google offers, and the app asks for it because the app is a file manager: it
+        has to list, open, create, move and delete <em>any</em> file or folder you point it at, including
+        files that existed on your Drive long before you installed it. Narrower scopes such as
+        <code>drive.file</code> only expose files the app itself created, which cannot back a browsable
+        file tree.
+    </p>
+    <p>
+        Your Drive is contacted directly from your device. The developer operates no server, and no file
+        content, file name or account detail is ever sent anywhere other than Google's own API. See the
+        <a href="privacy.html">privacy policy</a> for the full disclosure.
+    </p>
+
+    <h2>Permissions</h2>
+    <table>
+        <tr><th>Permission</th><th>Why</th></tr>
+        <tr><td>All files access</td><td>Browsing and moving files anywhere on the device. Android's folder picker cannot grant access to the internal storage root, and the media APIs only expose photos and videos, so neither can back a general file manager.</td></tr>
+        <tr><td>Photos, video and audio</td><td>Listings, grid thumbnails and the gallery viewer.</td></tr>
+        <tr><td>Internet and network state</td><td>Google Drive requests, and failing fast when offline.</td></tr>
+    </table>
+
+    <h2>How it is built</h2>
+    <p>
+        Hyper Browser is open source, written in Kotlin and Jetpack Compose. If you want to see how it fits
+        together — the storage layer that puts Google Drive behind the same interface as local files, and the
+        image pipeline that opens a 500&nbsp;MB TIFF on a phone — there is a
+        <a href="architecture.html">one-page architecture overview</a>, and the
+        <a href="https://github.com/GPD-Research/hyper-browser">source on GitHub</a>.
+    </p>
+
+    <h2>Support</h2>
+    <p>
+        Questions, bugs and feature requests: <a href="mailto:gregorydearth@gmail.com">gregorydearth@gmail.com</a>.
+    </p>
+</main>
+
+<footer>
+    <a href="index.html">All projects</a>
+    <a href="https://github.com/GPD-Research/hyper-browser/wiki/Hyper-Browser-screen-grabs-with-explanations">Screenshots</a>
+    <a href="architecture.html">Architecture</a>
+    <a href="privacy.html">Privacy policy</a>
+    <a href="terms.html">Terms of service</a>
+    <span>&copy; 2026 GPD Research</span>
+</footer>
+</body>
+</html>

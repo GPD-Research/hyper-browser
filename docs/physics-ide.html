@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Physics IDE — an AI-assisted workspace for theoretical physics</title>
+<meta name="description" content="Physics IDE is a Linux desktop environment for developing, comparing and testing theoretical physics frameworks, with two AI research assistants given structured, retrieval-backed awareness of the whole theory.">
+<link rel="icon" href="store/physics-ide-icon-256.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav class="crumbs"><a href="index.html">GPD Research</a> / Physics IDE</nav>
+<header>
+    <img src="store/physics-ide-icon-256.png" alt="Physics IDE icon">
+    <div>
+        <h1>Physics IDE</h1>
+        <p class="tagline">A desktop research environment for developing and testing theoretical physics with AI assistance.</p>
+    </div>
+</header>
+
+<main>
+    <div class="panel">
+        <p><strong>Release candidate coming soon.</strong> Physics IDE is being prepared for its first release
+        candidate as a Linux <code>.deb</code> package. A download and the source repository will be linked here
+        when it is published.</p>
+    </div>
+
+    <p>
+        A theoretical framework is a large, interlocking body of axioms, derivations, notation and
+        manuscript. A chat window cannot hold it, and an assistant that only sees the last few messages
+        cannot reason about it. Physics IDE puts the theory itself in the workspace — master axiom file,
+        chapters, notes, scripts, experiments and data — and gives its AI assistants a structured, indexed
+        view of all of it, so a question about one derivation can be answered against the whole.
+    </p>
+
+    <h2>What it does</h2>
+    <ul>
+        <li>Theory profiles: one workspace per theory, with a master axiom file, structured manuscript
+            chapters, a scratchpad, and linked tools, scripts and datasets.</li>
+        <li>Two independent AI research lanes of configurable strength, so a strong model can check a fast
+            one, or two lines of reasoning can run side by side on the same context.</li>
+        <li>Project awareness built from the actual files: a generated awareness document, a
+            theory-agnostic structural schema, and a local hybrid search index (full-text plus vector) that
+            retrieves the relevant sections for each request.</li>
+        <li>Gated file access: the AI is advisory by default and can be granted write access limited to the
+            active project root when you want it to edit the framework directly.</li>
+        <li>An AI Request Inspector and a context-load meter that show exactly what was sent, in what order,
+            and what it cost in tokens — before and after each request.</li>
+        <li>Manuscript search with section navigation, KaTeX rendering, and Pandoc export.</li>
+        <li>Everything stays on the machine: SQLite indexes, local embeddings, no server of ours in the loop.</li>
+    </ul>
+
+    <h2>Where it stands, and a note on AI models</h2>
+    <p>
+        Version 8 is the release-candidate baseline; the work toward the first official release is
+        production hardening and efficient project-aware AI operation. Physics IDE currently drives cloud
+        AI providers. In day-to-day research use a serious theory consumes context quickly, and cloud
+        token pricing makes sustained work expensive. The intended fit is a <strong>local model served
+        through Ollama</strong>, which is not yet an option in the app but is the direction the release is
+        heading — the retrieval and prompt-assembly work already done is what makes a local model viable
+        for this workload.
+    </p>
+
+    <h2>Who it is for</h2>
+    <p>
+        Researchers and serious students developing or evaluating a theoretical framework — mainstream,
+        hybrid or non-standard — who want AI assistance that is grounded in their own material rather than
+        in whatever a chat model happens to recall.
+    </p>
+
+    <h2>Support</h2>
+    <p>
+        Questions and early-access enquiries: <a href="mailto:gregorydearth@gmail.com">gregorydearth@gmail.com</a>.
+    </p>
+</main>
+
+<footer>
+    <a href="index.html">All projects</a>
+    <a href="privacy.html">Privacy policy</a>
+    <a href="terms.html">Terms of service</a>
+    <span>&copy; 2026 GPD Research</span>
+</footer>
+</body>
+</html>
