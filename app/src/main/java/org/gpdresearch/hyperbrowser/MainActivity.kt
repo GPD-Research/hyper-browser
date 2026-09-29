@@ -196,11 +196,11 @@ private enum class Pane { LEFT, RIGHT }
 private enum class TransferDirection { LEFT_TO_RIGHT, RIGHT_TO_LEFT }
 private enum class TransferMode { COPY, MOVE }
 
-private enum class AppTheme(val label: String) {
-    LIGHT("Light"),
-    INVERTED("Inverted"),
-    HACKER("Hacker"),
-    ASTRO("Astro"),
+private enum class AppTheme(val label: String, val dark: Boolean) {
+    LIGHT("Light", dark = false),
+    INVERTED("Inverted", dark = true),
+    HACKER("Hacker", dark = true),
+    ASTRO("Astro", dark = true),
 }
 
 private val MATRIX_GREEN = Color(0xFF00FF41)
@@ -694,6 +694,13 @@ private fun HyperBrowserApp() {
     var setAsUri by rememberSaveable { mutableStateOf<Uri?>(null) }
     var background by remember { mutableStateOf<ImageBitmap?>(null) }
     var backgroundDim by rememberSaveable { mutableFloatStateOf(prefs.getFloat(BACKGROUND_DIM_PREF, 0f)) }
+    // Set: a flat colour is drawn instead of the image, which stays stored for when it is wanted back.
+    var backgroundColors by remember { mutableStateOf(BackgroundColors.load(prefs)) }
+    var showBackgroundColors by rememberSaveable { mutableStateOf(false) }
+    fun updateBackgroundColors(colors: BackgroundColors?) {
+        backgroundColors = colors
+        BackgroundColors.save(prefs, colors)
+    }
     LaunchedEffect(Unit) {
         background = withContext(Dispatchers.IO) { loadBackground(activity) }
     }
@@ -1042,18 +1049,40 @@ private fun HyperBrowserApp() {
                     onClose = { shown -> closeGallery(shown) },
                 )
             } else {
-                // Drawn behind everything in the file tree, dimmed so rows stay readable over it.
-                background?.let { image ->
-                    Image(
-                        bitmap = image,
-                        contentDescription = null,
-                        contentScale = ContentScale.Crop,
-                        alpha = 1f - backgroundDim,
-                        modifier = Modifier.fillMaxSize(),
+                val flatColors = backgroundColors
+                val baseScheme = MaterialTheme.colorScheme
+                val browserScheme = if (flatColors == null) {
+                    baseScheme
+                } else {
+                    val text = flatColors.foregroundFor(baseScheme.onBackground)
+                    baseScheme.copy(
+                        onBackground = text,
+                        onSurface = text,
+                        onSurfaceVariant = text,
                     )
+                }
+                if (flatColors != null) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(flatColors.backgroundFor(appTheme.dark)),
+                    )
+                } else {
+                    // Drawn behind everything in the file tree, dimmed so rows stay readable over it.
+                    background?.let { image ->
+                        Image(
+                            bitmap = image,
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            alpha = 1f - backgroundDim,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    }
                 }
                 // The strip runs the full height beside everything else, so the root and direction
                 // buttons sit centred over their own panes and the strip has room to grow.
+                MaterialTheme(colorScheme = browserScheme) {
+                CompositionLocalProvider(LocalContentColor provides browserScheme.onBackground) {
                 Row(modifier = Modifier.fillMaxSize()) {
                     CommandStrip(
                         metrics = metrics,
@@ -1237,6 +1266,8 @@ private fun HyperBrowserApp() {
                         )
                     }
                 }
+                }
+                }
             }
             }
         }
@@ -1371,6 +1402,14 @@ private fun HyperBrowserApp() {
                 showHiddenFiles = fileDisplayOptions.showHiddenFiles,
                 showTrashFiles = fileDisplayOptions.showTrashFiles,
                 currentTheme = appTheme,
+                hasBackgroundImage = background != null,
+                flatBackground = backgroundColors != null,
+                onResetBackground = { updateBackgroundColors(BackgroundColors()) },
+                onCustomBackground = {
+                    if (backgroundColors == null) updateBackgroundColors(BackgroundColors())
+                    showBackgroundColors = true
+                },
+                onUseBackgroundImage = { updateBackgroundColors(null) },
                 onSelect = { mode ->
                     layoutMode = mode
                     prefs.edit().putString(LAYOUT_PREF, mode.name).apply()
@@ -1387,6 +1426,18 @@ private fun HyperBrowserApp() {
                     showSortSettings = true
                 },
                 onDismiss = { showLayoutSettings = false },
+            )
+        }
+
+        val flatColors = backgroundColors
+        if (showBackgroundColors && flatColors != null) {
+            val scheme = MaterialTheme.colorScheme
+            BackgroundColorDialog(
+                background = flatColors.backgroundFor(appTheme.dark),
+                foreground = flatColors.foregroundFor(scheme.onBackground),
+                onSetBackground = { updateBackgroundColors(flatColors.copy(background = it)) },
+                onSetForeground = { updateBackgroundColors(flatColors.copy(foreground = it)) },
+                onDismiss = { showBackgroundColors = false },
             )
         }
 
@@ -2069,7 +2120,7 @@ private fun PreviewDetailPane(
 
 /** One dialog skin for the whole app so every prompt follows the active theme. */
 @Composable
-private fun HyperDialog(
+internal fun HyperDialog(
     onDismissRequest: () -> Unit,
     title: @Composable () -> Unit,
     confirmButton: @Composable () -> Unit,
@@ -2365,6 +2416,11 @@ private fun LayoutSettingsDialog(
     showHiddenFiles: Boolean,
     showTrashFiles: Boolean,
     currentTheme: AppTheme,
+    hasBackgroundImage: Boolean,
+    flatBackground: Boolean,
+    onResetBackground: () -> Unit,
+    onCustomBackground: () -> Unit,
+    onUseBackgroundImage: () -> Unit,
     onSelect: (LayoutMode) -> Unit,
     onThemeSelect: (AppTheme) -> Unit,
     onToggleHiddenFiles: (Boolean) -> Unit,
@@ -2425,6 +2481,19 @@ private fun LayoutSettingsDialog(
                                 maxLines = 1,
                             )
                         }
+                    }
+                }
+
+                Text("File browser background", style = MaterialTheme.typography.labelLarge)
+                Button(onClick = onResetBackground, modifier = Modifier.fillMaxWidth()) {
+                    Text(if (flatBackground) "Reset background (default grey)" else "Reset background")
+                }
+                Button(onClick = onCustomBackground, modifier = Modifier.fillMaxWidth()) {
+                    Text("Customise colours…")
+                }
+                if (hasBackgroundImage && flatBackground) {
+                    Button(onClick = onUseBackgroundImage, modifier = Modifier.fillMaxWidth()) {
+                        Text("Use background image")
                     }
                 }
             }
