@@ -81,6 +81,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.DriveFileMove
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.automirrored.filled.Undo
+import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.Close
@@ -91,13 +92,13 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Deselect
 import androidx.compose.material.icons.filled.DriveFileRenameOutline
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material.icons.filled.Wallpaper
 import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.material.icons.filled.ZoomOut
 import androidx.compose.material3.AlertDialog
@@ -1046,6 +1047,7 @@ private fun HyperBrowserApp() {
                     startStage = galleryStage,
                     sortOrder = gallerySort,
                     onUndoable = { record -> undoRecord = record },
+                    onSetAs = { uri -> setAsUri = uri },
                     onClose = { shown -> closeGallery(shown) },
                 )
             } else {
@@ -3241,6 +3243,8 @@ private fun ImageViewerScreen(
     startStage: GalleryStage,
     sortOrder: SortOrder,
     onUndoable: (UndoRecord?) -> Unit,
+    /** Opens the Set image as dialog for the image on screen. */
+    onSetAs: (Uri) -> Unit,
     /** Carries the image last on screen, so the browser can come back to it. */
     onClose: (Uri?) -> Unit,
 ) {
@@ -3583,10 +3587,6 @@ private fun ImageViewerScreen(
                     modifier = Modifier.height(28.dp),
                 )
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (stage == GalleryStage.SINGLE && images.size > 1) {
-                        GalleryAction(Icons.AutoMirrored.Filled.ArrowBack, "Previous image") { showRelative(-1) }
-                        GalleryAction(Icons.AutoMirrored.Filled.ArrowForward, "Next image") { showRelative(1) }
-                    }
                     if (stage != GalleryStage.SINGLE) {
                         GalleryAction(
                             icon = Icons.Filled.SelectAll,
@@ -3606,16 +3606,6 @@ private fun ImageViewerScreen(
                         if (targets.isNotEmpty()) pendingGalleryDelete = targets
                     }
                     if (stage == GalleryStage.SINGLE) {
-                        if (inspectable) {
-                            GalleryAction(
-                                icon = Icons.Filled.CenterFocusStrong,
-                                description = if (inspect) "Leave inspector" else "Inspect at full resolution",
-                                tint = if (inspect) MaterialTheme.colorScheme.primary else LocalContentColor.current,
-                            ) {
-                                inspect = !inspect
-                                resetTransform()
-                            }
-                        }
                         if (inspect && isRawFile) {
                             GalleryAction(
                                 icon = Icons.Filled.Tune,
@@ -3635,16 +3625,14 @@ private fun ImageViewerScreen(
                             }
                         }
                         GalleryAction(Icons.Filled.RotateRight, "Rotate 90° clockwise") { requestRotate() }
-                        GalleryAction(Icons.Filled.Wallpaper, "Set as wallpaper") {
-                            setAsWallpaper(activity, currentUri, currentMimeType)
-                        }
                         GalleryAction(Icons.Filled.ZoomOut, "Zoom out") { zoomOut() }
                         GalleryAction(Icons.Filled.ZoomIn, "Zoom in") { zoomIn() }
                         GalleryAction(Icons.Filled.Info, "Image information") { showExif = true }
-                    }
-                    GalleryAction(Icons.Filled.Image, "Toggle gallery view") {
-                        stage = if (stage == GalleryStage.SINGLE) GalleryStage.GRID_SMALL else GalleryStage.SINGLE
-                        resetTransform()
+                    } else {
+                        GalleryAction(Icons.Filled.Image, "Open image") {
+                            stage = GalleryStage.SINGLE
+                            resetTransform()
+                        }
                     }
                 }
             }
@@ -3922,42 +3910,60 @@ private fun ImageViewerScreen(
             }
 
             if (showMenu) {
-                Column(
+                // Bottom bar: where to go on the left, what to do with the image in the middle,
+                // and the inspector over the previous/next arrows on the right.
+                Row(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
                         .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.9f))
-                        .padding(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.Bottom,
                 ) {
-                    Button(onClick = { onClose(currentUri) }) { Text("Back to file browser") }
-                    Button(onClick = { stage = GalleryStage.GRID_SMALL; resetTransform(); showMenu = false }) { Text("Show thumbnails") }
-                    if (inspectable) {
-                        Button(onClick = {
-                            inspect = !inspect
-                            resetTransform()
-                            showMenu = false
-                        }) {
-                            Text(if (inspect) "Leave inspector" else "Inspect at full resolution")
-                        }
+                    GalleryDestination(Icons.Filled.AccountTree, "Files") { onClose(currentUri) }
+                    GalleryDestination(Icons.Filled.GridView, "Gallery") {
+                        stage = GalleryStage.GRID_SMALL
+                        resetTransform()
+                        showMenu = false
                     }
-                    if (inspect && isRawFile) {
-                        Button(onClick = {
-                            inspectDeveloped = !inspectDeveloped
-                            resetTransform()
-                            showMenu = false
-                        }) {
-                            Text(
-                                if (inspectDeveloped) {
-                                    "Show uncompressed sensor data"
-                                } else {
-                                    "Develop the sensor data"
-                                },
-                            )
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(horizontal = 8.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        if (inspect && isRawFile) {
+                            GalleryMenuButton(if (inspectDeveloped) "Show sensor data" else "Develop sensor data") {
+                                inspectDeveloped = !inspectDeveloped
+                                resetTransform()
+                                showMenu = false
+                            }
                         }
+                        if (inspect) {
+                            GalleryMenuButton(if (showMinimap) "Hide locator" else "Show locator") {
+                                showMinimap = !showMinimap
+                                showMenu = false
+                            }
+                        }
+                        GalleryMenuButton("Set as…") { onSetAs(currentUri) }
                     }
-                    if (inspect) {
-                        Button(onClick = { showMinimap = !showMinimap; showMenu = false }) {
-                            Text(if (showMinimap) "Hide locator" else "Show locator")
+                    Column(horizontalAlignment = Alignment.End) {
+                        if (inspectable) {
+                            GalleryAction(
+                                icon = Icons.Filled.CenterFocusStrong,
+                                description = if (inspect) "Leave inspector" else "Inspect at full resolution",
+                                tint = if (inspect) MaterialTheme.colorScheme.primary else LocalContentColor.current,
+                            ) {
+                                inspect = !inspect
+                                resetTransform()
+                            }
+                        }
+                        if (images.size > 1) {
+                            Row {
+                                GalleryAction(Icons.AutoMirrored.Filled.ArrowBack, "Previous image") { showRelative(-1) }
+                                GalleryAction(Icons.AutoMirrored.Filled.ArrowForward, "Next image") { showRelative(1) }
+                            }
                         }
                     }
                 }
@@ -4230,6 +4236,39 @@ private fun GalleryAction(
 ) {
     IconButton(onClick = onClick, modifier = Modifier.size(30.dp)) {
         Icon(icon, contentDescription = description, tint = tint, modifier = Modifier.size(17.dp))
+    }
+}
+
+/** A boxed icon with its name beneath: one of the places the viewer can go back to. */
+@Composable
+private fun GalleryDestination(icon: ImageVector, label: String, onClick: () -> Unit) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier
+            .clip(RoundedCornerShape(6.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 6.dp, vertical = 2.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(30.dp)
+                .border(1.dp, LocalContentColor.current, RoundedCornerShape(5.dp)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(icon, contentDescription = label, modifier = Modifier.size(18.dp))
+        }
+        Text(label, style = MaterialTheme.typography.labelSmall)
+    }
+}
+
+@Composable
+private fun GalleryMenuButton(label: String, onClick: () -> Unit) {
+    Button(
+        onClick = onClick,
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+        modifier = Modifier.height(28.dp),
+    ) {
+        Text(label, fontSize = 11.sp)
     }
 }
 
