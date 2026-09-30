@@ -697,7 +697,7 @@ private fun HyperBrowserApp() {
     // Set: a flat colour is drawn instead of the image, which stays stored for when it is wanted back.
     var backgroundColors by remember { mutableStateOf(BackgroundColors.load(prefs)) }
     var showBackgroundColors by rememberSaveable { mutableStateOf(false) }
-    fun updateBackgroundColors(colors: BackgroundColors?) {
+    fun updateBackgroundColors(colors: BackgroundColors) {
         backgroundColors = colors
         BackgroundColors.save(prefs, colors)
     }
@@ -1049,23 +1049,22 @@ private fun HyperBrowserApp() {
                     onClose = { shown -> closeGallery(shown) },
                 )
             } else {
-                val flatColors = backgroundColors
                 val baseScheme = MaterialTheme.colorScheme
-                val browserScheme = if (flatColors == null) {
-                    baseScheme
-                } else {
-                    val text = flatColors.foregroundFor(baseScheme.onBackground)
+                // A chosen text colour recolours the tree whether it sits over the flat colour or
+                // the image, and takes the active-pane outline with it so that stays visible too.
+                val browserScheme = backgroundColors.foreground?.let { text ->
                     baseScheme.copy(
+                        primary = text,
                         onBackground = text,
                         onSurface = text,
                         onSurfaceVariant = text,
                     )
-                }
-                if (flatColors != null) {
+                } ?: baseScheme
+                if (backgroundColors.flat) {
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
-                            .background(flatColors.backgroundFor(appTheme.dark)),
+                            .background(backgroundColors.backgroundFor(appTheme.dark)),
                     )
                 } else {
                     // Drawn behind everything in the file tree, dimmed so rows stay readable over it.
@@ -1325,6 +1324,8 @@ private fun HyperBrowserApp() {
                         }
                         if (target.app) {
                             background = withContext(Dispatchers.IO) { loadBackground(activity) }
+                            // Choosing an image means wanting to see it.
+                            updateBackgroundColors(backgroundColors.copy(flat = false))
                         }
                         Toast.makeText(activity, outcome, Toast.LENGTH_SHORT).show()
                     }
@@ -1403,13 +1404,10 @@ private fun HyperBrowserApp() {
                 showTrashFiles = fileDisplayOptions.showTrashFiles,
                 currentTheme = appTheme,
                 hasBackgroundImage = background != null,
-                flatBackground = backgroundColors != null,
-                onResetBackground = { updateBackgroundColors(BackgroundColors()) },
-                onCustomBackground = {
-                    if (backgroundColors == null) updateBackgroundColors(BackgroundColors())
-                    showBackgroundColors = true
-                },
-                onUseBackgroundImage = { updateBackgroundColors(null) },
+                flatBackground = backgroundColors.flat,
+                onResetBackground = { updateBackgroundColors(BackgroundColors(flat = true)) },
+                onCustomBackground = { showBackgroundColors = true },
+                onUseBackgroundImage = { updateBackgroundColors(backgroundColors.copy(flat = false)) },
                 onSelect = { mode ->
                     layoutMode = mode
                     prefs.edit().putString(LAYOUT_PREF, mode.name).apply()
@@ -1429,14 +1427,15 @@ private fun HyperBrowserApp() {
             )
         }
 
-        val flatColors = backgroundColors
-        if (showBackgroundColors && flatColors != null) {
+        if (showBackgroundColors) {
             val scheme = MaterialTheme.colorScheme
             BackgroundColorDialog(
-                background = flatColors.backgroundFor(appTheme.dark),
-                foreground = flatColors.foregroundFor(scheme.onBackground),
-                onSetBackground = { updateBackgroundColors(flatColors.copy(background = it)) },
-                onSetForeground = { updateBackgroundColors(flatColors.copy(foreground = it)) },
+                background = backgroundColors.backgroundFor(appTheme.dark),
+                foreground = backgroundColors.foregroundFor(scheme.onBackground),
+                // Setting the background colour is asking to see it; setting the text colour is
+                // not, so the image stays put in that case.
+                onSetBackground = { updateBackgroundColors(backgroundColors.copy(flat = true, background = it)) },
+                onSetForeground = { updateBackgroundColors(backgroundColors.copy(foreground = it)) },
                 onDismiss = { showBackgroundColors = false },
             )
         }
