@@ -2,6 +2,23 @@
 
 Lean Android dual-pane file browser built with Kotlin and Jetpack Compose.
 
+## Version 4.6.0 (September 2026)
+
+### Progress
+
+- Work that outlasts a second shows an ASCII bar. Copy, move, delete and undo meter what they can
+  count, filling `[######----] 60%` by bytes or by item; folder listing and image decoding, which
+  have no total, bounce `[--###-----]` instead. Nothing appears for work that finishes sooner, and
+  the panes ignore taps while the bar is up.
+
+### File browser background
+
+- The theme settings can put a flat colour behind the file tree instead of the background image:
+  light grey for the light theme, dark grey for the dark ones. The image is kept, not deleted, and
+  a Use background image button brings it back.
+- Customise colours opens a picker with separate Set background and Set text/icons buttons. The
+  two may not be given the same colour.
+
 ## Version 4.5.1 (September 2026)
 
 ### RAW inspector: vibrance
