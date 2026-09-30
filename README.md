@@ -2,6 +2,22 @@
 
 Lean Android dual-pane file browser built with Kotlin and Jetpack Compose.
 
+## Version 4.6.1 (September 2026)
+
+### Gallery: single-image controls
+
+- The menu under a single image is now one bottom bar: boxed Files and Gallery icons on the left,
+  a small Set as… button in the middle that opens the full Set image as dialog (file browser
+  background, home or lock screen wallpaper), and the previous/next arrows on the right, with the
+  RAW/TIFF inspector button above them. The crowded top row loses the arrows, the wallpaper icon
+  and the thumbnail toggle, which all now live in the bar.
+
+### Theme fixes
+
+- Custom text/icon colours no longer revert when the background image is switched on or off, and
+  Set text/icons no longer drops the image. Picking an image from the preview turns the image
+  background back on, and the active-pane outline follows the custom text colour.
+
 ## Version 4.6.0 (September 2026)
 
 ### Progress
