@@ -36,13 +36,16 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 
 /**
- * What is drawn behind the file tree when no image is wanted there. The image itself stays on
- * disk while this is active, so switching back to it costs nothing.
+ * How the file tree is coloured. [flat] selects a solid colour behind the tree in place of the
+ * stored image, which stays on disk so switching back costs nothing. The colours themselves are
+ * kept whichever way that switch is set: [foreground] recolours text and icons over an image just
+ * as much as over the flat colour, and [background] is waiting when the flat colour returns.
  *
  * Colours are stored as ARGB ints; null means "whatever the theme would have used", which is what
  * a plain reset leaves behind so the grey follows the theme if that changes later.
  */
 data class BackgroundColors(
+    val flat: Boolean = false,
     val background: Color? = null,
     val foreground: Color? = null,
 ) {
@@ -60,24 +63,17 @@ data class BackgroundColors(
         private const val FOREGROUND_PREF = "background_text_color"
         private const val MODE_COLOR = "color"
 
-        /** Null when the stored image, if any, should be drawn instead. */
-        fun load(prefs: SharedPreferences): BackgroundColors? {
-            if (prefs.getString(MODE_PREF, null) != MODE_COLOR) return null
-            return BackgroundColors(
-                background = colorPref(prefs, BACKGROUND_PREF),
-                foreground = colorPref(prefs, FOREGROUND_PREF),
-            )
-        }
+        fun load(prefs: SharedPreferences): BackgroundColors = BackgroundColors(
+            flat = prefs.getString(MODE_PREF, null) == MODE_COLOR,
+            background = colorPref(prefs, BACKGROUND_PREF),
+            foreground = colorPref(prefs, FOREGROUND_PREF),
+        )
 
-        fun save(prefs: SharedPreferences, colors: BackgroundColors?) {
+        fun save(prefs: SharedPreferences, colors: BackgroundColors) {
             prefs.edit().apply {
-                if (colors == null) {
-                    remove(MODE_PREF)
-                } else {
-                    putString(MODE_PREF, MODE_COLOR)
-                    putColor(BACKGROUND_PREF, colors.background)
-                    putColor(FOREGROUND_PREF, colors.foreground)
-                }
+                if (colors.flat) putString(MODE_PREF, MODE_COLOR) else remove(MODE_PREF)
+                putColor(BACKGROUND_PREF, colors.background)
+                putColor(FOREGROUND_PREF, colors.foreground)
             }.apply()
         }
 
