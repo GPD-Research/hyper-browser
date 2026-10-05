@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Magnus — highway incident-scene illustrator</title>
-<meta name="description" content="Magnus is a visual incident-scene builder for Virginia DOT Safety Service Patrol training: real highway geometry from OpenStreetMap, MUTCD-scale lane markings, and a drag-and-drop overlay of trucks, cones and responders audited against SSP procedure.">
+<meta name="description" content="Magnus is a visual incident-scene builder for Virginia DOT Safety Service Patrol training: to-scale roadway templates traced from OpenStreetMap or a generic highway generator, a template editor for lane markings, and a drag-and-drop overlay of trucks, cones and responders audited against SSP procedure.">
 <link rel="icon" href="store/magnus-icon.svg">
 <link rel="stylesheet" href="style.css?v=2">
 </head>
@@ -40,16 +40,19 @@
 
     <h2>What it does</h2>
     <ul>
-        <li>Real roadway geometry from OpenStreetMap: mainline lanes, on- and off-ramps, gores, shoulders and
-            grade-separated crossings, normalized with the open-source <code>osm2streets</code> engine rather
-            than hand-drawn templates.</li>
-        <li>Lane markings to MUTCD scale — 10&nbsp;ft skips on a 40&nbsp;ft cycle, dotted auxiliary-lane lines,
-            edge lines broken at the gore — so distances on screen are distances on the road.</li>
+        <li>To-scale roadway templates from a map pull: by route and exit or mile marker, Magnus traces the
+            interstate from OpenStreetMap into smoothed, lane-width pavement with yellow and white edge lines.
+            This is a scaled underlay to draw on, not a finished diagram — OpenStreetMap carries centerlines and
+            lane counts, not lane-level geometry, so gores, tapers and lane lines are added by hand.</li>
+        <li>A generic highway generator for simpler templates: choose lane count, shoulders, and ramp
+            configuration and get a clean roadway without a map pull, plus built-in scale-reference templates.</li>
+        <li>A Location Template Creator for finishing either kind of template: MUTCD-pattern line presets
+            (10&nbsp;ft skips on a 40&nbsp;ft cycle, dotted auxiliary-lane lines, edge lines), pavement and gore
+            shapes, cut/detach/join of markings, zoom to 1000%, and SVG export.</li>
         <li>Drag-and-drop scene construction: SSP trucks, arrow boards, cones and tapers, responders, hazards and
             annotations, in feet.</li>
         <li>Compliance modes that audit a scene against SSP standard operating procedure, flag violations, and
             distinguish an SOP setup from an extended-safety one.</li>
-        <li>Communications with the Transportation Operations Center modelled as part of the scenario.</li>
         <li>Online, LAN and offline connectivity modes, so a training room does not depend on live map
             service.</li>
         <li>Scenes save and reload, so an exercise can be set up in advance and revisited.</li>
@@ -57,11 +60,12 @@
 
     <h2>Where it stands</h2>
     <p>
-        The scene-builder overlay — trucks, cones, audits and scene persistence — has been in use through
-        several major versions. The current work is the roadway foundation underneath it: replacing
-        illustrative pavement with a navigation-grade map of the actual interstate, so ramps, access lanes
-        and gores render the way a driver sees them. That foundation is what the release candidate
-        completes.
+        The scene builder — trucks, cones, audits and scene persistence — has been in use through several
+        major versions and is what the release candidate delivers. The roadway underneath it is now a
+        corridor-smoothed OpenStreetMap trace or a generated highway, finished by hand in the template editor;
+        Magnus does not produce navigation-grade or survey-accurate pavement. The Transportation Operations
+        Center communications panel on the main screen is a placeholder in this release: the scenario model
+        reserves a place for radio traffic, but no transcript is generated yet.
     </p>
 
     <h2>Who it is for</h2>
