@@ -20,9 +20,14 @@
 
 <main>
     <div class="panel">
-        <p><strong>Release candidate coming soon.</strong> Physics IDE is being prepared for its first release
-        candidate as a Linux <code>.deb</code> package. A download and the source repository will be linked here
-        when it is published.</p>
+        <p><strong>Version 9.0.0 is available for Linux</strong> (Debian / Ubuntu, x86-64). Download the
+        package, then install it with <code>sudo apt install ./physics-ide_latest_amd64.deb</code> and start it
+        from the application drawer or with <code>physics-ide</code>.</p>
+        <p><a class="cta" href="https://github.com/GPD-Research/physics-ide/releases/latest/download/physics-ide_latest_amd64.deb">Download for Linux (.deb)</a></p>
+        <p class="links">
+            <a href="https://github.com/GPD-Research/physics-ide/releases">All releases</a>
+            <a href="https://github.com/GPD-Research/physics-ide">Source on GitHub</a>
+        </p>
     </div>
 
     <p>
@@ -47,18 +52,29 @@
         <li>An AI Request Inspector and a context-load meter that show exactly what was sent, in what order,
             and what it cost in tokens — before and after each request.</li>
         <li>Manuscript search with section navigation, KaTeX rendering, and Pandoc export.</li>
+        <li>Local AI through Ollama as a first-class provider, alongside Gemini and OpenAI: a hardware probe,
+            a model catalog with fit and response-time estimates, a quantization selector for lighter
+            downloads, and one-click installation.</li>
+        <li>An agentic loop under your control: the AI can create, read, append to and edit files inside the
+            project root, run allow-listed commands and scratch calculations with inline figures, search the
+            index itself, and record decisions in an append-only project memory — with a git-style checkpoint
+            taken before every edit so anything can be reverted.</li>
+        <li>Task mode: hand a pane a multi-step goal and follow its plan with round and token budgets,
+            Pause, Approve-each-step and Stop.</li>
+        <li>Manuscript tools: Math Fixer (Unicode and shorthand math to clean LaTeX), master-axiom
+            compilation from the theory sources, master-manuscript assembly, and PDF / DOCX export.</li>
         <li>Everything stays on the machine: SQLite indexes, local embeddings, no server of ours in the loop.</li>
     </ul>
 
     <h2>Where it stands, and a note on AI models</h2>
     <p>
-        Version 8 is the release-candidate baseline; the work toward the first official release is
-        production hardening and efficient project-aware AI operation. Physics IDE currently drives cloud
-        AI providers. In day-to-day research use a serious theory consumes context quickly, and cloud
-        token pricing makes sustained work expensive. The intended fit is a <strong>local model served
-        through Ollama</strong>, which is not yet an option in the app but is the direction the release is
-        heading — the retrieval and prompt-assembly work already done is what makes a local model viable
-        for this workload.
+        Version 9 is the first public release. It follows a full interactive smoke test of the file-operation,
+        retrieval, checkpoint, task and scratch-computation subsystems on a mid-range laptop. In day-to-day
+        research use a serious theory consumes context quickly and cloud token pricing makes sustained work
+        expensive, so the intended fit is a <strong>local model served through Ollama</strong>: a 3B–7B
+        instruct model runs comfortably on a 16 GB machine for routine work, with a cloud provider in the
+        other pane for the heavy reasoning. The retrieval and prompt-assembly work is what keeps a local
+        model viable for this workload.
     </p>
 
     <h2>Who it is for</h2>
@@ -70,7 +86,7 @@
 
     <h2>Support</h2>
     <p>
-        Questions and early-access enquiries: <a href="mailto:gregorydearth@gmail.com">gregorydearth@gmail.com</a>.
+        Questions, bugs and feature requests: <a href="mailto:gregorydearth@gmail.com">gregorydearth@gmail.com</a>.
     </p>
 </main>
 
