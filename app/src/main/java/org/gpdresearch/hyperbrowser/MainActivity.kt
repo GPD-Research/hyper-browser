@@ -98,7 +98,6 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.material.icons.filled.ZoomOut
 import androidx.compose.material3.AlertDialog
@@ -357,10 +356,6 @@ private const val MAX_TEXTURE_EDGE = 8192
  * decoded, and a downscaled render loses detail to sampling that this headroom buys back.
  */
 private const val OVERVIEW_DETAIL = 2
-
-/** A saved development is rendered to the bitmap ceiling rather than to the size on screen. */
-private const val DEVELOPED_SAVE_EDGE = 8192
-private const val DEVELOPED_SAVE_QUALITY = 95
 
 /** High enough to reach 1:1 pixels on a gigapixel source; tiles keep the memory cost flat. */
 private const val MAX_SINGLE_ZOOM = 64f
@@ -3265,15 +3260,6 @@ private fun ImageViewerScreen(
     // The inspector shows the file's own pixels — TIFF at full resolution, RAW as sensor data —
     // instead of the embedded preview browsing uses.
     var inspect by rememberSaveable { mutableStateOf(false) }
-    // Within the inspector, the sensor data developed into a photograph rather than shown raw.
-    var inspectDeveloped by rememberSaveable { mutableStateOf(false) }
-    var developExposure by rememberSaveable { mutableFloatStateOf(0f) }
-    var developVibrance by rememberSaveable { mutableFloatStateOf(0f) }
-    // AdobeRGB by default: an editor can render its wider gamut down to sRGB, not the reverse.
-    var developProfile by rememberSaveable {
-        mutableStateOf(RawImage.OutputProfile.ADOBE_RGB)
-    }
-    var savingDeveloped by remember { mutableStateOf(false) }
     var showMinimap by rememberSaveable { mutableStateOf(true) }
     val scope = rememberCoroutineScope()
 
@@ -3284,9 +3270,6 @@ private fun ImageViewerScreen(
      */
     fun showImage(uri: Uri) {
         inspect = false
-        inspectDeveloped = false
-        developExposure = 0f
-        developVibrance = 0f
         currentUri = uri
     }
 
@@ -3355,10 +3338,6 @@ private fun ImageViewerScreen(
         stage,
         viewport,
         inspect,
-        inspectDeveloped,
-        developExposure,
-        developVibrance,
-        developProfile,
         imageRevision,
     ) {
         detail = null
@@ -3371,12 +3350,6 @@ private fun ImageViewerScreen(
                         currentUri,
                         viewport,
                         inspect,
-                        inspectDeveloped,
-                        RawImage.DevelopSettings(
-                            exposure = developExposure,
-                            vibrance = developVibrance,
-                            profile = developProfile,
-                        ),
                     )
                 }
             } finally {
@@ -3524,23 +3497,6 @@ private fun ImageViewerScreen(
         }
     }
 
-    fun saveDeveloped(frame: RawImage.DevelopedImage) {
-        if (savingDeveloped) return
-        savingDeveloped = true
-        scope.launch {
-            val saved = withContext(Dispatchers.IO) {
-                saveDevelopedImage(activity, currentUri, frame)
-            }
-            savingDeveloped = false
-            if (saved == null) {
-                Toast.makeText(activity, "Could not save the developed image", Toast.LENGTH_LONG).show()
-            } else {
-                Toast.makeText(activity, "Saved as $saved", Toast.LENGTH_LONG).show()
-                listingRefresh += 1
-            }
-        }
-    }
-
     fun requestRotate() {
         val cost = ImageRotation.cost(activity, currentDoc?.size ?: 0L, isRawFile)
         if (inspectable && cost.risky) pendingRotate = cost else rotateCurrent()
@@ -3606,24 +3562,6 @@ private fun ImageViewerScreen(
                         if (targets.isNotEmpty()) pendingGalleryDelete = targets
                     }
                     if (stage == GalleryStage.SINGLE) {
-                        if (inspect && isRawFile) {
-                            GalleryAction(
-                                icon = Icons.Filled.Tune,
-                                description = if (inspectDeveloped) {
-                                    "Show sensor data"
-                                } else {
-                                    "Develop the sensor data"
-                                },
-                                tint = if (inspectDeveloped) {
-                                    MaterialTheme.colorScheme.primary
-                                } else {
-                                    LocalContentColor.current
-                                },
-                            ) {
-                                inspectDeveloped = !inspectDeveloped
-                                resetTransform()
-                            }
-                        }
                         GalleryAction(Icons.Filled.RotateRight, "Rotate 90° clockwise") { requestRotate() }
                         GalleryAction(Icons.Filled.ZoomOut, "Zoom out") { zoomOut() }
                         GalleryAction(Icons.Filled.ZoomIn, "Zoom in") { zoomIn() }
@@ -3933,13 +3871,6 @@ private fun ImageViewerScreen(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(2.dp),
                     ) {
-                        if (inspect && isRawFile) {
-                            GalleryMenuButton(if (inspectDeveloped) "Show sensor data" else "Develop sensor data") {
-                                inspectDeveloped = !inspectDeveloped
-                                resetTransform()
-                                showMenu = false
-                            }
-                        }
                         if (inspect) {
                             GalleryMenuButton(if (showMinimap) "Hide locator" else "Show locator") {
                                 showMinimap = !showMinimap
@@ -4023,23 +3954,6 @@ private fun ImageViewerScreen(
                 else -> single?.let { listOfNotNull(it.source, it.notice).joinToString(" — ") }
                     ?.takeIf { it.isNotEmpty() }
             }
-            val developedFrame = single?.developed
-            if (developedFrame != null && stage == GalleryStage.SINGLE && !showMenu) {
-                DevelopControls(
-                    exposure = developExposure,
-                    vibrance = developVibrance,
-                    profile = developProfile,
-                    onProfile = { developProfile = it },
-                    saving = savingDeveloped,
-                    onExposure = { developExposure = it },
-                    onVibrance = { developVibrance = it },
-                    onSave = { saveDeveloped(developedFrame) },
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(start = 12.dp, end = 12.dp, bottom = 44.dp),
-                )
-            }
-
             // The tapped-up menu occupies the same corner of the screen as the label.
             if (inspect && provenance != null && stage == GalleryStage.SINGLE && !showMenu) {
                 Text(
@@ -4129,102 +4043,6 @@ private fun ImageViewerScreen(
             }
         }
     }
-}
-
-/**
- * Exposure, vibrance and saving for a developed frame. The sliders only commit when they are let
- * go: every change re-develops the sensor data, which is seconds of work on a large frame.
- */
-@Composable
-private fun DevelopControls(
-    exposure: Float,
-    vibrance: Float,
-    profile: RawImage.OutputProfile,
-    saving: Boolean,
-    onExposure: (Float) -> Unit,
-    onVibrance: (Float) -> Unit,
-    onProfile: (RawImage.OutputProfile) -> Unit,
-    onSave: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    var draft by remember(exposure) { mutableFloatStateOf(exposure) }
-    var vibranceDraft by remember(vibrance) { mutableFloatStateOf(vibrance) }
-    Surface(
-        modifier = modifier,
-        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f),
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Text(
-                text = String.format(Locale.US, "%+.1f EV", draft),
-                style = MaterialTheme.typography.labelSmall,
-            )
-            Slider(
-                value = draft,
-                onValueChange = { draft = it },
-                onValueChangeFinished = { onExposure(draft) },
-                valueRange = -3f..3f,
-                steps = 23,
-                modifier = Modifier.width(120.dp),
-            )
-            Text(
-                text = String.format(Locale.US, "Vib %d", (vibranceDraft * 100f).roundToInt()),
-                style = MaterialTheme.typography.labelSmall,
-            )
-            Slider(
-                value = vibranceDraft,
-                onValueChange = { vibranceDraft = it },
-                onValueChangeFinished = { onVibrance(vibranceDraft) },
-                valueRange = 0f..1f,
-                steps = 19,
-                modifier = Modifier.width(110.dp),
-            )
-            TextButton(
-                onClick = {
-                    onProfile(
-                        if (profile == RawImage.OutputProfile.ADOBE_RGB) {
-                            RawImage.OutputProfile.SRGB
-                        } else {
-                            RawImage.OutputProfile.ADOBE_RGB
-                        }
-                    )
-                },
-                enabled = !saving,
-            ) {
-                Text(profile.label)
-            }
-            TextButton(onClick = onSave, enabled = !saving) {
-                Text(if (saving) "Saving…" else "Save JPEG")
-            }
-        }
-    }
-}
-
-/**
- * Writes the developed frame beside the RAW as a JPEG, through the same provider the RAW came
- * from. It is rendered as large as a bitmap may be rather than at the size on screen, so the
- * saved file is the frame rather than the view of it. Returns the name written.
- */
-private fun saveDevelopedImage(
-    activity: ComponentActivity,
-    uri: Uri,
-    frame: RawImage.DevelopedImage,
-): String? {
-    val parent = Storage.parent(activity, uri) ?: return null
-    val rawName = Storage.entry(activity, uri)?.name ?: uri.lastPathSegment ?: return null
-    val name = rawName.substringBeforeLast('.', rawName) + "-developed.jpg"
-    val bitmap = frame.render(DEVELOPED_SAVE_EDGE, DEVELOPED_SAVE_EDGE, null) ?: return null
-    val bytes = ByteArrayOutputStream().also { out ->
-        if (!bitmap.compress(Bitmap.CompressFormat.JPEG, DEVELOPED_SAVE_QUALITY, out)) return null
-    }.toByteArray()
-    bitmap.recycle()
-    val written = ByteArrayInputStream(bytes).use {
-        Storage.writeChild(activity, parent, name, "image/jpeg", it)
-    }
-    return if (written == null) null else name
 }
 
 @Composable
@@ -4392,8 +4210,6 @@ private data class SingleImage(
     val tiff: RawImage.TiffImage? = null,
     /** Set when the inspector is showing undemosaiced sensor data. */
     val sensor: RawImage.SensorImage? = null,
-    /** Set when the inspector is showing the sensor data developed into a photograph. */
-    val developed: RawImage.DevelopedImage? = null,
     /** What the inspector is showing: sensor data, full-resolution TIFF or embedded preview. */
     val source: String? = null,
     /** Why the inspector could not show the file's own pixels, when it could not. */
@@ -4420,8 +4236,6 @@ private fun loadSingleImage(
     uri: Uri,
     viewport: IntSize = IntSize.Zero,
     inspect: Boolean = false,
-    developed: Boolean = false,
-    develop: RawImage.DevelopSettings = RawImage.DevelopSettings(),
 ): SingleImage? {
     val source = imageSource(activity, uri) ?: return null
 
@@ -4437,7 +4251,7 @@ private fun loadSingleImage(
     // an embedded preview, and would hand back the very image the gallery already shows.
     if (inspect) {
         sourceBytes()?.let { (byteSource, _) ->
-            inspectorImage(byteSource, viewport, developed, develop)?.let { return it }
+            inspectorImage(byteSource, viewport)?.let { return it }
         }
     }
 
@@ -4539,15 +4353,8 @@ private fun tiffSingleImage(
 private fun inspectorImage(
     byteSource: ByteSource,
     viewport: IntSize,
-    developed: Boolean,
-    develop: RawImage.DevelopSettings,
 ): SingleImage? {
     val sensorImage = RawImage.openSensor(byteSource)
-    if (developed) {
-        sensorImage?.developed(develop)?.let { frame ->
-            developedInspectorImage(frame, viewport)?.let { return it }
-        }
-    }
     sensorImage?.let { sensor ->
         val overview = sensor.render(viewport.width, viewport.height, null) ?: return@let
         return SingleImage(
@@ -4568,29 +4375,6 @@ private fun inspectorImage(
         byteSource,
         viewport,
         "Full resolution ${tiff.width}\u00d7${tiff.height}",
-    )
-}
-
-/**
- * The sensor data developed: the frame the camera would have produced, minus every heuristic it
- * would have applied. One pixel per photosite, so unlike the undeveloped view the inspector's
- * coordinates are the sensor's own.
- */
-private fun developedInspectorImage(frame: RawImage.DevelopedImage, viewport: IntSize): SingleImage? {
-    val overview = frame.render(viewport.width, viewport.height, null) ?: return null
-    val profile = if (frame.profiled) {
-        "camera profile, ${frame.colourSpace.label}"
-    } else {
-        "no camera profile"
-    }
-    return SingleImage(
-        overview = overview.asImageBitmap(),
-        width = frame.width,
-        height = frame.height,
-        sample = (frame.width / overview.width).coerceAtLeast(1),
-        canTile = overview.width < frame.width,
-        developed = frame,
-        source = "Developed ${frame.width}\u00d7${frame.height} ($profile)",
     )
 }
 
@@ -4651,12 +4435,6 @@ private fun decodeRegion(
     sample: Int,
     viewport: IntSize,
 ): ImageBitmap? {
-    image.developed?.let { frame ->
-        // A developed frame is one pixel per photosite, so the region needs no conversion.
-        return runCatching {
-            frame.render(viewport.width, viewport.height, region)
-        }.getOrNull()?.asImageBitmap()
-    }
     image.sensor?.let { sensor ->
         // The inspector's coordinates are filter cells; the sensor renders photosites.
         val sensorRegion = android.graphics.Rect(
