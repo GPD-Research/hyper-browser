@@ -2,6 +2,16 @@
 
 Lean Android dual-pane file browser built with Kotlin and Jetpack Compose.
 
+## Version 4.7.0 (October 2026)
+
+### RAW inspector: Develop retired
+
+- The inspector's developed mode is gone, along with its exposure, vibrance and colour-profile
+  controls and the Save button. A RAW opens on its embedded JPEG as before, and the inspector
+  still shows the undemosaiced sensor data. Developing belongs to an editor, which discards the
+  embedded JPEG and has a far fuller RAW pipeline; astro calibration and stacking are moving to
+  [SimpleStax](https://github.com/GPD-Research/SimpleStax).
+
 ## Version 4.6.1 (September 2026)
 
 ### Gallery: single-image controls
