@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SimpleStax — guided astrophotography calibration and stacking for Linux</title>
+<meta name="description" content="SimpleStax is a Linux desktop app that plans an astrophotography night by subject, files the light, dark, flat and bias frames, and calibrates and stacks them automatically.">
+<link rel="icon" href="store/simplestax-icon.svg">
+<link rel="stylesheet" href="style.css?v=2">
+</head>
+<body>
+<nav class="crumbs"><a href="index.html">GPD Research</a> / SimpleStax</nav>
+<header>
+    <img src="store/simplestax-icon.svg" alt="SimpleStax icon" width="56" height="56">
+    <div>
+        <h1>SimpleStax</h1>
+        <p class="tagline">Guided calibration and stacking for astrophotography on Linux.</p>
+    </div>
+</header>
+
+<main>
+    <div class="panel">
+        <p><strong>SimpleStax is in early development</strong> for Linux (Debian / Ubuntu, x86-64). Planning,
+        the shooting checklist and frame import work today; calibration and stacking are next. Install it with
+        <code>sudo apt install ./simplestax_latest_amd64.deb</code> and start it from the application drawer
+        or with <code>simplestax</code>.</p>
+        <p><a class="cta" href="https://github.com/GPD-Research/SimpleStax/releases/latest/download/simplestax_latest_amd64.deb">Download for Linux (.deb)</a></p>
+        <p class="links">
+            <a href="https://github.com/GPD-Research/SimpleStax/releases">All releases</a>
+            <a href="https://github.com/GPD-Research/SimpleStax">Source on GitHub</a>
+        </p>
+    </div>
+
+    <p>
+        A good astrophoto from a plain tripod is dozens or hundreds of short exposures, plus dark, flat and
+        bias frames to cancel the sensor's noise and the lens's vignetting and dust, all aligned and averaged.
+        The tools that do this well ask you to understand every step before they give a result. SimpleStax
+        walks the night in order — Plan, Shoot, Import, Calibrate, Stack, Export — and picks the settings
+        for the kind of subject you are shooting, so a first stack looks right without hand-tuning.
+    </p>
+
+    <h2>What it does</h2>
+    <ul>
+        <li>Subject workflows for planetary and lunar, nebulae, galaxies, star fields and the Milky Way, each
+            with its own frame counts and processing.</li>
+        <li>A planning step that works out the longest untracked exposure for your camera and lens (the NPF
+            rule), rounded down to a shutter speed the camera actually offers.</li>
+        <li>A shooting checklist for the night: lights first, then darks, flats and bias.</li>
+        <li>A frame library: pick a shot profile and a subject, and SimpleStax files the frames by night and
+            kind, renames lights with the subject and date, and keeps darks and flats with the night they were
+            shot so a summer and a winter session never share calibration.</li>
+        <li>A frame picker that reads each RAW's EXIF and dims frames that don't match the profile, while still
+            letting you pick frames from manual lenses that record nothing.</li>
+        <li>Planned: automatic calibration and stacking, background and colour correction, and a stretch fitted
+            to the subject, with every automatic setting available as a slider before export.</li>
+        <li>The result is a linear TIFF or FITS to finish in a full editor; SimpleStax does not try to be one.</li>
+    </ul>
+
+    <h2>Who it is for</h2>
+    <p>
+        Photographers with a camera and a tripod who want to stack astrophotos on Linux without learning a
+        professional pipeline first, and who want to see why each kind of frame is needed along the way.
+    </p>
+
+    <h2>Support</h2>
+    <p>
+        Questions, bugs and feature requests: <a href="mailto:gregorydearth@gmail.com">gregorydearth@gmail.com</a>.
+    </p>
+</main>
+
+<footer>
+    <a href="index.html">All projects</a>
+    <a href="privacy.html">Privacy policy</a>
+    <a href="terms.html">Terms of service</a>
+    <span>&copy; 2026 GPD Research</span>
+</footer>
+</body>
+</html>
