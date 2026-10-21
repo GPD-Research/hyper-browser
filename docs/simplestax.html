@@ -20,10 +20,12 @@
 
 <main>
     <div class="panel">
-        <p><strong>SimpleStax is in early development</strong> for Linux (Debian / Ubuntu, x86-64). Planning,
-        the shooting checklist and frame import work today; calibration and stacking are next.</p>
-        <p><strong>Download coming soon.</strong> A Debian / Ubuntu package will be posted here once stacking works.</p>
+        <p><strong>SimpleStax is a pre-release</strong> for Linux (Debian / Ubuntu, x86-64). Galaxies, nebulae,
+        star fields and the Milky Way work from start to end: plan, shoot, import, calibrate, stack and finish.
+        Planetary and lunar stacking is coming later.</p>
+        <p><a class="cta" href="https://github.com/GPD-Research/SimpleStax/releases/latest/download/simplestax_latest_amd64.deb">Download pre-release (.deb)</a></p>
         <p class="links">
+            <a href="https://github.com/GPD-Research/SimpleStax/releases">All releases</a>
             <a href="https://github.com/GPD-Research/SimpleStax">Source on GitHub</a>
         </p>
     </div>
@@ -32,7 +34,7 @@
         A good astrophoto from a plain tripod is dozens or hundreds of short exposures, plus dark, flat and
         bias frames to cancel the sensor's noise and the lens's vignetting and dust, all aligned and averaged.
         The tools that do this well ask you to understand every step before they give a result. SimpleStax
-        walks the night in order — Plan, Shoot, Import, Calibrate, Stack, Export — and picks the settings
+        walks the night in order — Plan, Shoot, Import, Calibrate, Stack, Finish — and picks the settings
         for the kind of subject you are shooting, so a first stack looks right without hand-tuning.
     </p>
 
@@ -48,9 +50,13 @@
             shot so a summer and a winter session never share calibration.</li>
         <li>A frame picker that reads each RAW's EXIF and dims frames that don't match the profile, while still
             letting you pick frames from manual lenses that record nothing.</li>
-        <li>Planned: automatic calibration and stacking, background and colour correction, and a stretch fitted
-            to the subject, with every automatic setting available as a slider before export.</li>
-        <li>The result is a linear TIFF or FITS to finish in a full editor; SimpleStax does not try to be one.</li>
+        <li>Calibration with darks, flats and bias when you have them, and lights-only stacking when you don't.
+            Untracked tripod frames are aligned on their stars, and satellites and hot pixels are rejected.</li>
+        <li>Light-pollution gradient removal and the camera's own colour matrix, so the sky comes out flat and
+            neutral.</li>
+        <li>An automatic finish for the subject: black point, stretch, star colour, colour-noise reduction,
+            saturation and green removal (SCNR), each set from the image and each on a slider before export.</li>
+        <li>Exports a finished 16-bit TIFF and PNG, and keeps the linear FITS and TIFF for a full editor.</li>
     </ul>
 
     <h2>Who it is for</h2>
