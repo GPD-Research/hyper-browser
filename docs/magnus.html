@@ -19,23 +19,30 @@
 </header>
 
 <main>
-    <div class="panel">
-        <p><strong>The latest release (currently 11.0.7) is available</strong> for Linux, Windows and macOS. Each
-        download bundles the local spatial server and web app; after installing, launch <em>Magnus</em> from the
-        application drawer, Start menu or Applications folder, and it opens in your browser.</p>
-        <p>
-            <a class="cta" href="https://github.com/GPD-Research/Magnus/releases/latest/download/magnus_latest_amd64.deb">Download for Linux (.deb)</a>
-            <a class="cta" href="https://github.com/GPD-Research/Magnus/releases/latest/download/magnus_latest_x64-setup.exe">Download for Windows (.exe)</a>
-            <a class="cta" href="https://github.com/GPD-Research/Magnus/releases/latest/download/magnus_latest_universal.dmg">Download for macOS (.dmg)</a>
-        </p>
-        <p>The Windows and macOS installers are not code-signed yet. On Windows, choose <em>More info → Run anyway</em>
-        if SmartScreen warns. On macOS, drag Magnus to Applications, then right-click it and choose <em>Open</em> the
-        first time.</p>
-        <p class="links">
-            <a href="https://github.com/GPD-Research/Magnus/releases">All releases</a>
-            <a href="https://github.com/GPD-Research/Magnus">Source on GitHub</a>
-        </p>
+    <div class="panel" id="licensing">
+        <p><strong>Magnus is available by license</strong> for Windows, macOS and Linux. Each install bundles the
+        local spatial server and web app and runs offline on the machine. To ask about licensing, a pilot or
+        adding your region's routes, send a request below or email
+        <a href="mailto:gregorydearth@gmail.com">gregorydearth@gmail.com</a> directly.</p>
+        <form class="contact" id="licensing-form">
+            <label>Name <input name="name" required autocomplete="name"></label>
+            <label>Organization <input name="organization" autocomplete="organization"></label>
+            <label>Your email <input name="email" type="email" required autocomplete="email"></label>
+            <label>Message <textarea name="message" rows="5" required>I'd like licensing information for Magnus.</textarea></label>
+            <button class="cta" type="submit">Request licensing info</button>
+            <p class="muted">This opens your email app with the request filled in, ready to send.</p>
+        </form>
     </div>
+    <script>
+        document.getElementById('licensing-form').addEventListener('submit', (event) => {
+            event.preventDefault()
+            const form = new FormData(event.target)
+            const field = (name) => (form.get(name) || '').toString().trim()
+            const body = `${field('message')}\n\nName: ${field('name')}\nOrganization: ${field('organization')}\nEmail: ${field('email')}`
+            window.location.href = 'mailto:gregorydearth@gmail.com?subject=' +
+                encodeURIComponent('Magnus licensing request') + '&body=' + encodeURIComponent(body)
+        })
+    </script>
 
     <p>
         Virginia DOT Safety Service Patrol crews manage crashes, debris and disabled vehicles on live
@@ -87,7 +94,7 @@
 
     <h2>Support</h2>
     <p>
-        Questions and early-access enquiries: <a href="mailto:gregorydearth@gmail.com">gregorydearth@gmail.com</a>.
+        Questions and licensing: <a href="#licensing">request form</a> or <a href="mailto:gregorydearth@gmail.com">gregorydearth@gmail.com</a>.
     </p>
 </main>
 
