@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ptolemaic Model Viewer</title>
+<style>
+  :root { --bg: #0b0e17; --panel: #141a28; --line: #263049; --text: #d9dfec; --dim: #8a94ad; --accent: #e7b84a; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  #app { display: flex; height: 100%; }
+  #stage { flex: 1; position: relative; min-width: 0; }
+  canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+  canvas.dragging { cursor: grabbing; }
+  #clock { position: absolute; left: 14px; top: 10px; pointer-events: none; }
+  #clock .date { font: 600 20px/1.2 ui-monospace, Menlo, Consolas, monospace; }
+  #clock .sub { color: var(--dim); font-size: 12px; }
+  #hint { position: absolute; left: 14px; bottom: 10px; color: var(--dim); font-size: 12px; pointer-events: none; }
+  aside { width: 340px; background: var(--panel); border-left: 1px solid var(--line); overflow-y: auto; padding: 14px 16px; }
+  h1 { font-size: 16px; margin: 0 0 2px; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); margin: 18px 0 8px; }
+  .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  button, select, input[type=text] { background: #1d2538; color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 5px 9px; font: inherit; }
+  button:hover { border-color: var(--accent); }
+  button.on { background: var(--accent); color: #111; border-color: var(--accent); }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  #speedLabel { font: 600 15px ui-monospace, Menlo, Consolas, monospace; color: var(--accent); }
+  .presets button { padding: 3px 7px; font-size: 12px; }
+  label.chk { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  td, th { padding: 3px 4px; text-align: left; }
+  th { color: var(--dim); font-weight: 500; font-size: 12px; }
+  td.num { font-family: ui-monospace, Menlo, Consolas, monospace; white-space: nowrap; }
+  tr.body { cursor: pointer; }
+  tr.body:hover td { background: #1d2538; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
+  .retro { color: #ff7b72; font-weight: 700; }
+  .note { color: var(--dim); font-size: 12px; }
+  @media (max-width: 760px) { #app { flex-direction: column; } #stage { height: 62vh; flex: none; }
+    aside { width: auto; border-left: 0; border-top: 1px solid var(--line); } }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage">
+    <canvas id="sky"></canvas>
+    <div id="clock"><div class="date" id="date"></div><div class="sub" id="dateSub"></div></div>
+    <div id="hint">Scroll to zoom, drag to pan, double-click to reset. Click a body in the table to isolate it.</div>
+  </div>
+  <aside>
+    <h1>Ptolemaic Model</h1>
+    <div class="note">Almagest kinematics: eccentric deferents, equants, epicycles, and the lunar and Mercury crank mechanisms, with Ptolemy's own parameters and epoch.</div>
+
+    <h2>Time</h2>
+    <div class="row">
+      <button id="play" class="on">Pause</button>
+      <button id="reverse">Reverse</button>
+      <button id="now">Now</button>
+    </div>
+    <div style="margin-top:10px">Speed: <span id="speedLabel"></span></div>
+    <input id="speed" type="range" min="0" max="800" step="1" value="0">
+    <div class="row presets">
+      <button data-speed="1">1:1</button>
+      <button data-speed="3600">1 h/s</button>
+      <button data-speed="86400">1 d/s</button>
+      <button data-speed="604800">1 wk/s</button>
+      <button data-speed="2629800">1 mo/s</button>
+      <button data-speed="31557600">1 yr/s</button>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <input id="jump" type="text" placeholder="YYYY-MM-DD (e.g. 0137-06-20, -500-01-01)" style="flex:1;min-width:0">
+      <button id="go">Go</button>
+    </div>
+
+    <h2>View</h2>
+    <div class="row">
+      <select id="scale">
+        <option value="schematic">Schematic spacing</option>
+        <option value="hypotheses">Planetary Hypotheses distances</option>
+      </select>
+      <select id="focus"></select>
+    </div>
+    <label class="chk"><input type="checkbox" id="showDeferent" checked> Deferents and their centres</label>
+    <label class="chk"><input type="checkbox" id="showEpicycle" checked> Epicycles and radius arms</label>
+    <label class="chk"><input type="checkbox" id="showEquant" checked> Equants and uniform-motion lines</label>
+    <label class="chk"><input type="checkbox" id="showSight"> Sight lines from Earth</label>
+    <label class="chk">Trails (path relative to Earth):
+      <select id="trail">
+        <option value="short">One loop</option>
+        <option value="long">Many loops</option>
+        <option value="off">Off</option>
+      </select>
+    </label>
+    <label class="chk"><input type="checkbox" id="showZodiac" checked> Zodiac ring</label>
+
+    <h2>Apparent positions</h2>
+    <table>
+      <thead><tr><th>Body</th><th>Longitude</th><th>Motion</th></tr></thead>
+      <tbody id="table"></tbody>
+    </table>
+    <div class="note" style="margin-top:6px"><span class="retro">R</span> = retrograde (moving westward against the stars).</div>
+
+    <h2>Legend</h2>
+    <div class="note">
+      ● Earth (fixed, centre) &nbsp; + deferent centre &nbsp; × equant &nbsp; ◇ Moon prosneusis point<br>
+      Dashed line: the equant line, along which the epicycle centre sweeps equal angles in equal times.<br>
+      Schematic spacing gives every body its own ring and keeps Ptolemy's ratios within each body. Planetary Hypotheses uses his absolute nesting distances in Earth radii (zoom in for the inner bodies).<br>
+      Positions are Ptolemy's predictions extrapolated from his epoch, not the modern sky: they run about 1&deg; behind the real sky in his day and drift to about 10&deg; behind today because his year is slightly too long.
+    </div>
+  </aside>
+</div>
+<script src="ptolemy.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

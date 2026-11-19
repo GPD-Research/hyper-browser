@@ -307,3 +307,26 @@ footer a {
     color: var(--muted);
     margin: 0;
 }
+
+.model {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.25rem 1.5rem;
+    margin: 1.5rem 0;
+}
+
+.model img {
+    width: 100%;
+    height: auto;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+}
+
+.model h2 {
+    margin: 0.9rem 0 0.4rem;
+}
+
+.model .links .cta {
+    margin-right: 1.25rem;
+}

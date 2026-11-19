@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>String Scope: vibrating string states</title>
+  <style>
+    :root { --bg:#05080a; --panel:#0d1417; --line:#1f3a33; --phos:#39ff9c; --dim:#6b8f84; --amber:#ffcf4a; --cyan:#4ad8ff; --red:#ff6b6b; --text:#d8f5ea; }
+    * { box-sizing: border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:14px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    header { padding:.7rem 1rem; border-bottom:1px solid var(--line); display:flex; gap:1rem; align-items:baseline; flex-wrap:wrap; }
+    header h1 { margin:0; font-size:1.15rem; color:var(--phos); letter-spacing:.05em; }
+    header a { color:var(--dim); }
+    .wrap { display:grid; grid-template-columns:270px minmax(0,1fr) 360px; gap:.8rem; padding:.8rem; }
+    @media (max-width:1150px) { .wrap { grid-template-columns:1fr; } }
+    .panel { background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:.8rem; }
+    .panel h2 { margin:0 0 .5rem; font-size:.8rem; color:var(--dim); text-transform:uppercase; letter-spacing:.12em; }
+    .ctl { margin:.45rem 0; }
+    .ctl label { display:flex; justify-content:space-between; font-size:.8rem; color:var(--dim); }
+    .ctl label b { color:var(--phos); font-weight:600; }
+    input[type=range] { width:100%; accent-color:var(--phos); }
+    select, button { background:#0a1013; color:var(--text); border:1px solid var(--line); border-radius:4px; padding:.3rem .5rem; font:inherit; }
+    button { cursor:pointer; } button:hover { border-color:var(--phos); }
+    .seg { display:flex; gap:.3rem; } .seg button { flex:1; } .seg button.on { background:#123026; border-color:var(--phos); color:var(--phos); }
+    .bank { border-top:1px dashed var(--line); margin-top:.6rem; padding-top:.4rem; }
+    .row { display:flex; gap:.4rem; align-items:center; }
+    .scope { position:relative; width:100%; aspect-ratio:1.25; }
+    .scope canvas, .ch2 canvas { position:absolute; inset:0; width:100%; height:100%; }
+    .ch2 { position:relative; width:100%; height:180px; margin-top:.6rem; }
+    .tag { position:absolute; font-size:.72rem; color:var(--dim); pointer-events:none; }
+    .particle { text-align:center; padding:.6rem 0 .8rem; border-bottom:1px solid var(--line); }
+    .particle .sym { font:600 3.2rem/1.1 "Times New Roman", serif; color:var(--phos); text-shadow:0 0 12px #39ff9c88; }
+    .particle .sym.bad { color:var(--red); text-shadow:none; }
+    .particle .name { font-size:1.15rem; margin-top:.3rem; }
+    .particle .detail { color:var(--dim); font-size:.8rem; margin-top:.3rem; }
+    .parts { margin:.5rem 0 0; padding:0; list-style:none; font-size:.85rem; }
+    .parts li { display:flex; justify-content:space-between; padding:.15rem 0; }
+    .parts .s { font-family:"Times New Roman", serif; font-size:1.1rem; color:var(--amber); }
+    table.read { width:100%; border-collapse:collapse; margin:.6rem 0; font-size:.85rem; }
+    table.read td { padding:.15rem 0; } table.read td:last-child { text-align:right; color:var(--phos); }
+    .eq { font-family:"Times New Roman", serif; font-size:1.05rem; line-height:1.9; }
+    .eq .ln { margin:.25rem 0; } .eq .num { color:var(--dim); font-size:.95rem; }
+    .eq span.t { padding:0 .1rem; border-radius:3px; transition:background .6s; }
+    .eq span.t.flash { background:#3a5c1f; }
+    .ok { color:var(--phos); } .bad { color:var(--red); }
+    .note { color:var(--dim); font-size:.75rem; margin-top:.6rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>STRING SCOPE</h1>
+    <span style="color:var(--dim)">Bosonic string on a circle of radius R, in units α′ = 1. Each knob setting is one quantum state.</span>
+    <a href="index.html">KKLT potential explorer</a>
+  </header>
+  <div class="wrap">
+    <section class="panel" id="controls">
+      <h2>Controls</h2>
+      <div class="ctl seg"><button id="m-closed" class="on">Closed loop</button><button id="m-open">Open string</button></div>
+      <div class="ctl"><label>Preset</label><select id="preset" style="width:100%"></select></div>
+      <div class="ctl"><label>Radius R <b id="R-v"></b></label><input type="range" id="R" min="0.5" max="3" step="0.1" value="1.5"></div>
+      <div class="closed-only">
+        <div class="ctl"><label>KK momentum k <b id="k-v"></b></label><input type="range" id="k" min="-3" max="3" step="1" value="0"></div>
+        <div class="ctl"><label>Winding w <b id="w-v"></b></label><input type="range" id="w" min="-3" max="3" step="1" value="0"></div>
+        <div class="ctl"><button id="tdual" style="width:100%">T-duality: R → 1/R, k ↔ w</button></div>
+      </div>
+      <div class="open-only">
+        <div class="ctl"><label>Brane separation L <b id="L-v"></b></label><input type="range" id="L" min="0" max="10" step="0.5" value="0"></div>
+      </div>
+      <div id="banks"></div>
+      <div class="bank">
+        <div class="ctl"><label>Scope speed (τ per second) <b id="spd-v"></b></label><input type="range" id="spd" min="0" max="3" step="0.1" value="1"></div>
+        <div class="row"><button id="play" style="flex:1">Pause</button><select id="persist" style="flex:1"><option value="0.25">Short trails</option><option value="0.07">Long trails</option><option value="1">No trails</option></select></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>CH 1: the string. The dashed ring is the compact dimension y, x¹ is radial, and x² is drawn at 45° as if into the page</h2>
+      <div class="scope"><canvas id="bg"></canvas><canvas id="fg"></canvas></div>
+      <h2 style="margin-top:.6rem">CH 2–4: displacement vs σ</h2>
+      <div class="ch2"><canvas id="trace"></canvas>
+        <span class="tag" style="left:8px;top:4px;color:var(--phos)">x¹ (radial)</span>
+        <span class="tag" style="left:110px;top:4px;color:var(--amber)">x² (into page)</span>
+        <span class="tag" style="left:250px;top:4px;color:var(--cyan)">δy (along ring)</span>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="particle">
+        <div class="sym" id="p-sym"></div>
+        <div class="name" id="p-name"></div>
+        <div class="detail" id="p-detail"></div>
+        <ul class="parts" id="p-parts"></ul>
+      </div>
+      <table class="read">
+        <tr><td>α′M²</td><td id="r-m2"></td></tr>
+        <tr><td>Mass M (string units 1/√α′)</td><td id="r-m"></td></tr>
+        <tr><td>Oscillator levels N, Ñ</td><td id="r-n"></td></tr>
+        <tr class="closed-only"><td>Level matching N − Ñ = kw</td><td id="r-lm"></td></tr>
+      </table>
+      <h2>The math behind the trace</h2>
+      <div class="eq" id="eq"></div>
+      <p class="note">This is the textbook bosonic string (26-D, so it has a tachyon) with one dimension curled into a circle. It is not the full Calabi–Yau compactification of Type IIB KKLT. It shows how particles appear as string vibrations, and how the size of the extra dimension (the radion, a toy version of KKLT's volume modulus t) shifts the mass tower. Amplitudes show the classical coherent-state size, which is proportional to √(q/n).</p>
+    </section>
+  </div>
+  <script src="strings.js"></script>
+  <script src="string_scope.js"></script>
+</body>
+</html>

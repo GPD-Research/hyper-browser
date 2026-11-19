@@ -1,0 +1,38 @@
+name: Sync physics models
+
+# Keeps docs/models/ (the viewers on gpd-research.com) identical to
+# the viewer folders on main in Ptolemaic_model, KKLT_String_Cosmology and Lambda_CDM.
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+
+concurrency:
+  group: sync-models
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Copy viewers
+        run: .github/scripts/sync-models.sh "$RUNNER_TEMP/models"
+
+      - name: Commit changes and rebuild the site
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git add docs/models
+          if git diff --cached --quiet; then echo "Models already up to date."; exit 0; fi
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -m "Sync physics models from their repos"
+          git push
+          # Pushes made with the workflow token may not trigger a Pages build; request one.
+          gh api -X POST "repos/${{ github.repository }}/pages/builds" || true
